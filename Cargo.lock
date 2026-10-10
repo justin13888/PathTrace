@@ -768,6 +768,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "pt-wire"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "proptest",
+ "pt-format",
+]
+
+[[package]]
 name = "quick-error"
 version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
