@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/aqm-ecn/01a12826-6590-7063-95c6-7002085cdcfc.ptf
+content_digest: 2209fc286135c05d7f98026bae0556f8b0461f458a460d56125f457078b4998d
+packets a_to_b: 47071
+packets b_to_a: 136930
+session: 903cc3b9

@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/rate-step/01a12823-4aab-7190-b102-2000fb4a6d14.ptf
+content_digest: 1e81069c5a79e2ec6f0ced8f72fa06bd516998e801af17be190fedb48a8d8102
+packets a_to_b: 34771
+packets b_to_a: 30227
+session: 147b4e8a

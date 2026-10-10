@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/rate-delay-asym/01a12823-4ac8-70ed-9b32-44374427874a.ptf
+content_digest: 1737513102f7f16e11328b9e0954cfe2800e6d2b70ade91d19d090392e5d7e8c
+packets a_to_b: 46960
+packets b_to_a: 19841
+session: 8c753fdd
