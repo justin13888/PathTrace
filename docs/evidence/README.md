@@ -29,3 +29,4 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 
 | ID | Title | Verdict | Requirements |
 |---|---|---|---|
+| [EXP-0001](EXP-0001-ptf-encoding-bakeoff/) | PTF raw-layer encoding bake-off | pass | REQ-FMT-005, REQ-FMT-015 |
