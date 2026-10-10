@@ -124,6 +124,7 @@ A failing phase never aborts a session; it is recorded as an event with its reas
 
 ### REQ-PRB-021: Versioned wire protocol
 - status: planned
+- issue: #23
 - spec: new
 
 Initiator and responder exchange protocol versions in the handshake and fail with a clear error on a major mismatch.

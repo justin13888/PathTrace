@@ -34,11 +34,20 @@ Target paths run at up to 1 Gbit/s. The probe enforces a hard sending-rate cap (
 ### REQ-SCOPE-006: IPv4 and IPv6
 - status: planned
 - spec: §6.6, §9.3
+- adr: 0013
 
-Measurement and policy probing work over IPv4 and IPv6. Full measurement runs over one primary address family per session; reachability and policy probing run over both when both are available.
+A session measures over one primary address family, either IPv4 or IPv6. When the responder name resolves to both families, TCP class reachability is also probed over the secondary family.
 
 ### REQ-SCOPE-007: Own endpoints only
 - status: planned
 - spec: §3, §6.7
 
 The probe only ever exchanges traffic with a responder operated by the user and authenticated by key.
+
+### REQ-SCOPE-008: UDP class reachability on the secondary family
+- status: deferred
+- spec: §6.6
+- adr: 0013
+- issue: #21
+
+UDP classes (`udp/high-port`, `udp/443`, QUIC-shaped) are also probed for reachability over the secondary address family.

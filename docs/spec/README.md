@@ -36,7 +36,7 @@ One or more sentences stating the testable requirement.
   - `deferred` and `user-acceptance` require an `issue`.
   - `dropped` requires an `adr` explaining why.
 - `spec` cites the section of the original draft specification (v0.1, 8 October 2026) the requirement derives from, or `new`.
-- IDs are never reused or renumbered. A requirement that changes meaning is `dropped` and replaced by a new ID.
+- IDs are never reused or renumbered. Once a requirement has been `met`, a change of meaning means it is `dropped` and replaced by a new ID. Before its first `met`, its wording may be refined in place when evidence shows it imprecise, recorded in an ADR ([0013](../adr/0013-requirement-refinements-from-evidence.md)).
 
 ## Coverage of the original specification
 

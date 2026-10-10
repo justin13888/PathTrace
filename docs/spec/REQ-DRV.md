@@ -90,6 +90,7 @@ A trace derived from ground truth, exported to netem, re-imposed and re-probed y
 
 ### REQ-DRV-015: Proxy suspicion
 - status: planned
+- issue: #22
 - spec: §6.6, §4
 
 A TCP-terminating proxy is flagged when TCP handshake RTT is far below the UDP minimum RTT, or when the SYN seen by the responder differs from the one sent.

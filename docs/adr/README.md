@@ -24,3 +24,4 @@ One file per decision that is hard to reverse, affects compatibility, or departs
 | [0010](0010-light-trains-for-dual-workload.md) | Add periodic light packet trains to the light observer flow (dual-workload recording) | accepted |
 | [0011](0011-ptf-container-and-encoding.md) | PTF container and encoding | accepted |
 | [0012](0012-timestamp-clock-domains.md) | Packet timestamps: kernel software stamps in CLOCK_REALTIME, recorded raw with clock pairs | accepted |
+| [0013](0013-requirement-refinements-from-evidence.md) | Refining requirements from evidence before they are first met | accepted |
