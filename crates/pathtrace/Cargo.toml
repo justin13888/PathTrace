@@ -1,0 +1,22 @@
+[package]
+name = "pathtrace"
+description = "Record what a network path does to packets, into PTF traces"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "pathtrace"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+pt-format = { path = "../pt-format" }
+pt-probe = { path = "../pt-probe" }
+pt-sys = { path = "../pt-sys" }
+serde_json = "1.0.152"
+
+[lints]
+workspace = true
