@@ -11,6 +11,7 @@ taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
 python = "3.14.8"
+"github:rust-fuzz/cargo-fuzz" = "0.13.2"
 
 [settings]
 lockfile = true
@@ -34,6 +35,22 @@ run = "cargo nextest run --workspace --locked --run-ignored ignored-only"
 [tasks.deny]
 description = "Dependency licenses, advisories, bans"
 run = "cargo deny check"
+
+[tasks.fuzz]
+description = "Fuzz every target for $FUZZ_SECONDS (default 60) seconds with nightly, seeded from the conformance corpus"
+run = """
+set -e
+cd fuzz
+for t in ptf_read cbor_decode jsonl_load wire; do
+  mkdir -p corpus/$t
+  [ "$t" = ptf_read ] && cp ../conformance/v1.0/*.ptf corpus/ptf_read/
+  cargo +nightly fuzz run --target "$(rustc +nightly -vV | sed -n 's/host: //p')" $t corpus/$t -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=2048
+done
+"""
+
+[tasks.conformance]
+description = "Run the independent Python reader over the conformance corpus"
+run = "python3 -I tools/ptf-py/ptf.py conformance conformance/v1.0"
 
 [tasks.audit]
 description = "Verify the requirement → design → ADR → evidence chain"

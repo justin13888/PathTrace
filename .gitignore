@@ -2,3 +2,5 @@
 *.ptf.tmp
 /fuzz/artifacts
 /fuzz/corpus
+/fuzz/target
+/fuzz/coverage
