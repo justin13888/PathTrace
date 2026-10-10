@@ -1,0 +1,48 @@
+// Git hooks and lint configuration (REQ-REPO-003). Install once per clone: `hk install`.
+// Rules: AGENTS.md "Commits".
+amends "package://github.com/jdx/hk/releases/download/v2.5.0/hk@2.5.0#/Config.pkl"
+import "package://github.com/jdx/hk/releases/download/v2.5.0/hk@2.5.0#/Builtins.pkl"
+
+local linters = new Mapping<String, Step> {
+  ["cargo-fmt"] = Builtins.cargo_fmt
+  ["cargo-clippy"] {
+    glob = List("**/*.rs", "**/Cargo.toml", "Cargo.lock")
+    check = "cargo clippy --workspace --all-targets --locked --quiet -- -D warnings"
+    env { ["CARGO_TERM_PROGRESS_WHEN"] = "never" }
+  }
+  ["typos"] = Builtins.typos
+  ["taplo"] = Builtins.taplo
+  ["actionlint"] = Builtins.actionlint
+  ["shellcheck"] = Builtins.shellcheck
+  // Every TODO/FIXME must reference an issue: TODO(#12).
+  ["todo-needs-issue"] {
+    glob = List("**/*.rs", "**/*.py", "**/*.sh", "**/*.toml", "**/*.yml")
+    check = #"! grep -nE '\b(TODO|FIXME)\b' {{files}} | grep -vE '\b(TODO|FIXME)\(#[0-9]+\)'"#
+  }
+}
+
+hooks {
+  ["pre-commit"] {
+    fix = false
+    stash = "git"
+    steps = linters
+  }
+  ["commit-msg"] {
+    steps {
+      // convco validates type and the closed scope set in .convco. Git-generated
+      // merge/revert titles pass through (merges are checked as PR titles instead).
+      ["convco"] {
+        check = #"""
+          head -n1 {{commit_msg_file}} | grep -qE '^(Merge (branch|branches|tag|tags|commit|remote-tracking branch|pull request) |Revert ")' && exit 0
+          head -n1 {{commit_msg_file}} | grep -qE '^[a-z]+\([a-z]+\)!?: .+' || { echo "commit title must be type(scope): description, scope required (see .convco)"; exit 1; }
+          convco check --from-stdin --strip < {{commit_msg_file}}
+          """#
+      }
+    }
+  }
+  ["check"] { steps = linters }
+  ["fix"] {
+    fix = true
+    steps = linters
+  }
+}

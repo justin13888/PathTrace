@@ -1,0 +1,40 @@
+# All development tools are pinned here (REQ-REPO-005). Versions are locked in mise.lock;
+# bump with `mise lock --bump <tool>`. Keep `rust` in sync with rust-toolchain.toml.
+[tools]
+rust = { version = "1.99.0", components = "rustfmt,clippy", profile = "minimal" }
+hk = "2.5.0"
+"github:convco/convco" = "0.7.2"
+"aqua:nextest-rs/nextest/cargo-nextest" = "0.9.148"
+"aqua:EmbarkStudios/cargo-deny" = "0.20.2"
+typos = "1.51.1"
+taplo = "0.10.0"
+actionlint = "1.7.12"
+shellcheck = "0.11.0"
+python = "3.14.8"
+
+[settings]
+lockfile = true
+
+[tasks.check]
+description = "Format, lint, spelling, TOML, workflows, shell (same as the pre-commit hook, all files)"
+run = "hk check --all"
+
+[tasks.fix]
+description = "Apply automatic fixes for everything `check` reports"
+run = "hk fix --all"
+
+[tasks.test]
+description = "Unit and integration tests that need no network namespaces"
+run = "cargo nextest run --workspace --locked"
+
+[tasks.test-netns]
+description = "Integration tests inside unprivileged user+net namespaces (fails, never skips, if namespaces are unavailable)"
+run = "cargo nextest run --workspace --locked --run-ignored ignored-only"
+
+[tasks.deny]
+description = "Dependency licenses, advisories, bans"
+run = "cargo deny check"
+
+[tasks.audit]
+description = "Verify the requirement → design → ADR → evidence chain"
+run = "cargo xtask audit"

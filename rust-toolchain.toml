@@ -1,0 +1,4 @@
+# The pinned stable toolchain is the MSRV. Nightly is used only for cargo-fuzz (see mise.toml).
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]

@@ -1,0 +1,67 @@
+name: CI
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  CARGO_TERM_COLOR: always
+  MISE_LOCKED: "1"
+  MISE_RUSTUP_HOME: /home/runner/.local/share/mise/rustup
+  MISE_CARGO_HOME: /home/runner/.local/share/mise/cargo
+jobs:
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: lint
+      - run: hk check --all
+      - run: cargo deny check
+      - name: Conventional commits (PR commits)
+        if: github.event_name == 'pull_request'
+        run: convco check --ignore-reverts "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"
+      - name: Conventional PR title (becomes the merge commit title)
+        if: github.event_name == 'pull_request'
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          printf '%s\n' "$TITLE" | grep -qE '^[a-z]+\([a-z]+\)!?: .+' || { echo "PR title must be type(scope): description"; exit 1; }
+          printf '%s\n' "$TITLE" | convco check --from-stdin --strip
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: audit
+      - name: Requirement → evidence chain
+        run: cargo xtask audit ${{ startsWith(github.ref, 'refs/tags/') && '--release' || '' }}
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor)
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.runner }}
+      - run: cargo nextest run --workspace --locked --no-tests=pass
+      - name: Network-namespace integration tests
+        run: cargo nextest run --workspace --locked --run-ignored ignored-only --no-tests=pass

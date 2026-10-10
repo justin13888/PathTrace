@@ -1,0 +1,14 @@
+# Spell-check configuration (typos). Add domain terms here, never disable files wholesale.
+[default.extend-identifiers]
+# PTF four-character section type codes.
+INDX = "INDX"
+CLOK = "CLOK"
+OBSV = "OBSV"
+SERS = "SERS"
+PLCY = "PLCY"
+EVNT = "EVNT"
+VALD = "VALD"
+CTXS = "CTXS"
+
+[files]
+extend-exclude = ["LICENSE", "mise.lock"]

@@ -1,0 +1,11 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-NNNN"
+title = "short title"
+hypothesis = "what must be true for the experiment to pass"
+# Run from the repository root. Exit 0 = pass, 1 = fail, 3 = partial.
+# Outputs go to $PT_EVIDENCE_OUT.
+command = "cargo run --release -p xtask -- harness <name>"
+# Source paths whose behaviour this measures (stale detection).
+covers = ["crates/pt-format"]
+requirements = ["REQ-FMT-001"]
+supersedes = []

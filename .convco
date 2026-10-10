@@ -1,0 +1,25 @@
+# Conventional Commits policy (REQ-REPO-003). Rationale and usage: AGENTS.md "Commits".
+# Closed type set:
+types:
+  - type: feat
+    section: Features
+  - type: fix
+    section: Bug Fixes
+  - type: perf
+    section: Performance
+  - type: refactor
+    section: Refactoring
+  - type: docs
+    section: Documentation
+  - type: test
+    section: Tests
+  - type: build
+    section: Build
+  - type: ci
+    section: CI
+  - type: chore
+    section: Chores
+  - type: revert
+    section: Reverts
+# Closed scope set. Adding a scope = edit this line and AGENTS.md together.
+scopeRegex: "^(format|wire|sys|probe|derive|cli|xtask|harness|docs|adr|evidence|research|deploy|ci|repo|deps)$"

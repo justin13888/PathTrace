@@ -1,0 +1,4 @@
+/target
+*.ptf.tmp
+/fuzz/artifacts
+/fuzz/corpus

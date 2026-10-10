@@ -1,0 +1,44 @@
+# cargo-deny policy. Rationale: crates/README.md "Dependency policy".
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+# Licenses compatible with distributing PathTrace under Apache-2.0.
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "MIT",
+    "MIT-0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+# Timing behaviour of async runtimes and protocol stacks cannot be observed or controlled;
+# they must never enter the measurement path.
+deny = [
+    { crate = "tokio", reason = "no async runtime in measurement code" },
+    { crate = "async-std", reason = "no async runtime in measurement code" },
+    { crate = "smol", reason = "no async runtime in measurement code" },
+    { crate = "quinn", reason = "no protocol stacks in measurement code" },
+    { crate = "hyper", reason = "no protocol stacks in measurement code" },
+    { crate = "h2", reason = "no protocol stacks in measurement code" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
