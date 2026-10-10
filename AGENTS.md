@@ -20,10 +20,15 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - pt-wire: probe header + control messages. forbid(unsafe).
 - pt-sys: Linux syscalls (sockets, timestamping, mmsg, cmsg, TCP_INFO, clocks, netlink). ONLY crate allowing unsafe; every unsafe block needs `// SAFETY:`.
 - pt-probe: session, phases, responder, obslog. No async runtime; threads only.
-- pt-derive: raw -> PATH model. Pure.
+- pt-derive: raw -> PATH/SERS/PLCY/VALD model; netem/Mahimahi export, Mahimahi import. Pure (no I/O); methods versioned `name/N`.
 - pathtrace: CLI.
-- xtask: evidence runner, audit, ground-truth netns harness (only place allowed to exec ip/tc/nft/ethtool).
+- xtask: `evidence new|run`, `audit`, `groundtruth [scenario]` (netns ground-truth experiments), `corpus` (regenerates conformance/v1.0). Only xtask and tools/ may exec ip/tc/nft/ethtool.
+- bench/pt-bench: encoding bake-off (heavy comparison deps kept out of shipped crates).
+- fuzz/: cargo-fuzz targets (nightly, separate workspace).
 - tools/ptf-py: independent Python PTF reader written only from docs/design/ptf-format.md (conformance proof). Do not port Rust code into it.
+- tools/netns/session.sh: the namespace harness (env: BIN OUT PROFILE QDISC_AB QDISC_BA SETUP_PM SCRIPT_PM SERVE_ARGS RESP_ADDR PROBE_ARGS).
+- conformance/<version>/: corpus + expected.json; never edit an existing directory (golden forever, REQ-FMT-010); new releases add directories. conformance/v1.0-real holds redacted real traces.
+- deploy/: systemd unit and port list. docs/runbooks/: human procedures (keep in sync with CLI changes).
 
 ## Dependency policy
 - Measurement crates forbid: tokio, async-std, smol, quinn, hyper, h2, any packet-batching layer, shelling out to ip/tc/ethtool/nft. Enforced by deny.toml bans where possible.
@@ -33,7 +38,10 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - `mise run check`: fmt check, clippy -D warnings, typos, taplo, actionlint, shellcheck.
 - `mise run test`: cargo nextest (unit + integration not needing namespaces).
 - `mise run test-netns`: integration tests inside unprivileged user+net namespaces (needs `unshare -Urn` to work; on Ubuntu set `kernel.apparmor_restrict_unprivileged_userns=0`). A skip is a failure in CI.
-- `mise run fuzz`: short cargo-fuzz smoke on all targets (nightly, pinned).
+- `mise run fuzz`: cargo-fuzz on all targets, `FUZZ_SECONDS` each (default 60; nightly).
+- `mise run conformance`: Python reader over every conformance directory.
+- `cargo xtask groundtruth [all|<scenario>] [--jobs N]`: ground-truth experiments (~12 min for all); scratch in target/groundtruth.
+- `cargo xtask corpus`: regenerate conformance/v1.0 (only when intentionally extending; never change existing verdicts).
 - `mise run audit` = `cargo xtask audit`: requirement/evidence chain. `--release` also fails on stale/pending evidence.
 - `cargo xtask evidence new <slug>` / `cargo xtask evidence run EXP-NNNN`.
 - `hk install` once per clone: installs pre-commit + commit-msg hooks.
@@ -56,12 +64,19 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 ## Evidence workflow (details: docs/evidence/README.md)
 - experiment.toml committed before running. Run only on clean tree (xtask refuses otherwise). Manifest pins HEAD and hashes artifacts. Never edit/delete a run; supersede it.
 - A requirement may be `met` only with a current passing experiment. Failed results are kept.
+- Evidence artifacts must never contain keys or other secrets and stay small (< 2 MB): copy summaries, not harness scratch directories.
+- Parallel `evidence run`s are not possible (clean-tree rule): run, write README, commit, then the next.
 
 ## Docs rules
 - Design precedes code. Design decision shape: Problem / Constraints / Alternatives / Choice / Rationale / Validated by.
 - ADRs immutable once accepted (docs/adr/README.md). Departures from the original draft spec always get an ADR.
 - Research notes cite URL + access date + quote; verdict confirmed/partially-confirmed/refuted/unverifiable (docs/research/README.md).
 - Requirement syntax and statuses: docs/spec/README.md.
+
+## Measurement invariants
+- Every packet the probe puts on the path is observed (probe flows, control datagrams as flows 250/251); unobserved traffic biases loss models (EXP-0002).
+- The pacer is the only sender on a UDP socket (OPT_ID numbering); never send from other threads.
+- Control messages must fit one datagram (DF is set): batch flow definitions, chunk feedback.
 
 ## PTF compatibility contract
 - Every PTF >= 1.0 file stays readable by every later pathtrace. Additive changes only in minor versions (new non-critical sections, new columns, new CBOR keys). Never reuse a key or column name with new meaning. Golden files of every release live in the conformance corpus and are tested forever.
