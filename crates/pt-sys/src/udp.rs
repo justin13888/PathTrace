@@ -627,6 +627,36 @@ impl UdpSock {
     }
 }
 
+/// Poll several sockets at once. Returns (readable, error-queue pending) per socket.
+pub fn poll_many(socks: &[&UdpSock], timeout_ms: i32) -> io::Result<Vec<(bool, bool)>> {
+    let mut fds: Vec<libc::pollfd> = socks
+        .iter()
+        .map(|s| libc::pollfd {
+            fd: s.fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        })
+        .collect();
+    // SAFETY: `fds` is a valid array of `fds.len()` pollfd structs.
+    let r = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as libc::nfds_t, timeout_ms) };
+    if r < 0 {
+        let e = io::Error::last_os_error();
+        if e.kind() == io::ErrorKind::Interrupted {
+            return Ok(vec![(false, false); socks.len()]);
+        }
+        return Err(e);
+    }
+    Ok(fds
+        .iter()
+        .map(|p| {
+            (
+                p.revents & libc::POLLIN != 0,
+                p.revents & libc::POLLERR != 0,
+            )
+        })
+        .collect())
+}
+
 impl AsRawFd for UdpSock {
     fn as_raw_fd(&self) -> RawFd {
         self.fd.as_raw_fd()
