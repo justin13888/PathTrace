@@ -1,0 +1,28 @@
+# systemd unit for the PathTrace responder. Install: docs/runbooks/responder-deploy.md
+[Unit]
+Description=PathTrace responder (path measurement endpoint)
+Documentation=https://github.com/justin13888/PathTrace
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pathtrace
+Group=pathtrace
+Environment=PATHTRACE_CONFIG_DIR=/var/lib/pathtrace/config
+Environment=PATHTRACE_STATE_DIR=/var/lib/pathtrace/state
+ExecStart=/usr/local/bin/pathtrace serve
+Restart=always
+RestartSec=2
+# Bind UDP/TCP 443 and TCP 80 without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/pathtrace
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
