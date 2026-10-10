@@ -1,0 +1,21 @@
+[package]
+name = "pt-bench"
+description = "Evidence experiments that need heavyweight comparison dependencies (kept out of shipped crates)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+arrow-array = "60.0.0"
+arrow-ipc = { version = "60.0.0", features = ["zstd"] }
+arrow-schema = "60.0.0"
+clap.workspace = true
+pt-format = { path = "../../crates/pt-format" }
+serde_json = "1.0.152"
+zstd = "0.14.2"
+
+[lints]
+workspace = true
