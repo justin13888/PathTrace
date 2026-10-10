@@ -1021,6 +1021,7 @@ name = "pathtrace"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "pt-derive",
  "pt-format",
  "pt-probe",
  "pt-sys",

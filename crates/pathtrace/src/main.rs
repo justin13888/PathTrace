@@ -78,6 +78,23 @@ enum Cmd {
         #[arg(short, long)]
         out: PathBuf,
     },
+    /// Re-derive the path model (PATH, SERS, PLCY, VALD) from a trace's raw layer.
+    Derive {
+        trace: PathBuf,
+        /// Output file (default: rewrite the input in place, atomically).
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// Export a trace to another tool's format.
+    Export {
+        #[command(subcommand)]
+        cmd: ExportCmd,
+    },
+    /// Import another tool's trace as PTF.
+    Import {
+        #[command(subcommand)]
+        cmd: ImportCmd,
+    },
     /// Download a responder log for a finished session.
     Fetch {
         #[arg(long)]
@@ -102,6 +119,32 @@ enum Cmd {
         responder: Option<String>,
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ExportCmd {
+    /// Print netem qdisc arguments reproducing each direction's static summary.
+    Netem { trace: PathBuf },
+    /// Write Mahimahi up/down traces (1504-byte opportunities, ms timestamps).
+    Mahimahi {
+        trace: PathBuf,
+        /// Output prefix: writes <prefix>.up (a->b) and <prefix>.down (b->a).
+        #[arg(short, long)]
+        out: PathBuf,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum ImportCmd {
+    /// Import Mahimahi traces (capacity only; everything else unknown).
+    Mahimahi {
+        /// Uplink trace (a->b).
+        up: PathBuf,
+        /// Downlink trace (b->a).
+        down: Option<PathBuf>,
+        #[arg(short, long)]
+        out: PathBuf,
     },
 }
 
@@ -179,6 +222,15 @@ struct ProbeArgs {
     quiet: bool,
 }
 
+pub fn derive_tool() -> pt_derive::Tool {
+    let t = tool_info();
+    pt_derive::Tool {
+        version: t.version,
+        git_commit: t.git_commit,
+        git_dirty: t.git_dirty,
+    }
+}
+
 pub fn tool_info() -> ToolInfo {
     ToolInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -247,9 +299,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
         }
         Cmd::Probe(a) => return probe(cfg, a),
         Cmd::Merge { log_a, log_b, out } => {
-            let r = pt_probe::merge::merge(&log_a, log_b.as_deref(), &out, &tool_info())
+            let (file, r) = pt_probe::merge::merge_file(&log_a, log_b.as_deref(), &tool_info())
                 .map_err(|e| e.to_string())?;
-            println!("{} content_digest={}", out.display(), r.content_digest);
+            let file = pt_derive::apply(&file, &derive_tool());
+            let digest = pt_probe::merge::write_trace(&file, &out).map_err(|e| e.to_string())?;
+            println!("{} content_digest={digest}", out.display());
             if log_b.is_none() || r.logs.iter().any(|l| l.stopped.is_some()) {
                 return Ok(ExitCode::from(3));
             }
@@ -271,6 +325,57 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             println!("{} ({n} bytes)", out.display());
         }
         Cmd::Trace { cmd } => return trace_cmd::run(cmd),
+        Cmd::Derive { trace, out } => {
+            let f = pt_probe::merge::read_trace(&trace).map_err(|e| e.to_string())?;
+            let f = pt_derive::apply(&f, &derive_tool());
+            let out = out.unwrap_or(trace);
+            let d = pt_probe::merge::write_trace(&f, &out).map_err(|e| e.to_string())?;
+            println!("{} content_digest={d}", out.display());
+        }
+        Cmd::Export { cmd } => match cmd {
+            ExportCmd::Netem { trace } => {
+                let f = pt_probe::merge::read_trace(&trace).map_err(|e| e.to_string())?;
+                for dir in ["a_to_b", "b_to_a"] {
+                    match pt_derive::export::netem_args(&f, dir) {
+                        Some(a) => println!("{dir}: tc qdisc add dev <dev> root {a}"),
+                        None => println!("{dir}: (no summary; run `pathtrace derive` first)"),
+                    }
+                }
+            }
+            ExportCmd::Mahimahi { trace, out } => {
+                let f = pt_probe::merge::read_trace(&trace).map_err(|e| e.to_string())?;
+                for (dir, ext) in [("a_to_b", "up"), ("b_to_a", "down")] {
+                    let (lines, notes) = pt_derive::export::mahimahi_lines(&f, dir);
+                    for n in notes {
+                        eprintln!("note: {n}");
+                    }
+                    if lines.is_empty() {
+                        continue;
+                    }
+                    let p = out.with_extension(ext);
+                    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
+                    std::fs::write(&p, text).map_err(|e| e.to_string())?;
+                    println!("{}", p.display());
+                }
+            }
+        },
+        Cmd::Import { cmd } => match cmd {
+            ImportCmd::Mahimahi { up, down, out } => {
+                let u = std::fs::read_to_string(&up).map_err(|e| e.to_string())?;
+                let d = down
+                    .as_ref()
+                    .map(std::fs::read_to_string)
+                    .transpose()
+                    .map_err(|e| e.to_string())?;
+                let label = up
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                let f = pt_derive::export::import_mahimahi(&u, d.as_deref(), &label)?;
+                let digest = pt_probe::merge::write_trace(&f, &out).map_err(|e| e.to_string())?;
+                println!("{} content_digest={digest}", out.display());
+            }
+        },
         Cmd::Doctor { responder, json } => {
             let r = responder.map(|n| find_responder(&cfg, &n)).transpose()?;
             return Ok(doctor::run(&cfg, r.as_ref(), json));
@@ -321,15 +426,17 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
     let outcome = session::run_probe(&opts).map_err(|e| e.to_string())?;
     let trace = a.out.join(format!("{}.ptf", outcome.trace_id));
     let mut partial = outcome.log_b.is_none() || !outcome.notes.is_empty();
-    match pt_probe::merge::merge(
-        &outcome.log_a,
-        outcome.log_b.as_deref(),
-        &trace,
-        &tool_info(),
-    ) {
-        Ok(r) => {
+    let merged =
+        pt_probe::merge::merge_file(&outcome.log_a, outcome.log_b.as_deref(), &tool_info())
+            .and_then(|(f, r)| {
+                let f = pt_derive::apply(&f, &derive_tool());
+                let d = pt_probe::merge::write_trace(&f, &trace)?;
+                Ok((d, r))
+            });
+    match merged {
+        Ok((digest, r)) => {
             println!("trace: {}", trace.display());
-            println!("content_digest: {}", r.content_digest);
+            println!("content_digest: {digest}");
             for (dir, n) in &r.pkt_rows {
                 println!("packets {dir}: {n}");
             }
