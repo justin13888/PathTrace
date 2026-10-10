@@ -189,6 +189,8 @@ struct CtlState {
     rate: f64,
     mode: Mode,
     last_double: u64,
+    /// MONO_RAW time from which to overdrive (fill the bottleneck buffer), or u64::MAX.
+    overdrive_at: u64,
 }
 
 /// Saturation controller (docs/design/probe.md §7): slow start doubling every 50 ms until the
@@ -203,6 +205,8 @@ pub struct Controller {
 }
 
 pub const START_BPS: f64 = 2_000_000.0;
+/// Length of the buffer-filling overdrive at the end of a saturation.
+pub const OVERDRIVE_NS: u64 = 1_500_000_000;
 pub const FLOOR_BPS: f64 = 100_000.0;
 
 impl Controller {
@@ -216,14 +220,21 @@ impl Controller {
         }
     }
 
-    /// Register a controlled flow owned by this endpoint.
-    pub fn add(&self, id: u8) {
+    /// Register a controlled flow owned by this endpoint. `duration_ns` > 3 s enables the
+    /// overdrive step in its last 1.5 s (docs/design/probe.md §7).
+    pub fn add(&self, id: u8, start: u64, duration_ns: u64) {
+        let overdrive_at = if duration_ns > 3_000_000_000 {
+            start + duration_ns - OVERDRIVE_NS
+        } else {
+            u64::MAX
+        };
         self.flows.lock().expect("lock").insert(
             id,
             CtlState {
                 rate: START_BPS,
                 mode: Mode::SlowStart,
                 last_double: mono_raw(),
+                overdrive_at,
             },
         );
     }
@@ -268,6 +279,11 @@ impl Controller {
                         st.last_double = now;
                     }
                 }
+                Mode::Hold if now >= st.overdrive_at => {
+                    // Overdrive: exceed the delivery rate so a tail-drop buffer fills and its
+                    // depth becomes observable at loss onset.
+                    st.rate = (d * 1.5).max(st.rate);
+                }
                 Mode::Hold => {
                     if d < 1000.0 {
                         st.rate *= 0.8;
@@ -305,7 +321,7 @@ mod tests {
     fn controller_slow_start_then_hold() {
         let (tx, rx) = std::sync::mpsc::channel();
         let c = Controller::new(Role::A, tx, 500_000_000);
-        c.add(7);
+        c.add(7, mono_raw(), 0);
         // Low queue: rate should double (after 50 ms).
         std::thread::sleep(std::time::Duration::from_millis(60));
         c.on_feedback(&Value::map().with(

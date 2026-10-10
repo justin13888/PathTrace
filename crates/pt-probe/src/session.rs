@@ -272,7 +272,7 @@ impl Ctx {
                 .insert(s.id, s.clone());
             if s.sender == Role::A {
                 if is_controlled(&s.pattern) {
-                    self.ctrlr.add(s.id);
+                    self.ctrlr.add(s.id, at, s.duration_ns);
                 }
                 self.ep.start_flow(s, at);
             }
@@ -1614,7 +1614,7 @@ fn responder_session(
                     shared.flows.write().expect("lock").insert(s.id, s.clone());
                     if s.sender == Role::B {
                         if is_controlled(&s.pattern) {
-                            ctrlr.add(s.id);
+                            ctrlr.add(s.id, at, s.duration_ns);
                         }
                         ep.start_flow(s, at);
                     }
