@@ -1923,8 +1923,11 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "pt-derive",
+ "pt-format",
  "serde",
  "toml",
+ "zstd",
 ]
 
 [[package]]

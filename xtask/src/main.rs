@@ -3,13 +3,16 @@
 //! - `evidence new <slug>`: scaffold the next `docs/evidence/EXP-NNNN-<slug>/` from the template.
 //! - `evidence run <EXP-NNNN>`: run an experiment on a clean tree and pin it to `HEAD`.
 //! - `audit [--release]`: verify the requirement → design → ADR → evidence chain.
+//! - `groundtruth [scenario]`: ground-truth recovery experiments in network namespaces.
 //!
 //! The rules enforced here are documented in `docs/README.md`, `docs/spec/README.md` and
 //! `docs/evidence/README.md`.
 
 mod audit;
+mod corpus;
 mod evidence;
 mod git;
+mod groundtruth;
 
 use std::path::PathBuf;
 
@@ -30,6 +33,16 @@ enum Command {
         #[command(subcommand)]
         command: EvidenceCommand,
     },
+    /// Ground-truth recovery experiments in network namespaces (`all` or one scenario).
+    Groundtruth {
+        #[arg(default_value = "all")]
+        which: String,
+        /// Scenarios run in parallel.
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+    },
+    /// Regenerate the PTF conformance corpus (conformance/v1.0).
+    Corpus,
     /// Check the requirement → design → ADR → evidence chain.
     Audit {
         /// Treat stale evidence as an error (used for release tags).
@@ -54,6 +67,13 @@ fn main() -> Result<()> {
             EvidenceCommand::New { slug } => evidence::new(&root, &slug),
             EvidenceCommand::Run { id } => evidence::run(&root, &id),
         },
+        Command::Groundtruth { which, jobs } => {
+            if !groundtruth::main(&root, &which, jobs)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::Corpus => corpus::generate(&root),
         Command::Audit { release } => {
             let report = audit::audit(&root)?;
             report.print();
