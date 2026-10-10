@@ -147,7 +147,7 @@ This generic structure lets any reader dump, redact or copy sections it does not
 Heads are CBOR (RFC 8949) restricted to:
 - major types 0 (uint), 1 (negative int), 2 (byte string), 3 (text string, valid UTF-8), 4 (array), 5 (map), and 7 with values `false`, `true`, `null`, and 64-bit floats only (additional info 27);
 - definite lengths only; integers and lengths in their shortest form;
-- map keys are text strings, unique within a map, sorted by their encoded bytes (bytewise lexicographic, which for text keys means shorter keys first, then by bytes: RFC 8949 §4.2.1 core deterministic ordering);
+- map keys are text strings that do not begin with `$` (reserved for the JSON twin's tags, §P11), unique within a map, sorted by their encoded bytes (bytewise lexicographic, which for text keys means shorter keys first, then by bytes: RFC 8949 §4.2.1 core deterministic ordering);
 - no tags, no `undefined`, no half or single floats, no NaN with payload (NaN MUST be encoded `0xfb7ff8000000000000`);
 - nesting depth at most 32.
 

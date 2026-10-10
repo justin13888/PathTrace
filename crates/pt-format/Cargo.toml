@@ -1,0 +1,20 @@
+[package]
+name = "pt-format"
+description = "PTF (Path Trace Format) reader, writer and validator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+blake3.workspace = true
+crc32c = "0.6.8"
+serde_json = "1.0.152"
+zstd = "0.14.2"
+
+[dev-dependencies]
+proptest = "1.12.0"
+
+[lints]
+workspace = true
