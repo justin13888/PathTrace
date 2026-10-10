@@ -88,7 +88,7 @@ An optional final INDX section records section offsets, the BLAKE3 of all preced
 - status: planned
 - spec: new
 
-The raw per-packet layer costs at most 8 bytes per packet after compression, and a `standard` session at up to 100 Mbit/s produces a file of at most 10 MB.
+For sessions of at least 10 000 packets, the raw per-packet layer costs at most 8 bytes per packet after compression. A `standard` session at up to 100 Mbit/s produces a file of at most 10 MB. Very small sessions pay a fixed per-chunk overhead and are exempt from the per-packet figure (measured, not hidden, in the ground-truth evidence).
 
 ### REQ-FMT-016: Safe parsing of untrusted files
 - status: planned
