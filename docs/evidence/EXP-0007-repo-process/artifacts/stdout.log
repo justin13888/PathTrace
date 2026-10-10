@@ -1,0 +1,10 @@
+PASS convco: all non-merge commits conventional
+PASS every non-merge commit has a scope
+PASS merge-commit-only repository settings
+PASS ruleset active: no force-push, no deletion, merge only
+PASS GitHub detects Apache-2.0
+PASS CLAUDE.md -> AGENTS.md
+PASS tools pinned (mise.lock present)
+PASS PR 'feat(probe): capture tool — probe, responder, wire protocol, observation logs and merge (#20)' starts with: docs(research): R-0010..R-0014 Linux socket, clock, TCP and netlink facts
+PASS PR 'feat(format): PTF 1.0 container, CBOR profile, columnar tables and JSONL twin (#19)' starts with: docs(design): specify PTF 1.0 container, CBOR profile and columnar tables
+PASS PR 'docs(spec): distil the draft spec into requirements, ADRs and research (#18)' starts with: docs(research): verify prior art and tooling claims first-hand

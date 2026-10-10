@@ -1,0 +1,13 @@
+actionlint                             1.7.12            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  1.7.12
+aqua:EmbarkStudios/cargo-deny          0.20.2            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.20.2
+aqua:nextest-rs/nextest/cargo-nextest  0.9.148           /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.9.148
+github:Foxboron/ssh-tpm-agent          0.9.0             /var/mnt/scratch/golemite/.config/mise/config.toml             latest
+github:convco/convco                   0.7.2             /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.7.2
+github:getkono/tree-tui                0.3.0             /var/mnt/scratch/golemite/.config/mise/config.toml             latest
+github:rust-fuzz/cargo-fuzz            0.13.2            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.13.2
+hk                                     2.5.0             /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  2.5.0
+python                                 3.14.8            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  3.14.8
+rust                                   1.99.0 (symlink)  /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  1.99.0
+shellcheck                             0.11.0            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.11.0
+taplo                                  0.10.0            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  0.10.0
+typos                                  1.51.1            /var/mnt/scratch/golemite/dev/justin13888/PathTrace/mise.toml  1.51.1
