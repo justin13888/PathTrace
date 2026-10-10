@@ -1081,9 +1081,11 @@ pub fn pkt_bytes_per_packet(t: &Trace) -> Size {
 
 /// Entry point: run `which` (a scenario name or "all"), write results, return pass/fail.
 pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
-    let out = std::env::var_os("PT_EVIDENCE_OUT")
-        .map_or_else(|| root.join("target/groundtruth"), PathBuf::from);
+    // Sessions run in a scratch directory (it holds throwaway keys and full traces); only
+    // results, logs and trace summaries go to the evidence directory (REQ-SEC-002, size).
+    let out = root.join("target/groundtruth");
     std::fs::create_dir_all(&out)?;
+    let evidence = std::env::var_os("PT_EVIDENCE_OUT").map(PathBuf::from);
     let st = Command::new("cargo")
         .current_dir(root)
         .args(["build", "--release", "--locked", "-q", "-p", "pathtrace"])
@@ -1211,6 +1213,48 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
     }
     std::fs::write(out.join("results.csv"), &csv)?;
     std::fs::write(out.join("results.md"), &md)?;
+    if let Some(ev) = evidence {
+        std::fs::create_dir_all(&ev)?;
+        std::fs::write(ev.join("results.csv"), &csv)?;
+        std::fs::write(ev.join("results.md"), &md)?;
+        for entry in std::fs::read_dir(&out)? {
+            let dir = entry?.path();
+            if !dir.is_dir() {
+                continue;
+            }
+            let name = dir
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let dst = ev.join(&name);
+            std::fs::create_dir_all(&dst)?;
+            for f in [
+                "probe.out",
+                "probe.err",
+                "probe.exit",
+                "serve.exit",
+                "script_pm.log",
+                "netem_export.txt",
+                "qdisc_stats.txt",
+            ] {
+                if dir.join(f).exists() {
+                    std::fs::copy(dir.join(f), dst.join(f))?;
+                }
+            }
+            if let Ok(trace) = trace_in(&dir) {
+                let info = Command::new(root.join("target/release/pathtrace"))
+                    .args(["trace", "info", "--json"])
+                    .arg(&trace)
+                    .output()?;
+                std::fs::write(dst.join("trace_info.json"), info.stdout)?;
+                let netem = Command::new(root.join("target/release/pathtrace"))
+                    .args(["export", "netem"])
+                    .arg(&trace)
+                    .output()?;
+                std::fs::write(dst.join("derived_netem.txt"), netem.stdout)?;
+            }
+        }
+    }
     print!("{md}");
     println!("verdict: {}", if all { "pass" } else { "fail" });
     Ok(all)
