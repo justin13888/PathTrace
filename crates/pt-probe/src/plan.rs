@@ -164,6 +164,42 @@ pub fn spec(
     }
 }
 
+/// Profile chosen by `--profile auto` from NetworkManager's metered state (REQ-PRB-016):
+/// `yes` and `yes (guessed)` select `light`; anything else (no, unknown, absent) `standard`.
+pub fn auto_profile(metered: &str) -> &'static str {
+    if metered.trim_start().starts_with("yes") {
+        "light"
+    } else {
+        "standard"
+    }
+}
+
+/// Flow specs under which control datagrams are observed (flows 250/251; seq = Noise nonce).
+pub fn control_specs(main_port: u16) -> Vec<FlowSpec> {
+    [
+        (crate::io::CONTROL_FLOW_A, Role::A),
+        (crate::io::CONTROL_FLOW_B, Role::B),
+    ]
+    .into_iter()
+    .map(|(id, sender)| {
+        spec(
+            id,
+            "control",
+            sender,
+            Sock::Main,
+            0,
+            Pattern::Burst {
+                count: 0,
+                gap_ns: 0,
+            },
+            0,
+            0,
+            main_port,
+        )
+    })
+    .collect()
+}
+
 /// PMTU ladder IP sizes, capped by the local interface MTU (docs/design/probe.md §6).
 pub fn pmtu_ladder(v6: bool, if_mtu: u32) -> Vec<u32> {
     let base: &[u32] = if v6 {
@@ -301,6 +337,16 @@ impl Controller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_profile_follows_metered_state() {
+        assert_eq!(auto_profile("yes"), "light");
+        assert_eq!(auto_profile("yes (guessed)"), "light");
+        assert_eq!(auto_profile("no"), "standard");
+        assert_eq!(auto_profile("no (guessed)"), "standard");
+        assert_eq!(auto_profile("unknown"), "standard");
+        assert_eq!(auto_profile(""), "standard");
+    }
 
     #[test]
     fn profiles_exist() {

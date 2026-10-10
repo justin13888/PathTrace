@@ -89,6 +89,8 @@ Per endpoint, in its observation log (`META.kind = "obslog"`, `META.role = "a" |
 | `wifi` (CTXS, initiator) | 1 Hz | t, freq_mhz, signal_dbm, tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bssid_hash (pii quasi) |
 | EVNT | events | phase start/end/failed, addr_change, iface_change, nat_rebind, control_fallback, budget_cap, dead_man, channel_overflow, ... |
 
+Control datagrams are observations too: the sender logs each sealed control datagram in `tx` as flow 250 (sent by a) or 251 (sent by b) with seq = Noise nonce, and the receiver logs it in `rx`. Every packet the probe puts on the path is therefore observed, which loss-model estimation requires (EXP-0002). Feedback runs at 50 Hz while a controlled flow arrives and at 5 Hz otherwise.
+
 `merge` joins `tx` with `txts` by OPT_ID, which gives `tx_sched` (real) and `tx_snd_lag` (SND minus SCHED). It then joins the result with the peer's `rx` per direction, keyed by (flow, seq), to form the trace's `pkt` table. Duplicates go to `dup` and unmatched arrivals to `unmatched`. Nothing is dropped (P1).
 
 Source addresses are never per-row columns. Each new source tuple a receiver sees is logged once as a `peer_addr {idx, addr}` event, with the address marked `pii: id`, and rows carry `src = idx`. Rebinding is visible, and redaction stays trivial.
