@@ -71,6 +71,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "summary.pantheon5/1",
         "coupling.both-ratio/1",
         "timeline.outage/1",
+        "timestamps.source-count/1",
         "policy.matrix/1",
         "vald.reference/1",
     ];

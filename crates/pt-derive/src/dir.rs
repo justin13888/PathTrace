@@ -199,13 +199,17 @@ pub fn quiet_intervals(raw: &Raw, tb: &TimeBase) -> Vec<(i64, i64)> {
 pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i64)]) -> DirOut {
     let (pkts, ts_src) = packets(raw, tb, dir);
     let mut out = DirOut::default();
+    // Which transmit timestamp source each packet's send time came from (SND > SCHED > user).
     let mut f = Value::map().with(
         "timestamps",
-        Value::Map(
-            ts_src
-                .iter()
-                .map(|(k, v)| (pt_format::Key(k.clone()), Value::from(*v)))
-                .collect(),
+        field("known", "timestamps.source-count/1", 1.0).with(
+            "counts",
+            Value::Map(
+                ts_src
+                    .iter()
+                    .map(|(k, v)| (pt_format::Key(k.clone()), Value::from(*v)))
+                    .collect(),
+            ),
         ),
     );
     let loaded = loaded_intervals(&pkts);
@@ -751,7 +755,9 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     // transmit order (a Gilbert chain advances on every packet, not just light-flow ones).
     let mut seqd: Vec<(&Pkt, bool)> = pkts
         .iter()
-        .filter(|p| matches!(p.kind.as_str(), "light" | "train") && p.tx.is_some_and(quiet))
+        .filter(|p| {
+            matches!(p.kind.as_str(), "light" | "train" | "control") && p.tx.is_some_and(quiet)
+        })
         .map(|p| (p, p.rx.is_some()))
         .collect();
     seqd.sort_by_key(|x| x.0.tx);
@@ -841,7 +847,12 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
 
     // --- reorder ---
     let mut flows: BTreeMap<i64, Vec<&Pkt>> = BTreeMap::new();
-    for p in pkts.iter().filter(|p| p.rx.is_some()) {
+    // Control datagrams are sealed by two threads, so their sequence order is not their send
+    // order: they are excluded from reordering (and duplication) statistics.
+    for p in pkts
+        .iter()
+        .filter(|p| p.rx.is_some() && p.kind != "control")
+    {
         flows.entry(p.flow).or_default().push(p);
     }
     let (mut reord, mut total) = (0u64, 0u64);
