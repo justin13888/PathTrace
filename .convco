@@ -22,4 +22,4 @@ types:
   - type: revert
     section: Reverts
 # Closed scope set. Adding a scope = edit this line and AGENTS.md together.
-scopeRegex: "^(format|wire|sys|probe|derive|cli|xtask|harness|docs|adr|evidence|research|deploy|ci|repo|deps)$"
+scopeRegex: "^(format|wire|sys|probe|derive|cli|xtask|harness|docs|spec|design|adr|evidence|research|deploy|ci|repo|deps)$"

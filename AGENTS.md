@@ -41,7 +41,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 ## Commits
 - Conventional Commits, validated by convco at commit-msg (hk) and over the PR range in CI. Config: .convco.
 - Types: feat fix docs test refactor perf build ci chore revert.
-- Scopes (closed set, required): format wire sys probe derive cli xtask harness docs adr evidence research deploy ci repo deps.
+- Scopes (closed set, required): format wire sys probe derive cli xtask harness docs spec design adr evidence research deploy ci repo deps. docs-hierarchy scopes: spec (docs/spec), design (docs/design), adr, evidence, research; `docs` = other documentation.
 - One logical change per commit; every commit builds and passes tests. Breaking change: `!` + `BREAKING CHANGE:` footer.
 - Evidence commits: `docs(evidence): EXP-NNNN <slug>` containing only that experiment's manifest, artifacts, README.
 - No `TODO` without an issue: write `TODO(#NN)`. hk rejects bare TODO/FIXME.
