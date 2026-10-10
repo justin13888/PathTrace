@@ -28,6 +28,8 @@ confidence-threshold = 0.9
 [bans]
 multiple-versions = "allow"
 wildcards = "deny"
+# Workspace path dependencies (all crates are publish = false) are not wildcards in practice.
+allow-wildcard-paths = true
 # Timing behaviour of async runtimes and protocol stacks cannot be observed or controlled;
 # they must never enter the measurement path.
 deny = [

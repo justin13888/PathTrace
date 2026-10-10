@@ -10,6 +10,10 @@ local linters = new Mapping<String, Step> {
     check = "cargo clippy --workspace --all-targets --locked --quiet -- -D warnings"
     env { ["CARGO_TERM_PROGRESS_WHEN"] = "never" }
   }
+  ["cargo-deny"] {
+    glob = List("**/Cargo.toml", "Cargo.lock", "deny.toml")
+    check = "cargo deny --log-level error check"
+  }
   ["typos"] = Builtins.typos
   ["taplo"] = Builtins.taplo
   ["actionlint"] = Builtins.actionlint
