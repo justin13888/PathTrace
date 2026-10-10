@@ -59,6 +59,11 @@ jobs:
       - uses: jdx/mise-action@v5
       - name: Allow unprivileged user namespaces (Ubuntu 24.04 AppArmor)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Load qdisc/netfilter modules (module autoload is unavailable inside user namespaces)
+        run: |
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
+          sudo modprobe -a sch_netem sch_tbf sch_fq_codel sch_prio cls_u32 act_pedit nf_conntrack nft_masq nft_chain_nat || true
+          lsmod | grep -E 'netem|tbf|pedit' || true
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.runner }}
