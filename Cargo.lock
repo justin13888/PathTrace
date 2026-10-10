@@ -1131,6 +1131,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "pt-derive"
+version = "0.1.0"
+dependencies = [
+ "pt-format",
+]
+
+[[package]]
 name = "pt-format"
 version = "0.1.0"
 dependencies = [
