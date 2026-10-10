@@ -51,6 +51,7 @@ Send and receive times use kernel `SO_TIMESTAMPING` (hardware, then software, th
 ### REQ-PRB-009: Probe header
 - status: planned
 - spec: §6.4
+- design: docs/design/probe.md
 
 Probe packets carry a fixed little-endian header (version and type, flow, phase, session, sequence, intended send time, train id and index, flags) followed by padding and the tag.
 

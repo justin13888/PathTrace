@@ -23,3 +23,4 @@ One file per decision that is hard to reverse, affects compatibility, or departs
 | [0009](0009-pt-format-uses-std.md) | pt-format uses std (no `no_std` requirement) | accepted |
 | [0010](0010-light-trains-for-dual-workload.md) | Add periodic light packet trains to the light observer flow (dual-workload recording) | accepted |
 | [0011](0011-ptf-container-and-encoding.md) | PTF container and encoding | accepted |
+| [0012](0012-timestamp-clock-domains.md) | Packet timestamps: kernel software stamps in CLOCK_REALTIME, recorded raw with clock pairs | accepted |

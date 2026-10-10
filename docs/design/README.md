@@ -13,3 +13,4 @@ One document per component or cross-cutting concern. Written before the code it 
 |---|---|
 | [simulator-requirements.md](simulator-requirements.md) | What the deferred simulator needs; PTF field mapping; sufficiency verdict |
 | [ptf-format.md](ptf-format.md) | PTF 1.0 normative specification: principles, byte layout, sections |
+| [probe.md](probe.md) | Probe and responder: threads, pairing, wire protocol, clocks, raw tables, phases, saturation control, robustness |
