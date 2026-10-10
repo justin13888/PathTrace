@@ -10,5 +10,14 @@ EVNT = "EVNT"
 VALD = "VALD"
 CTXS = "CTXS"
 
+[default.extend-words]
+# MAC address fragment in research notes.
+ba = "ba"
+# Linux/networking identifier fragments.
+ECT = "ECT"
+controllen = "controllen"
+reord = "reord"
+rto = "rto"
+
 [files]
 extend-exclude = ["LICENSE", "mise.lock"]

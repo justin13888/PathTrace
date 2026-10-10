@@ -47,3 +47,8 @@ Pin source code to a commit or version. Keep notes under about 80 lines.
 | [R-0007](R-0007-png-chunk-criticality.md) | PNG chunk criticality rule (analogy for PTF section flags) | partially-confirmed | |
 | [R-0008](R-0008-hk-convco-commit-validation.md) | Can hk alone enforce semantic commits with a closed scope set? | refuted | |
 | [R-0009](R-0009-github-merge-policy-and-license-detection.md) | GitHub merge-commit-only settings, license detection, CI namespaces | confirmed | |
+| [R-0010](R-0010-kernel-packet-timestamps-and-clocks.md) | Kernel packet timestamps (SO_TIMESTAMPING) and their clock | partially-confirmed | |
+| [R-0011](R-0011-per-packet-tos-ttl-and-pmtu.md) | Per-packet ECN/DSCP/TTL via sendmmsg/recvmmsg cmsgs; path MTU signalling | confirmed | |
+| [R-0012](R-0012-tcp-info-congestion-saved-syn.md) | TCP_INFO layout across kernels, TCP_CONGESTION, TCP_SAVED_SYN | refuted | |
+| [R-0013](R-0013-netlink-wifi-interface-metadata.md) | rtnetlink events, nl80211 station info, interface classification, metered state | confirmed | |
+| [R-0014](R-0014-rust-crate-selection-for-measurement.md) | Rust crate selection for sync measurement code | confirmed | |
