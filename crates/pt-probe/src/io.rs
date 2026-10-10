@@ -467,41 +467,55 @@ fn pacer_loop(
                 .collect();
             let first_id = s.next_tx_id();
             let t_user = mono_raw();
-            let mut sent = 0;
-            while sent < msgs.len() {
-                match s.send_batch(&msgs[sent..]) {
+            // Send everything; a failing datagram (e.g. EMSGSIZE above a cached PMTU) is skipped
+            // and recorded, never the rest of the batch. OPT_IDs advance only on success.
+            let mut ok: Vec<Option<u32>> = vec![None; msgs.len()];
+            let mut i = 0;
+            let mut id = first_id;
+            while i < msgs.len() {
+                match s.send_batch(&msgs[i..]) {
                     Ok(0) => break,
-                    Ok(k) => sent += k,
-                    Err(_) => break,
+                    Ok(k) => {
+                        for slot in ok.iter_mut().skip(i).take(k) {
+                            *slot = Some(id);
+                            id = id.wrapping_add(1);
+                        }
+                        i += k;
+                    }
+                    Err(e) => {
+                        let (flow, due, ..) = &items[i];
+                        rec.event(
+                            "send_error",
+                            Value::map()
+                                .with("sock", sock)
+                                .with("flow", *flow)
+                                .with("seq", due.seq)
+                                .with("size", due.size)
+                                .with("errno", e.raw_os_error().unwrap_or(0) as i64)
+                                .with("error", e.to_string()),
+                        );
+                        i += 1;
+                    }
                 }
             }
-            let mut rows = Vec::with_capacity(sent);
+            let mut rows = Vec::with_capacity(items.len());
             let mut bytes = 0u64;
-            for (i, (flow, due, _, _, _, phase)) in items.iter().take(sent).enumerate() {
-                let phase = *phase;
+            for ((flow, due, _, _, _, phase), sent_id) in items.iter().zip(&ok) {
+                let Some(sent_id) = sent_id else { continue };
                 bytes += u64::from(due.size);
                 rows.push(vec![
                     Some(sock as i64),
                     Some(i64::from(*flow)),
                     Some(due.seq as i64),
                     Some(i64::from(due.size)),
-                    Some(i64::from(phase)),
+                    Some(i64::from(*phase)),
                     Some(i64::from(due.train)),
                     Some(i64::from(due.train_idx)),
                     Some(i64::from(due.tos)),
-                    Some(i64::from(first_id.wrapping_add(i as u32))),
+                    Some(i64::from(*sent_id)),
                     Some(due.t_intended as i64),
                     Some(t_user as i64 - due.t_intended as i64),
                 ]);
-            }
-            if sent < items.len() {
-                rec.event(
-                    "send_short",
-                    Value::map()
-                        .with("sock", sock)
-                        .with("wanted", items.len())
-                        .with("sent", sent),
-                );
             }
             shared.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
             rec.rows("tx", rows);
@@ -556,7 +570,7 @@ fn receiver_loop(
                                 "icmp",
                                 Value::map()
                                     .with("sock", si)
-                                    .with("real", pt_sys::clock::realtime())
+                                    .with("real", pii(pt_sys::clock::realtime(), "quasi"))
                                     .with("errno", errno)
                                     .with("icmp_type", icmp_type)
                                     .with("code", code)
