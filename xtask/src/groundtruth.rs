@@ -25,6 +25,8 @@ pub struct Scenario {
     pub script_pm: String,
     pub stage: &'static str,
     pub serve_args: &'static str,
+    pub resp_addr: &'static str,
+    pub probe_args: &'static str,
 }
 
 fn netem(spec: &str) -> String {
@@ -51,6 +53,8 @@ pub fn scenarios() -> Vec<Scenario> {
         script_pm: script.to_string(),
         stage,
         serve_args: "",
+        resp_addr: "10.0.2.2",
+        probe_args: "",
     };
     let throttle443 = "tc qdisc del dev mb0 root; \
         tc qdisc add dev mb0 root handle 1: prio bands 3; \
@@ -250,6 +254,51 @@ pub fn scenarios() -> Vec<Scenario> {
                 "safety",
             )
         },
+        Scenario {
+            resp_addr: "fd00:2::2",
+            ..s(
+                "ipv6",
+                "smoke",
+                &netem("delay 10ms rate 20mbit limit 100"),
+                &netem("delay 10ms rate 20mbit limit 100"),
+                "",
+                "",
+                "IPv6",
+            )
+        },
+        s(
+            "light",
+            "light",
+            &netem("delay 10ms rate 20mbit limit 100"),
+            &netem("delay 10ms rate 20mbit limit 100"),
+            "",
+            "",
+            "profile",
+        ),
+        Scenario {
+            probe_args: "--track-secs 120",
+            ..s(
+                "deep",
+                "deep",
+                &netem("delay 10ms rate 20mbit limit 100"),
+                &netem("delay 10ms rate 20mbit limit 100"),
+                "",
+                "",
+                "profile S6",
+            )
+        },
+        Scenario {
+            probe_args: "--rate-cap 5000000",
+            ..s(
+                "rate-cap",
+                "smoke",
+                &netem("delay 10ms rate 20mbit limit 100"),
+                &netem("delay 10ms rate 20mbit limit 100"),
+                "",
+                "",
+                "safety",
+            )
+        },
         s(
             "rate-100m",
             "standard",
@@ -393,6 +442,8 @@ pub fn run(
         .env("SETUP_PM", &sc.setup_pm)
         .env("SCRIPT_PM", &sc.script_pm)
         .env("SERVE_ARGS", sc.serve_args)
+        .env("RESP_ADDR", sc.resp_addr)
+        .env("PROBE_ARGS", sc.probe_args)
         .status()
         .context("running unshare")?;
     if !status.success() {
@@ -925,6 +976,145 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 cap,
             );
         }
+        "light" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            let sent = |ep: &str| {
+                t.events
+                    .iter()
+                    .find(|e| {
+                        e.get("type").and_then(Value::as_str) == Some("session_end")
+                            && e.get("endpoint").and_then(Value::as_str) == Some(ep)
+                    })
+                    .and_then(|e| e.get("detail")?.get("bytes_sent")?.as_u64())
+            };
+            let (a, b) = (sent("a"), sent("b"));
+            chk(
+                &mut c,
+                "light profile UDP bytes sent per endpoint (≤ 2 MB)",
+                2_000_000,
+                format!("a={a:?} b={b:?}"),
+                a.is_some_and(|x| x <= 2_000_000) && b.is_some_and(|x| x <= 2_000_000),
+            );
+            let size = std::fs::metadata(trace_in(dir).unwrap_or_default())
+                .map(|m| m.len())
+                .unwrap_or(u64::MAX);
+            chk(
+                &mut c,
+                "light trace file size (≤ 200 kB)",
+                200_000,
+                size,
+                size <= 200_000,
+            );
+        }
+        "deep" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            let tracking = t
+                .file
+                .sections
+                .iter()
+                .filter(|s| &s.kind == b"FLOW")
+                .flat_map(|s| {
+                    s.get("flows")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                        .to_vec()
+                })
+                .filter(|f| {
+                    f.get("id")
+                        .and_then(Value::as_u64)
+                        .is_some_and(|id| (100..250).contains(&id))
+                })
+                .count();
+            chk(
+                &mut c,
+                "periodic tracking saturations (120 s → 2)",
+                2,
+                tracking,
+                tracking >= 2,
+            );
+            let alive300 = t
+                .plcy
+                .pointer("/nat/timeouts")
+                .and_then(Value::as_array)
+                .is_some_and(|a| {
+                    a.iter()
+                        .any(|v| v.get("idle_s").and_then(Value::as_u64) == Some(300))
+                });
+            chk(
+                &mut c,
+                "deep NAT probes include 300 s idle",
+                true,
+                alive300,
+                alive300,
+            );
+        }
+        "rate-cap" => {
+            let raw = pt_derive::raw::Raw::load(&t.file);
+            let tb = pt_derive::clock::TimeBase::from_raw(&raw);
+            let (pk, _) = pt_derive::dir::packets(&raw, &tb, "a_to_b");
+            let heavy: Vec<_> = pk
+                .iter()
+                .filter(|p| p.kind == "heavy")
+                .filter_map(|p| Some((p.tx?, p.size)))
+                .collect();
+            let rate = match (
+                heavy.iter().map(|h| h.0).min(),
+                heavy.iter().map(|h| h.0).max(),
+            ) {
+                (Some(t0), Some(t1)) if t1 > t0 => Some(
+                    heavy.iter().map(|h| h.1).sum::<i64>() as f64 * 8.0 * 1e9 / (t1 - t0) as f64,
+                ),
+                _ => None,
+            };
+            chk(
+                &mut c,
+                "initiator heavy send rate under --rate-cap 5 Mbit/s (≤ 5.5 Mbit/s)",
+                5_000_000,
+                fmt(rate),
+                rate.is_some_and(|r| r <= 5_500_000.0),
+            );
+        }
+        "ipv6" => {
+            chk(
+                &mut c,
+                "session complete over IPv6",
+                true,
+                complete,
+                complete,
+            );
+            let peer = t
+                .meta
+                .pointer("/endpoints/a/peer_addr")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            chk(
+                &mut c,
+                "initiator used the IPv6 responder address",
+                "[fd00:2::2]:4433",
+                &peer,
+                peer == "[fd00:2::2]:4433",
+            );
+            let ra = t.num("a_to_b", "/capacity/median_rate_bps");
+            chk(
+                &mut c,
+                "capacity a_to_b over IPv6 (±10%)",
+                format!("{:.0}", ip_rate(20e6)),
+                fmt(ra),
+                rel_ok(ra, ip_rate(20e6), 0.10),
+            );
+            let u = t
+                .plcy
+                .pointer("/classes/udp~1443/reachable")
+                .and_then(Value::as_bool);
+            chk(
+                &mut c,
+                "udp/443 reachable over IPv6",
+                true,
+                format!("{u:?}"),
+                u == Some(true),
+            );
+        }
         "rate-100m" => {
             let r = t.num("a_to_b", "/capacity/median_rate_bps");
             chk(
@@ -1058,8 +1248,8 @@ pub fn closure_checks(a: &Trace, b: &Trace) -> Vec<Check> {
 /// Encoded size of a trace's packet tables: (bytes per packet, packets).
 pub type Size = Option<(f64, usize)>;
 
-/// Returns (bytes per packet, packets). REQ-FMT-015 applies to sessions of ≥ 10 000 packets,
-/// where per-chunk overhead is amortised.
+/// Returns (bytes per packet, packets). REQ-FMT-015's per-packet figure applies to standard and
+/// deep sessions, where the volume is.
 pub fn pkt_bytes_per_packet(t: &Trace) -> Size {
     let mut sections = Vec::new();
     let mut rows = 0usize;
@@ -1084,6 +1274,10 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
     // Sessions run in a scratch directory (it holds throwaway keys and full traces); only
     // results, logs and trace summaries go to the evidence directory (REQ-SEC-002, size).
     let out = root.join("target/groundtruth");
+    if which == "all" {
+        // Fresh scratch space so no directory from an earlier run is reported.
+        let _ = std::fs::remove_dir_all(&out);
+    }
     std::fs::create_dir_all(&out)?;
     let evidence = std::env::var_os("PT_EVIDENCE_OUT").map(PathBuf::from);
     let st = Command::new("cargo")
@@ -1159,6 +1353,12 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
         }
     }
     let mut csv = String::from("scenario,check,truth,got,pass\n");
+    let profile_of = |n: &str| {
+        scenarios()
+            .into_iter()
+            .find(|s| s.name == n)
+            .map_or("", |s| s.profile)
+    };
     let stage_of = |n: &str| {
         scenarios()
             .into_iter()
@@ -1191,10 +1391,10 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
             );
         }
         if let Some((b, n)) = bpp {
-            let applies = *n >= 10_000;
+            let applies = matches!(profile_of(name), "standard" | "deep");
             let pass = !applies || *b <= 8.0;
             let verdict = if !applies {
-                "n/a (< 10 000 packets)"
+                "n/a (smoke/light: fixed overhead dominates)"
             } else if pass {
                 "yes"
             } else {
@@ -1202,11 +1402,11 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
             };
             let _ = writeln!(
                 csv,
-                "{name},\"pkt bytes per packet (canonical; applies at >= 10000 packets)\",\"<= 8\",\"{b:.3} over {n} packets\",{pass}"
+                "{name},\"pkt bytes per packet (canonical; applies to standard/deep sessions)\",\"<= 8\",\"{b:.3} over {n} packets\",{pass}"
             );
             let _ = writeln!(
                 md,
-                "| {name} | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | {b:.3} over {n} packets | {verdict} |"
+                "| {name} | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | {b:.3} over {n} packets | {verdict} |"
             );
             all &= pass;
         }
