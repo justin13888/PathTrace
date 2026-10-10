@@ -11,3 +11,4 @@ One document per component or cross-cutting concern. Written before the code it 
 
 | Document | Covers |
 |---|---|
+| [simulator-requirements.md](simulator-requirements.md) | What the deferred simulator needs; PTF field mapping; sufficiency verdict |
