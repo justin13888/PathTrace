@@ -1,9 +1,9 @@
 # 0011: PTF container and encoding: chunked sections, own deterministic CBOR codec, columnar tables, zstd
 
-- status: proposed
+- status: accepted
 - date: 2026-10-10
 - requirements: REQ-FMT-001, REQ-FMT-004, REQ-FMT-005, REQ-FMT-012, REQ-FMT-015
-- evidence: EXP-0001 (pending), R-0007
+- evidence: EXP-0001, R-0007
 
 ## Context
 
@@ -21,7 +21,7 @@ For CBOR within option 5: (a) the `minicbor` crate, or (b) a small in-crate code
 
 ## Decision
 
-Option 5 with codec (b), provided EXP-0001 confirms that it meets the space budget (≤ 8 B/packet raw layer) and beats or matches the alternatives on size without unacceptable CPU cost. EXP-0001 also fixes the canonical zstd level and chunk size. This ADR is accepted once EXP-0001 has run.
+Option 5 with codec (b). EXP-0001 confirmed it: the canonical encoding costs 4.5–5.0 B/packet against 9–12 B/packet for Arrow IPC, CBOR rows and JSON Lines with zstd, and it encodes 1.37 M packets in 0.35 s. EXP-0001 also fixed the canonical parameters: zstd level 19 (only 0.4–3% smaller than level 3, but cheap at merge time), 65 536-row chunks (size-neutral, with bounded memory), and delta2 for timestamps (3–13% smaller than delta).
 
 ## Consequences
 
