@@ -125,8 +125,9 @@ The data budget is planned once the P3 estimate is known: saturation phases shri
 The receiver reports feedback every 10 ms (unreliable): delivery rate over the last 100 ms, and the queueing-delay estimate `q = (rx − t_intended) − min(rx − t_intended)` over the phase, which is valid for relative changes despite the unknown clock offset. The sender:
 1. **ramp** (2 s): rate rises linearly from 0.5× to 2× the chirp estimate. The knee, where q starts rising, marks the bottleneck.
 2. **hold**: `rate = delivery_rate × clamp(1 + 0.5 × (q_target − q) / q_target, 0.7, 1.3)` with q_target = max(10 ms, half the base RTT). This keeps a standing queue (a backlog, so arrivals are delivery opportunities) without flooding.
-3. **drain**: stop and keep receiving for 1 s, so the queue drain can be measured.
-4. **dead-man**: heavy, chirp, train, CBR and class flows stop if no authenticated feedback arrives for 500 ms (REQ-PRB-005). The light flow (40 kbit/s) keeps observing through short outages, which makes outages visible in the trace, but it also stops after 5 s without any authenticated control message. The hard rate cap and data cap always apply.
+3. **overdrive** (last 1.5 s of saturations longer than 3 s): send at 1.5× the delivery rate. A tail-drop buffer then fills, and its depth becomes observable at loss onset (draft spec §6.5: "ramp … to 2× the estimate"). Holding a 10 ms queue alone never reveals the buffer.
+4. **drain**: stop and keep receiving for 1 s, so the queue drain can be measured.
+5. **dead-man**: heavy, chirp, train, CBR and class flows stop if no authenticated feedback arrives for 500 ms (REQ-PRB-005). The light flow (40 kbit/s) keeps observing through short outages, which makes outages visible in the trace, but it also stops after 5 s without any authenticated control message. The hard rate cap and data cap always apply.
 
 The controller only decides what to send. Whether an arrival counts as a delivery opportunity is decided later by derivation from the logged data (REQ-PRB-013).
 

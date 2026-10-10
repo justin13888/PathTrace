@@ -3,6 +3,7 @@
 ### REQ-DRV-001: Pure and re-runnable
 - status: planned
 - spec: §8
+- design: docs/design/derivation.md
 
 Derivation is a deterministic, pure function of the raw layer. `pathtrace derive` regenerates the derived sections (PATH, SERS, PLCY, VALD) of any trace, old or new, and leaves raw sections byte-identical.
 

@@ -15,3 +15,4 @@ One document per component or cross-cutting concern. Written before the code it 
 | [ptf-format.md](ptf-format.md) | PTF 1.0 normative specification: principles, byte layout, sections |
 | [probe.md](probe.md) | Probe and responder: threads, pairing, wire protocol, clocks, raw tables, phases, saturation control, robustness |
 | [cli.md](cli.md) | `pathtrace` commands, exit codes, CLI decisions |
+| [derivation.md](derivation.md) | Raw observations → path model: time base, per-direction fields, policy, reference results, exports |
