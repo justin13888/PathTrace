@@ -49,8 +49,8 @@ done
 """
 
 [tasks.conformance]
-description = "Run the independent Python reader over the conformance corpus"
-run = "python3 -I tools/ptf-py/ptf.py conformance conformance/v1.0"
+description = "Run the independent Python reader over every conformance corpus directory"
+run = "for d in conformance/*/; do python3 -I tools/ptf-py/ptf.py conformance \"$d\" || exit 1; done"
 
 [tasks.audit]
 description = "Verify the requirement → design → ADR → evidence chain"
