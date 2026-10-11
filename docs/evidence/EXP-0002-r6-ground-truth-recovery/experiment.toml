@@ -1,6 +1,6 @@
 # Experiment definition. Committed before the run; never edited after the run.
 id = "EXP-0002-r6"
-title = "Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run after the musl fix)"
+title = "Ground-truth recovery and netem closure across 23 namespace scenarios (re-run for 1.0.1: doctor warm-up fix)"
 hypothesis = """For every scenario built from known tc/nft impairments in unprivileged namespaces, a real \
 pathtrace session followed by derivation recovers the truth within tolerance: capacity ±10% (static, \
 100 Mbit/s, IPv6, and scripted steps with NRMSE ≤ 10%), base delay ±1 ms, buffer ±15%, discipline, policer, \
