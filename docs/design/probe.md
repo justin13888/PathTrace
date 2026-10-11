@@ -58,14 +58,14 @@ UDP payload = 32-byte header + random padding + 8-byte tag.
 | 28 | 2 | train_idx |
 | 30 | 2 | flags (bit 0 last-of-train, bit 1 feedback-request) |
 
-Tag = first 8 bytes of keyed BLAKE3 over everything before the tag. The key is `blake3::derive_key("pathtrace probe tag v1", noise_handshake_hash)`. Padding comes from a ChaCha stream so that packets do not compress (REQ-PRB-006). Packets with bad tags are counted per flow and never logged as observations.
+Tag = first 8 bytes of keyed BLAKE3 over everything before the tag. The key is `blake3::derive_key("pathtrace probe tag v1", noise_handshake_hash)`. Padding comes from a ChaCha stream so that packets do not compress (REQ-PRB-006). Packets with bad tags are counted (`bad` table, per second) and never logged as observations.
 
 For `udp/443 QUIC-shaped`, the same payload is carried after a QUIC v1 header: the first packet of a flow uses a long header of type Initial, and the rest use short headers with the fixed bit set and an 8-byte DCID derived from the session (ADR 0006, `quic_shape = "header/1"`).
 
 ## 4. Clocks and timestamps (ADR 0012)
 
 - Scheduling and intended times use CLOCK_MONOTONIC_RAW.
-- Probe sockets enable `SO_TIMESTAMPING = RX_SOFTWARE | TX_SOFTWARE | TX_SCHED | SOFTWARE | OPT_ID | OPT_TSONLY`. Hardware stamps need CAP_NET_ADMIN and are used only when the process has it.
+- Probe sockets enable `SO_TIMESTAMPING = RX_SOFTWARE | TX_SOFTWARE | TX_SCHED | SOFTWARE | OPT_ID | OPT_TSONLY`, falling back to `SO_TIMESTAMPNS` (RX only) where that fails.
 - Kernel software stamps are CLOCK_REALTIME (R-0010). Each side therefore logs a **clock pair** about once per second: the minimum-width sandwich of MONO_RAW, REALTIME, MONO_RAW over 8 tries (~30 ns uncertainty). NTP slews and steps can be undone at derivation time.
 - TX stamps: SND (driver, after the local qdisc) where the driver provides it, SCHED (qdisc enqueue) always on supporting kernels. Wi-Fi drivers commonly give SCHED only (R-0010). Both are logged when present, plus the user-space time just before `sendmmsg`. Hardware stamps are not used in 1.x.
 - Every clock pair also reads CLOCK_BOOTTIME inside the same sandwich, so a suspend shows directly as a jump of BOOTTIME − MONO_RAW.
