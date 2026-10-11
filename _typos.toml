@@ -22,4 +22,5 @@ rto = "rto"
 opps = "opps"
 
 [files]
-extend-exclude = ["LICENSE", "mise.lock"]
+# Evidence artifacts are immutable machine output (digests, logs).
+extend-exclude = ["LICENSE", "mise.lock", "docs/evidence/*/artifacts/**", "conformance/**/*.ptf"]
