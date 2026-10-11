@@ -61,7 +61,8 @@ The repository is licensed Apache-2.0 with the verbatim license text, detected a
 Each change that adds or alters behaviour lands its design section first; decisions that are hard to reverse or depart from the original draft spec are ADRs, immutable once accepted.
 
 ### REQ-REPO-009: Release artefacts
-- status: planned
+- status: met
 - spec: new
+- evidence: EXP-0008
 
 Tagged releases publish static (musl) `pathtrace` binaries for x86_64 and aarch64 Linux with SHA-256 checksums.
