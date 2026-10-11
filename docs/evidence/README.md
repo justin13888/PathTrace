@@ -34,7 +34,8 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0002](EXP-0002-ground-truth-recovery/) | Ground-truth recovery and netem closure across 18 namespace scenarios | fail | superseded by EXP-0002-r2 | 26 (see `experiment.toml`) |
 | [EXP-0002-r2](EXP-0002-r2-ground-truth-recovery/) | Ground-truth recovery and netem closure across 23 namespace scenarios (all profiles, IPv6) | fail | superseded by EXP-0002-r3 | 31 (see `experiment.toml`) |
 | [EXP-0002-r3](EXP-0002-r3-ground-truth-recovery/) | Ground-truth recovery and netem closure across 23 namespace scenarios (after the hard data-cap fix) | pass | superseded by EXP-0002-r4 | 31 (see `experiment.toml`) |
-| [EXP-0002-r4](EXP-0002-r4-ground-truth-recovery/) | Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run) | pass | **current** | 31 (see `experiment.toml`) |
+| [EXP-0002-r4](EXP-0002-r4-ground-truth-recovery/) | Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run) | pass | superseded by EXP-0002-r5 | 31 (see `experiment.toml`) |
+| [EXP-0002-r5](EXP-0002-r5-ground-truth-recovery/) | Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run after the musl fix) | pass | **current** | 31 (see `experiment.toml`) |
 | [EXP-0003](EXP-0003-conformance-independent-reader/) | Independent Python reader and Rust reader agree on the v1.0 conformance corpus | pass | superseded by EXP-0003-r2 | 9 (see `experiment.toml`) |
 | [EXP-0003-r2](EXP-0003-r2-conformance-independent-reader/) | Independent Python reader and Rust reader agree on every conformance directory (incl. a real golden trace) | pass | superseded by EXP-0003-r3 | 9 (see `experiment.toml`) |
 | [EXP-0003-r3](EXP-0003-r3-conformance-independent-reader/) | Independent Python reader and Rust reader agree on every conformance directory (incl. a real golden trace) | pass | **current** | 9 (see `experiment.toml`) |
@@ -42,7 +43,8 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0005](EXP-0005-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) | pass | superseded by EXP-0005-r2 | REQ-FMT-016, REQ-SEC-004 |
 | [EXP-0005-r2](EXP-0005-r2-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run at version 1.0.0) | pass | **current** | REQ-FMT-016, REQ-SEC-004 |
 | [EXP-0006](EXP-0006-probe-session-and-policy/) | Probe, wire and syscall tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r2 | 18 (see `experiment.toml`) |
-| [EXP-0006-r2](EXP-0006-r2-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | **current** | 17 (see `experiment.toml`) |
+| [EXP-0006-r2](EXP-0006-r2-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r3 | 17 (see `experiment.toml`) |
+| [EXP-0006-r3](EXP-0006-r3-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | **current** | 17 (see `experiment.toml`) |
 | [EXP-0007](EXP-0007-repo-process/) | Repository process: conventional history, merge-commit-only settings, license, agents file, design-first PRs | pass | superseded by EXP-0007-r2 | REQ-REPO-003, REQ-REPO-004, REQ-REPO-005, REQ-REPO-006, REQ-REPO-007, REQ-REPO-008 |
 | [EXP-0007-r2](EXP-0007-r2-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | superseded by EXP-0007-r3 | 18 (see `experiment.toml`) |
 | [EXP-0007-r3](EXP-0007-r3-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | **current** | 18 (see `experiment.toml`) |
