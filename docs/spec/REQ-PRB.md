@@ -17,7 +17,7 @@ Sessions are authenticated with Noise `IKpsk2` (X25519, ChaCha20-Poly1305, BLAKE
 ### REQ-PRB-003: Control channel with TCP fallback
 - status: met
 - spec: §6.2
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 Control messages are delivered reliably over UDP. When UDP is blocked the session falls back to TCP port 443, records the UDP classes as blocked, and continues.
 
@@ -31,7 +31,7 @@ Before an initiator's address is validated, the responder sends at most three ti
 ### REQ-PRB-005: Dead-man switch
 - status: met
 - spec: §6.2
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 A sender stops within 500 ms of losing authenticated feedback from its peer.
 
@@ -68,14 +68,14 @@ Probe packets carry a fixed little-endian header (version and type, flow, phase,
 - status: met
 - spec: §6.5
 - adr: 0010
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 For the whole session, in both directions, two workloads run. An isochronous light flow (50 packets/s, 100-byte payload) observes delay, loss and jitter without saturating. Periodic light trains (by default 8 back-to-back path-MTU packets every 500 ms) capture what short bursty load experiences.
 
 ### REQ-PRB-011: Measurement phases
 - status: met
 - spec: §6.5
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 The standard profile runs handshake, reachability, quiet baseline, chirps, saturation in each direction, simultaneous saturation and per-class differential phases, plus background NAT-timeout, path-MTU, ECN and DSCP checks.
 
@@ -89,28 +89,28 @@ The probe runs fixed reference workloads over the real path: TCP bulk transfer, 
 ### REQ-PRB-013: Saturation validity
 - status: met
 - spec: §6.5
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 An arrival counts as a delivery opportunity only while the sender demonstrably had a backlog at the bottleneck. Other periods are recorded as unknown, never zero.
 
 ### REQ-PRB-014: Profiles with data caps
 - status: met
 - spec: §6.5, §3
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 Profiles: `smoke` (about 15 s, deployment check), `light` (2 MB or less), `standard` (200 MB or less, about 90 s), `deep` (standard plus a configurable tracking period with periodic short saturations). Phase durations shrink to fit the cap.
 
 ### REQ-PRB-015: Transport policy probing
 - status: met
 - spec: §6.6
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 For each class (`udp/high-port`, `udp/443 opaque`, `udp/443 QUIC-shaped`, `tcp/443 TLS`, `tcp/80`, `tcp/high-port`), the probe records per family: reachability, handshake RTT, capacity ratio and loss differential against the reference class, largest passing datagram, whether ICMP Packet Too Big returns, NAT binding idle timeout, port preservation and rebinding, ECN handling, DSCP handling and suspected TCP proxies.
 
 ### REQ-PRB-016: Safety limits
 - status: met
 - spec: §6.7
-- evidence: EXP-0002-r5, EXP-0006-r4
+- evidence: EXP-0002-r8, EXP-0006-r4
 
 Every session has a hard data cap and a hard rate cap. Saturation is feedback-controlled to hold a standing queue, and a metered connection selects `light` automatically.
 
@@ -138,7 +138,7 @@ The initiator records context that cannot be recovered later: interface type, dr
 ### REQ-PRB-020: Robust, partial-safe sessions
 - status: met
 - spec: new
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 A failing phase never aborts a session; it is recorded as an event with its reason. A trace is always written, partial if necessary. The responder keeps its log per session so `pathtrace fetch` can recover it later.
 
@@ -152,7 +152,7 @@ Initiator and responder exchange protocol versions in the handshake and fail wit
 ### REQ-PRB-022: Mobility survival
 - status: met
 - spec: §6.6, §7.3
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 The session survives initiator address changes and NAT rebinding. Each change is recorded as an event.
 
@@ -160,7 +160,7 @@ The session survives initiator address changes and NAT rebinding. Each change is
 - status: met
 - spec: §6.6
 - adr: 0006
-- evidence: EXP-0002-r5
+- evidence: EXP-0002-r8
 
 The `udp/443 QUIC-shaped` class sends packets with valid QUIC v1 long- and short-header framing around opaque payload, recorded as shape level `header/1`.
 

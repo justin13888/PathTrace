@@ -3,7 +3,7 @@
 ### REQ-SEC-001: No third-party flooding
 - status: met
 - spec: §6.2, §6.7
-- evidence: EXP-0002-r5, EXP-0006-r4
+- evidence: EXP-0002-r8, EXP-0006-r4
 
 The responder cannot be made to send traffic toward an address that has not completed authentication, beyond the anti-amplification allowance. Every sender is bounded by the dead-man switch and the data and rate caps.
 
