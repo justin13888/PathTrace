@@ -24,7 +24,9 @@ fn check(out: &mut Vec<Check>, name: &str, ok: bool, detail: impl Into<String>, 
     });
 }
 
-/// Verify kernel RX and TX timestamps on loopback.
+/// Verify kernel RX and TX timestamps on loopback. The kernel enables RX timestamping lazily, so
+/// the first datagrams after bind may arrive unstamped: keep sending (10 ms apart, up to 0.5 s)
+/// until both kinds of stamp have been seen (docs/design/cli.md).
 fn timestamps() -> (bool, bool, String) {
     let (Ok(a), Ok(b)) = (
         UdpSock::bind("127.0.0.1:0".parse().expect("addr"), SockOpts::default()),
@@ -36,27 +38,31 @@ fn timestamps() -> (bool, bool, String) {
         return (false, false, "no local addr".into());
     };
     let p = [0u8; 64];
-    let _ = a.send_batch(&[OutMsg {
-        dst,
-        payload: &p,
-        tos: 0,
-    }]);
-    let mut bufs = vec![[0u8; MAX_DATAGRAM]; 1];
-    let mut got = Vec::new();
+    let mut bufs = vec![[0u8; MAX_DATAGRAM]; 4];
     let mut errs = Vec::new();
-    for _ in 0..50 {
+    let (mut rx, mut tx) = (false, false);
+    for i in 0..50 {
+        if i > 0 {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _ = a.send_batch(&[OutMsg {
+            dst,
+            payload: &p,
+            tos: 0,
+        }]);
+        let mut got = Vec::new();
         let _ = b.poll(10);
         let _ = b.recv_batch(&mut bufs, &mut got);
+        rx |= got.iter().any(|m| m.rx_kernel.is_some());
         let _ = a.poll(1);
         let _ = a.drain_errqueue(&mut errs);
-        if !got.is_empty() && !errs.is_empty() {
+        tx |= errs
+            .iter()
+            .any(|e| matches!(e, pt_sys::udp::ErrEvent::TxStamp { .. }));
+        if rx && tx {
             break;
         }
     }
-    let rx = got.first().is_some_and(|m| m.rx_kernel.is_some());
-    let tx = errs
-        .iter()
-        .any(|e| matches!(e, pt_sys::udp::ErrEvent::TxStamp { .. }));
     (
         rx,
         tx,

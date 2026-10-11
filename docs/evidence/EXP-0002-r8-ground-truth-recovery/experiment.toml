@@ -1,0 +1,23 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0002-r8"
+title = "Ground-truth recovery and netem closure across 23 namespace scenarios (1.0.1: GE counts, family-wise intervals, ECT-either ECN check)"
+hypothesis = """For every scenario built from known tc/nft impairments in unprivileged namespaces, a real \
+pathtrace session followed by derivation recovers the truth within tolerance: capacity ±10% (static, \
+100 Mbit/s, IPv6, and scripted steps with NRMSE ≤ 10%), base delay ±1 ms, buffer ±15%, discipline, policer, \
+Gilbert-Elliott parameters within family-wise 95% intervals (98.75% each, from the recorded transition counts), jitter ±30%, reordering/duplication, \
+MTU and black holes, ECN/DSCP handling, per-class throttling, UDP blocking with TCP fallback, NAT binding \
+lifetime and rebinding, dead-man stop within 600 ms, data cap and rate cap; the light profile stays ≤ 2 MB per \
+endpoint and the deep profile adds tracking saturations and 300 s NAT probes; the netem export of a trace \
+reproduces it when re-captured; standard/deep packet tables cost ≤ 8 B/packet and a standard trace at \
+100 Mbit/s is ≤ 10 MB."""
+command = "cargo run --release --locked -q -p xtask -- groundtruth all --jobs 6"
+covers = ["crates/pt-probe/src", "crates/pt-derive/src", "crates/pt-sys/src", "crates/pt-wire/src", "crates/pt-format/src", "crates/pathtrace/src", "tools/netns", "xtask/src/groundtruth.rs"]
+requirements = [
+  "REQ-DRV-002", "REQ-DRV-003", "REQ-DRV-004", "REQ-DRV-005", "REQ-DRV-006", "REQ-DRV-007",
+  "REQ-DRV-008", "REQ-DRV-009", "REQ-DRV-010", "REQ-DRV-011", "REQ-DRV-013", "REQ-DRV-014",
+  "REQ-FMT-015", "REQ-FMT-020", "REQ-FMT-021", "REQ-FMT-022",
+  "REQ-PRB-003", "REQ-PRB-005", "REQ-PRB-010", "REQ-PRB-011", "REQ-PRB-013", "REQ-PRB-014",
+  "REQ-PRB-015", "REQ-PRB-016", "REQ-PRB-020", "REQ-PRB-022", "REQ-PRB-023",
+  "REQ-SEC-001", "REQ-SCOPE-005", "REQ-SCOPE-006", "REQ-CLI-004",
+]
+supersedes = ["EXP-0002-r7"]

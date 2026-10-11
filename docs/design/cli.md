@@ -51,3 +51,8 @@
 
 ### `doctor` does not open a session
 - **Choice**: an unauthenticated UDP datagram gets no reply by design (the responder must not answer strangers), so `doctor` tests TCP ports, DNS, timestamping, clocks, the interface, Wi-Fi stats and keys. The end-to-end check is `probe --profile smoke` (about 25 s, at most 50 MB).
+
+### `doctor`'s timestamp self-test warms up
+- **Problem**: the kernel enables RX timestamping lazily (deferred static-key work after the first socket asks for it), so the first datagrams after bind can arrive unstamped. A single-packet self-test then falsely reports `kernel RX stamps false` (EXP-0008).
+- **Choice**: send loopback datagrams 10 ms apart, for up to 0.5 s, until both an RX stamp and a TX stamp have been seen. Report the result after that warm-up. The probe needs no change, because it records each packet's timestamp source (`rx_src`).
+- **Validated by**: EXP-0007 (doctor check) and the release evidence, which run `doctor` from a fresh process.

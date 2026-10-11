@@ -1,0 +1,5 @@
+a5678cf5c27c5f7f072b4d10224c3cc7c1a246c7 build(repo): release 1.0.0 (#25)
+007bbfbd5bcc92464eca953ffc1551232ad7437f feat(derive): path model, exports, redaction, conformance and ground-truth evidence (#24)
+fc27dd7f9786f47844dcc4b8a07864ea6efc623f feat(probe): capture tool — probe, responder, wire protocol, observation logs and merge (#20)
+a3f82cd5e38450198357ba5691fa7e9192066508 feat(format): PTF 1.0 container, CBOR profile, columnar tables and JSONL twin (#19)
+8a783c83796ce832b59d6aa646358d5b92b69895 docs(spec): distil the draft spec into requirements, ADRs and research (#18)
