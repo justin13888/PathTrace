@@ -123,7 +123,8 @@ fn obslog_meta(
                 .with("id", session)
                 .with("profile", profile)
                 .with("t0_mono", p.mono)
-                .with("t0_real", p.real),
+                .with("t0_real", p.real)
+                .with("t0_boot", p.boot),
         )
         .with("endpoint", facts)
         .with("clocks", clocks_value(role))
@@ -556,6 +557,8 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         .with("addr", local_ip.to_string())
         .with("peer_addr", dst.to_string())
         .with("iface", context::iface_facts(&iface))
+        .with("qdisc", context::egress_facts(&iface).0)
+        .with("txqueuelen", context::egress_facts(&iface).1)
         .with("metered", metered.as_str())
         .with(
             "timestamping",
@@ -1545,6 +1548,8 @@ fn responder_session(
         .with("addr", local_ip.to_string())
         .with("peer_addr", src.to_string())
         .with("iface", context::iface_facts(&iface))
+        .with("qdisc", context::egress_facts(&iface).0)
+        .with("txqueuelen", context::egress_facts(&iface).1)
         .with("initiator_label", label.as_str())
         .with(
             "timestamping",

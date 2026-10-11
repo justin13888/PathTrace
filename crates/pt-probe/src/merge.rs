@@ -644,7 +644,7 @@ pub fn merge_file(
             let target = match name.as_str() {
                 "tcpinfo" | "app" | "bad" => &mut obsv_tables,
                 "pairs" | "exchange" => &mut clok,
-                "ifstats" | "wifi" => &mut ctxs,
+                "ifstats" | "wifi" | "netstack" | "qdisc" => &mut ctxs,
                 _ => continue,
             };
             target.extend(chunks(name, &t.cols, &attrs));

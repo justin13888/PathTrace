@@ -160,6 +160,7 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("mono", Enc::Delta2, "ns").clock(mono),
                 c("real", Enc::Delta2, "ns").clock(real),
                 c("width", Enc::Varint, "ns"),
+                c("boot", Enc::Delta2, "ns").null(),
             ],
         ),
         "exchange" => (
@@ -169,6 +170,8 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("t2", Enc::Delta2, "ns").clock("b.mono".into()),
                 c("t3", Enc::Delta2, "ns").clock("b.mono".into()),
                 c("t4", Enc::Delta2, "ns").clock("a.mono".into()),
+                c("req_nonce", Enc::Delta, "id").null(),
+                c("resp_nonce", Enc::Delta, "id").null(),
             ],
         ),
         "ifstats" => (
@@ -183,6 +186,35 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("tx_dropped", Enc::Delta, "count"),
                 c("rx_errors", Enc::Delta, "count"),
                 c("tx_errors", Enc::Delta, "count"),
+            ],
+        ),
+        "netstack" => (
+            b"CTXS",
+            vec![
+                c("t", Enc::Delta2, "ns").clock(mono),
+                c("udp_in_errors", Enc::Delta, "count").null(),
+                c("udp_rcvbuf_errors", Enc::Delta, "count").null(),
+                c("udp_sndbuf_errors", Enc::Delta, "count").null(),
+                c("udp_in_csum_errors", Enc::Delta, "count").null(),
+                c("udp6_in_errors", Enc::Delta, "count").null(),
+                c("udp6_rcvbuf_errors", Enc::Delta, "count").null(),
+                c("udp6_sndbuf_errors", Enc::Delta, "count").null(),
+                c("udp6_in_csum_errors", Enc::Delta, "count").null(),
+                c("softnet_dropped", Enc::Delta, "count").null(),
+                c("softnet_squeezed", Enc::Delta, "count").null(),
+            ],
+        ),
+        "qdisc" => (
+            b"CTXS",
+            vec![
+                c("t", Enc::Delta2, "ns").clock(mono),
+                c("bytes", Enc::Delta, "B").null(),
+                c("packets", Enc::Delta, "count").null(),
+                c("drops", Enc::Delta, "count").null(),
+                c("requeues", Enc::Delta, "count").null(),
+                c("overlimits", Enc::Delta, "count").null(),
+                c("qlen", Enc::Rle, "count").null(),
+                c("backlog", Enc::Rle, "B").null(),
             ],
         ),
         "wifi" => (

@@ -103,13 +103,20 @@ impl Control {
         let c3 = ctl.clone();
         let _ = shared
             .send_ctrl
-            .set(crate::io::CtrlSender(Box::new(move |e| c3.send(&e))));
+            .set(crate::io::CtrlSender(Box::new(move |e| {
+                c3.send(&e);
+            })));
         ctl
     }
 
-    fn emit(&self, env: &Envelope) {
+    /// Seal and send one envelope; returns the Noise nonce of the sealed datagram.
+    fn emit(&self, env: &Envelope) -> Option<u64> {
         let Ok(bytes) = self.transport.seal(env) else {
-            return;
+            return None;
+        };
+        let nonce = match Frame::decode(&bytes) {
+            Some(Frame::Data { nonce, .. }) => Some(nonce),
+            _ => None,
         };
         match &self.wire {
             Wire::Udp { cmd, sock } => {
@@ -125,13 +132,9 @@ impl Control {
                         env.kind,
                         bytes.len()
                     );
-                    return;
+                    return None;
                 }
                 if let Some(dst) = *self.shared.ctrl_dst.read().expect("lock") {
-                    let nonce = match Frame::decode(&bytes) {
-                        Some(Frame::Data { nonce, .. }) => Some(nonce),
-                        _ => None,
-                    };
                     let flow = if self.shared.role == Role::A {
                         crate::io::CONTROL_FLOW_A
                     } else {
@@ -154,14 +157,15 @@ impl Control {
                 let _ = s.write_all(&buf);
             }
         }
+        nonce
     }
 
-    /// Send an unreliable message.
-    pub fn send(&self, env: &Envelope) {
+    /// Send an unreliable message; returns its datagram's Noise nonce.
+    pub fn send(&self, env: &Envelope) -> Option<u64> {
         let mut e = env.clone();
         e.seq = 0;
         e.ack = self.rel.lock().expect("lock").delivered;
-        self.emit(&e);
+        self.emit(&e)
     }
 
     /// Send a reliable message and wait for its acknowledgement.
@@ -234,6 +238,9 @@ impl Control {
     ) {
         let mut last_clock = 0u64;
         let mut clock_burst = 5u32;
+        // Recent clock requests: t1 → Noise nonce of the request datagram.
+        let mut req_nonces: std::collections::VecDeque<(u64, Option<u64>)> =
+            std::collections::VecDeque::new();
         while !self.shared.stop.load(Ordering::Relaxed) {
             // Initiator drives clock exchanges: 5 at start, then 1 per second.
             if self.shared.role == Role::A {
@@ -246,10 +253,12 @@ impl Control {
                 if now - last_clock >= interval {
                     last_clock = now;
                     clock_burst = clock_burst.saturating_sub(1);
-                    self.send(&Envelope::new(
-                        "clock_req",
-                        Value::map().with("t1", mono_raw()),
-                    ));
+                    let t1 = mono_raw();
+                    let n = self.send(&Envelope::new("clock_req", Value::map().with("t1", t1)));
+                    req_nonces.push_back((t1, n));
+                    if req_nonces.len() > 32 {
+                        req_nonces.pop_front();
+                    }
                 }
             }
             let msg = match frames.recv_timeout(Duration::from_millis(50)) {
@@ -306,13 +315,24 @@ impl Control {
                 }
                 "clock_resp" => {
                     let b = &env.body;
+                    let t1 = b.u64_or("t1", 0);
+                    let req = req_nonces
+                        .iter()
+                        .find(|(t, _)| *t == t1)
+                        .and_then(|(_, n)| *n);
+                    let resp = match &msg.frame {
+                        Frame::Data { nonce, .. } => Some(*nonce),
+                        _ => None,
+                    };
                     rec.row(
                         "exchange",
                         vec![
-                            Some(b.u64_or("t1", 0) as i64),
+                            Some(t1 as i64),
                             Some(b.u64_or("t2", 0) as i64),
                             Some(b.u64_or("t3", 0) as i64),
                             Some(msg.mono as i64),
+                            req.map(|n| n as i64),
+                            resp.map(|n| n as i64),
                         ],
                     );
                 }
