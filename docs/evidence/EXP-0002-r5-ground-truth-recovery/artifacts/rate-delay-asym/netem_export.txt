@@ -1,0 +1,2 @@
+a_to_b: Some("netem delay 12.500ms rate 19750kbit limit 120")
+b_to_a: Some("netem delay 12.504ms rate 9891kbit limit 61")

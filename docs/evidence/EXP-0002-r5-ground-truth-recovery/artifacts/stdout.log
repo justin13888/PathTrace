@@ -1,0 +1,103 @@
+| Scenario (simulator stages) | Check | Truth | Recovered | Pass |
+|---|---|---|---|---|
+| rate-delay-asym (S5 S6 S10 S15) | session complete | true | true | yes |
+| rate-delay-asym (S5 S6 S10 S15) | capacity a_to_b (bit/s, ±10%) | 19815059 | 19749600.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | capacity b_to_a (bit/s, ±10%) | 9907530 | 9891200.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | base delay sum a+b (ms, ±1) | 25 | 25.0044 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | split method recorded | symmetric_assumed | symmetric_assumed | yes |
+| rate-delay-asym (S5 S6 S10 S15) | buffer a_to_b (bytes, ±15%) | 150000 | 149414.5817 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | buffer b_to_a (bytes, ±15%) | 75000 | 74732.8380 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | discipline a_to_b | droptail | droptail | yes |
+| rate-delay-asym (S5 S6 S10 S15) | netem export present | yes | see closure | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure capacity a_to_b (±10%) | 19749600.0000 | 19749920.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure buffer a_to_b (±15%) | 149414.5817 | 149367.5612 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure capacity b_to_a (±10%) | 9891200.0000 | 9891200.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure buffer b_to_a (±15%) | 74732.8380 | 74729.0237 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure base delay sum (ms, ±1) | 25.0044 | 25.0051 | yes |
+| rate-delay-asym | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.091 over 70358 packets | yes |
+| symmetric-delay (S10) | base delay a_to_b (ms, ±1) | 20 | 20.0268 | yes |
+| symmetric-delay (S10) | base delay b_to_a (ms, ±1) | 20 | 20.0216 | yes |
+| symmetric-delay (S10) | clock offset (ms, ±1; same host clock) | 0 | -0.0008 | yes |
+| symmetric-delay (S10) | light-train dispersion a_to_b (netem 50 Mbit/s, ±15%) | 49537649 | 49543988.0000 | yes |
+| symmetric-delay | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.380 over 19537 packets | n/a (smoke/light: fixed overhead dominates) |
+| jitter (S10 S11) | jitter stddev a_to_b (ms, ±30%) | 4 | 3.9247 | yes |
+| jitter (S10 S11) | jitter stddev b_to_a (ms, < 0.5) | 0 | 0.0058 | yes |
+| jitter (S10 S11) | reordering detected a_to_b (jitter reorders in netem) | > 0 | 0.2970 | yes |
+| jitter | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.627 over 37470 packets | n/a (smoke/light: fixed overhead dominates) |
+| loss-random (S9) | GE p 95% CI covers truth | 0.02 | Some((0.009735439460820054, 0.02943165486793054)) | yes |
+| loss-random (S9) | GE r 95% CI covers truth | 0.98 | Some((0.7574992425007574, 1.0)) | yes |
+| loss-random (S9) | no loss b_to_a | 0 | 0.0000 | yes |
+| loss-random | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.173 over 270421 packets | yes |
+| loss-gemodel (S9) | GE p 95% CI covers truth | 0.02 | Some((0.004845277890917828, 0.02046764348035197)) | yes |
+| loss-gemodel (S9) | GE r 95% CI covers truth | 0.4 | Some((0.20304991926931162, 0.6138133141934384)) | yes |
+| loss-gemodel (S9) | no loss b_to_a | 0 | 0.0000 | yes |
+| loss-gemodel | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.035 over 270306 packets | yes |
+| rate-step (S6) | capacity series NRMSE a_to_b (≤ 10%) | ≤ 0.10 | 0.0164 over 191 bins | yes |
+| rate-step | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.991 over 70841 packets | yes |
+| policer (S2 S5) | discipline a_to_b | policer | policer | yes |
+| policer (S2 S5) | policed rate a_to_b (±15%) | 4953765 | 4971200.0000 | yes |
+| policer | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.578 over 156536 packets | yes |
+| aqm-ecn (S5 S13) | discipline a_to_b | aqm_suspected | aqm_suspected | yes |
+| aqm-ecn (S5 S13) | ECT(0) marked by fq_codel | marked | marked | yes |
+| aqm-ecn (S5 S13) | capacity a_to_b (htb 20 Mbit/s, ±15%) | 19815059 | 19849120.0000 | yes |
+| aqm-ecn | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.427 over 184426 packets | yes |
+| mtu-icmp (S4) | path MTU a_to_b | 1400 | 1400.0000 | yes |
+| mtu-icmp (S4) | path MTU b_to_a | 1500 | 1500.0000 | yes |
+| mtu-icmp (S4) | a_to_b black hole flag | false | Some(false) | yes |
+| mtu-icmp (S4) | a_to_b ICMP Packet Too Big (MTU 1400) observed | true | true | yes |
+| mtu-icmp | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.288 over 36561 packets | n/a (smoke/light: fixed overhead dominates) |
+| mtu-blackhole (S4) | path MTU a_to_b | 1400 | 1400.0000 | yes |
+| mtu-blackhole (S4) | path MTU b_to_a | 1500 | 1500.0000 | yes |
+| mtu-blackhole (S4) | a_to_b black hole flag | true | Some(true) | yes |
+| mtu-blackhole (S4) | a_to_b ICMP Packet Too Big (MTU 1400) observed | false | false | yes |
+| mtu-blackhole | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.253 over 39494 packets | n/a (smoke/light: fixed overhead dominates) |
+| tos-rewrite (S13) | DSCP EF rewritten a_to_b | rewritten | rewritten | yes |
+| tos-rewrite (S13) | ECT(0) bleached a_to_b | bleached | bleached | yes |
+| tos-rewrite (S13) | DSCP EF preserved b_to_a | preserved | preserved | yes |
+| tos-rewrite | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 5.985 over 68118 packets | n/a (smoke/light: fixed overhead dominates) |
+| udp443-throttle (S1 S2) | udp/443 capacity ratio vs udp/high-port (2 vs ~20 Mbit/s) | < 0.3 | 0.1073 | yes |
+| udp443-throttle (S1 S2) | udp/443-quic capacity ratio | < 0.3 | 0.1073 | yes |
+| udp443-throttle | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.573 over 71912 packets | yes |
+| udp-blocked (S2) | control fell back to TCP | tcp | tcp | yes |
+| udp-blocked (S2) | udp/high-port unreachable | false | Some(false) | yes |
+| udp-blocked (S2) | tcp/443 reachable | true | Some(true) | yes |
+| udp-blocked (S2) | trace written despite blocked UDP | exit 0 or 3 | 3 | yes |
+| udp-blocked | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.683 over 1296 packets | n/a (smoke/light: fixed overhead dominates) |
+| nat-timeout (S3) | binding alive after 15 s idle (timeout 20 s) | true | Some(true) | yes |
+| nat-timeout (S3) | binding expired after 30 s idle | false | Some(false) | yes |
+| nat-timeout (S3) | binding expired after 60 s idle | false | Some(false) | yes |
+| nat-timeout | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.845 over 270301 packets | yes |
+| rebind (S3 S14) | responder recorded nat_rebind | >= 1 | 1 | yes |
+| rebind (S3 S14) | initiator recorded addr_new | >= 1 | 2 | yes |
+| rebind (S3 S14) | session complete after rebinding | true | true | yes |
+| rebind | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.862 over 270308 packets | yes |
+| deadman (S14 safety) | responder heavy packets sent 0.7–3 s into the outage | 0 | Some(0) | yes |
+| deadman (S14 safety) | responder stopped within (ms after outage start) | ≤ 600 | 509.9734 | yes |
+| deadman (S14 safety) | dead_man flow_stopped event recorded by responder | true | true | yes |
+| deadman | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 7.403 over 73669 packets | yes |
+| data-cap (safety) | responder UDP bytes sent ≤ cap + one batch (3 MB + 100 kB) | 3000000 | Some(3019128) | yes |
+| data-cap (safety) | budget_cap event recorded by responder | true | true | yes |
+| data-cap | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 8.515 over 8422 packets | n/a (smoke/light: fixed overhead dominates) |
+| ipv6 (IPv6) | session complete over IPv6 | true | true | yes |
+| ipv6 (IPv6) | initiator used the IPv6 responder address | [fd00:2::2]:4433 | [fd00:2::2]:4433 | yes |
+| ipv6 (IPv6) | capacity a_to_b over IPv6 (±10%) | 19815059 | 19731200.0000 | yes |
+| ipv6 (IPv6) | udp/443 reachable over IPv6 | true | Some(true) | yes |
+| ipv6 | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 8.385 over 11201 packets | n/a (smoke/light: fixed overhead dominates) |
+| light (profile) | session complete | true | true | yes |
+| light (profile) | light profile UDP bytes sent per endpoint (≤ 2 MB) | 2000000 | a=Some(609592) b=Some(603046) | yes |
+| light (profile) | light trace file size (≤ 200 kB) | 200000 | 58014 | yes |
+| light | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 8.977 over 4372 packets | n/a (smoke/light: fixed overhead dominates) |
+| deep (profile S6) | session complete | true | true | yes |
+| deep (profile S6) | periodic tracking saturations (120 s → 2) | 2 | 2 | yes |
+| deep (profile S6) | deep NAT probes include 300 s idle | true | true | yes |
+| deep | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.844 over 112676 packets | yes |
+| rate-cap (safety) | initiator heavy send rate under --rate-cap 5 Mbit/s (≤ 5.5 Mbit/s) | 5000000 | 4938503.0927 | yes |
+| rate-cap | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 8.698 over 6771 packets | n/a (smoke/light: fixed overhead dominates) |
+| rate-100m (S6 size) | capacity a_to_b at 100 Mbit/s (±10%) | 99075297 | 99040960.0000 | yes |
+| rate-100m (S6 size) | standard trace file size at 100 Mbit/s (≤ 10 MB) | 10000000 | 1923177 | yes |
+| rate-100m | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 5.442 over 266153 packets | yes |
+| reorder-dup (S11 S12) | reordering detected a_to_b | > 0 | 0.1118 | yes |
+| reorder-dup (S11 S12) | duplicate rate a_to_b (2% ± 1%) | 0.02 | 0.0192 | yes |
+| reorder-dup (S11 S12) | no duplicates b_to_a | 0 | 0.0000 | yes |
+| reorder-dup | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 5.414 over 54118 packets | n/a (smoke/light: fixed overhead dominates) |
+verdict: pass

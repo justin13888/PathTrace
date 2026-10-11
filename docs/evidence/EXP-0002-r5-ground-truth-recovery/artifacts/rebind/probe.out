@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/rebind/01a12888-e493-7720-b6f5-c4ecb56cf699.ptf
+content_digest: 2666a435ab0799c8c00845132715abdb6d46c1604d5ba294555ab26e6a6dab7d
+packets a_to_b: 134966
+packets b_to_a: 135342
+session: 7d90ae75
