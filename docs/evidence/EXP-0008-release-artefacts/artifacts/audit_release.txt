@@ -1,0 +1,2 @@
+audit: 105 requirements {"deferred": 17, "met": 82, "planned": 4, "user-acceptance": 2}, 19 experiments
+audit: chain intact

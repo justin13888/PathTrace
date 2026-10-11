@@ -1,0 +1,13 @@
+PASS v1.0.0 is an annotated tag
+PASS v1.0.0 is a merge commit on main
+PASS asset for x86_64-unknown-linux-musl
+PASS asset for aarch64-unknown-linux-musl
+PASS SHA256SUMS published
+PASS sha256sum -c SHA256SUMS
+PASS x86_64-unknown-linux-musl binary is static x86-64
+PASS aarch64-unknown-linux-musl binary is static aarch64
+PASS --version = pathtrace 1.0.0
+PASS doctor ok from the released binary
+PASS smoke session complete, trace valid
+PASS trace META: version 1.0.0, commit of v1.0.0, clean build
+PASS audit --release at v1.0.0
