@@ -13,7 +13,7 @@ Goal: a public Linux VM running `pathtrace serve` under systemd, paired with you
 Download the release tarball for each machine's architecture from the GitHub release page, verify it, and install:
 
 ```sh
-VER=v1.0.0            # the release you are installing
+VER=v1.0.1            # the release you are installing
 ARCH=x86_64           # or aarch64
 curl -fLO https://github.com/justin13888/PathTrace/releases/download/$VER/pathtrace-$VER-$ARCH-unknown-linux-musl.tar.gz
 curl -fLO https://github.com/justin13888/PathTrace/releases/download/$VER/SHA256SUMS

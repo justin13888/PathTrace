@@ -58,4 +58,5 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0007-r4](EXP-0007-r4-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | fail | superseded by EXP-0007-r5 | 18 (see `experiment.toml`) |
 | [EXP-0007-r5](EXP-0007-r5-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | superseded by EXP-0007-r6 | 18 (see `experiment.toml`) |
 | [EXP-0007-r6](EXP-0007-r6-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | **current** | 18 (see `experiment.toml`) |
-| [EXP-0008](EXP-0008-release-artefacts/) | Release v1.0.0: published static binaries verified end to end | pass | **current** | REQ-REPO-009 |
+| [EXP-0008](EXP-0008-release-artefacts/) | Release v1.0.0: published static binaries verified end to end | pass | superseded by EXP-0008-r2 | REQ-REPO-009 |
+| [EXP-0008-r2](EXP-0008-r2-release-artefacts/) | Release v1.0.1: published static binaries verified end to end | pass | **current** | REQ-REPO-009 |
