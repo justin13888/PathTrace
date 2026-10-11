@@ -682,13 +682,16 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 &d,
                 d == "aqm_suspected",
             );
+            // fq_codel `ecn` marks ECT(0) and ECT(1) alike, and its marks on the light flow are
+            // few (4-13 per session), so a mark on either ECT codepoint is the truth (EXP-0002-r7).
             let e0 = t.s("a_to_b", "/ecn/codepoints/ect0/verdict");
+            let e1 = t.s("a_to_b", "/ecn/codepoints/ect1/verdict");
             chk(
                 &mut c,
-                "ECT(0) marked by fq_codel",
+                "ECT marked by fq_codel (ECT(0) or ECT(1))",
                 "marked",
-                &e0,
-                e0 == "marked",
+                format!("ect0 {e0}, ect1 {e1}"),
+                e0 == "marked" || e1 == "marked",
             );
             let cap = t.num("a_to_b", "/capacity/median_rate_bps");
             chk(
