@@ -169,6 +169,21 @@ fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
     )
 }
 
+/// Socket options, with the ground-truth harness's test hooks (docs/design/probe.md §4.2):
+/// `PATHTRACE_RECV_BUF` (bytes) shrinks receive buffers to provoke socket drops, and
+/// `PATHTRACE_TX_IDS=predicted` forces predicted transmit ids. Field use never sets them.
+fn sock_opts() -> SockOpts {
+    let mut o = SockOpts::default();
+    if let Some(b) = std::env::var("PATHTRACE_RECV_BUF")
+        .ok()
+        .and_then(|v| v.parse().ok())
+    {
+        o.recv_buf = b;
+    }
+    o.force_predicted_ids = std::env::var("PATHTRACE_TX_IDS").is_ok_and(|v| v == "predicted");
+    o
+}
+
 fn bind_any(v6: bool, port: u16, opts: SockOpts) -> io::Result<UdpSock> {
     let addr: SocketAddr = if v6 {
         SocketAddr::new(IpAddr::from([0u16; 8]), port)
@@ -632,7 +647,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let kp: Keypair = config::load_keypair(&opts.config_dir)?;
     let (dst, all) = resolve(&opts.responder.addr, opts.prefer_v6)?;
     let v6 = dst.is_ipv6();
-    let sopts = SockOpts::default();
+    let sopts = sock_opts();
     let main = Arc::new(bind_any(v6, 0, sopts)?);
     let local_ip = pt_sys::netif::local_addr_for(dst)?;
     let iface = pt_sys::netif::iface_with_addr(local_ip)?.unwrap_or_default();
@@ -1588,7 +1603,7 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
     let (ctl_tx, ctl_rx) = channel::<TcpStream>();
     *state.control_tcp.lock().expect("lock") = Some(ctl_tx);
 
-    let sopts = SockOpts::default();
+    let sopts = sock_opts();
     let main4 = Arc::new(bind_any(false, opts.main_port, sopts)?);
     let main6 = bind_any(true, opts.main_port, sopts).ok().map(Arc::new);
     let (u443_4, u443_6) = if opts.class_ports {

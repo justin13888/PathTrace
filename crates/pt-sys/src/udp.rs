@@ -98,6 +98,9 @@ pub struct SockOpts {
     pub pmtu_probe: bool,
     pub recv_buf: usize,
     pub send_buf: usize,
+    /// Force `Predicted` transmit ids even where `Explicit` is available (ground-truth tests
+    /// of the prediction rules, R-0015).
+    pub force_predicted_ids: bool,
 }
 
 impl Default for SockOpts {
@@ -107,6 +110,7 @@ impl Default for SockOpts {
             pmtu_probe: true,
             recv_buf: 8 << 20,
             send_buf: 8 << 20,
+            force_predicted_ids: false,
         }
     }
 }
@@ -412,7 +416,7 @@ impl UdpSock {
         cvt(unsafe { libc::bind(f, (&raw const ss).cast(), len) })?;
         let mode = if !caps.kernel_tx {
             TxIdMode::None
-        } else if kernel_has_ts_opt_id() {
+        } else if kernel_has_ts_opt_id() && !opts.force_predicted_ids {
             TxIdMode::Explicit
         } else {
             TxIdMode::Predicted
