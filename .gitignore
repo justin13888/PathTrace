@@ -4,3 +4,5 @@
 /fuzz/corpus
 /fuzz/target
 /fuzz/coverage
+__pycache__/
+*.pyc
