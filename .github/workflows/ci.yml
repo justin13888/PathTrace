@@ -26,6 +26,13 @@ jobs:
           key: lint
       - run: hk check --all
       - run: cargo deny check
+      - name: Release target compiles (musl libc types differ from glibc)
+        env:
+          CC_x86_64_unknown_linux_musl: musl-gcc
+        run: |
+          sudo apt-get install -y -qq musl-tools
+          rustup target add x86_64-unknown-linux-musl
+          cargo clippy --locked --workspace --all-targets --target x86_64-unknown-linux-musl -- -D warnings
       - name: Conventional commits (PR commits)
         if: github.event_name == 'pull_request'
         run: convco check --ignore-reverts "origin/${{ github.base_ref }}..${{ github.event.pull_request.head.sha }}"

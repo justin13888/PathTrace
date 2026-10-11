@@ -4,7 +4,7 @@
 - status: met
 - spec: §6.9, §7.6, §7.7, §7.8
 - design: docs/design/cli.md
-- evidence: EXP-0006-r2, EXP-0007-r3
+- evidence: EXP-0006-r3, EXP-0007-r3
 
 `pathtrace` provides `keygen`, `serve`, `probe`, `merge`, `fetch`, `derive`, `doctor`, `trace check|info|dump|load|redact`, `import mahimahi` and `export mahimahi|netem`.
 
@@ -25,6 +25,6 @@ From 1.0, commands and flags are stable. Removing one requires a deprecation war
 - status: met
 - spec: new
 - design: docs/design/cli.md
-- evidence: EXP-0002-r4, EXP-0007-r3
+- evidence: EXP-0002-r5, EXP-0007-r3
 
 Exit codes are documented and stable: 0 success, 1 check failed or invalid input, 2 usage error, 3 partial result (for example, a session completed with failed phases).

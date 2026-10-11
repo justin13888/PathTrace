@@ -52,7 +52,8 @@ jobs:
           ! ldd "$bin" 2>/dev/null | grep -q '=>'
       - name: Package
         run: |
-          name="pathtrace-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          # Branch names in dry runs (workflow_dispatch) may contain "/".
+          name="pathtrace-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
           mkdir "$name"
           cp "target/${{ matrix.target }}/release/pathtrace" LICENSE README.md deploy/pathtrace-responder.service "$name/"
           tar czf "$name.tar.gz" "$name"
