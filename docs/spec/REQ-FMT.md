@@ -52,7 +52,7 @@ Absence is represented by validity bitmaps and explicit `unknown` status, never 
 ### REQ-FMT-008: Provenance
 - status: met
 - spec: §7.1, §7.5
-- evidence: EXP-0007-r3
+- evidence: EXP-0007-r5
 
 META records the producing tool's version and git commit. Every derived parameter records its method as a versioned name (`name/N`), a confidence in [0, 1], and the raw data range it was derived from.
 
