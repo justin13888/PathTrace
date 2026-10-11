@@ -300,6 +300,9 @@ impl Control {
                 "ack" => {}
                 "fb" => {
                     self.shared.last_feedback.store(msg.mono, Ordering::Relaxed);
+                    if let Some(sent) = env.body.get("sent").and_then(Value::as_u64) {
+                        self.shared.peer_bytes_sent.store(sent, Ordering::Relaxed);
+                    }
                     fb(&env.body);
                 }
                 "clock_req" => {

@@ -227,6 +227,19 @@ pub struct ProbeOutcome {
     pub notes: Vec<String>,
 }
 
+/// Byte allowances for saturating flows (docs/design/probe.md §6). Index 0 = a, 1 = b.
+struct Budget {
+    cap: [u64; 2],
+    /// Saturation seconds still to come per sender.
+    left_s: [f64; 2],
+    /// Background bytes per second per sender (light flow, trains, control).
+    bg_bps: f64,
+    /// Reserve per sender for the P8 constant-rate flows.
+    cbr_bytes: u64,
+    /// Planned end of the session (upper estimate).
+    end: Instant,
+}
+
 struct Ctx {
     ep: Endpoint,
     ctl: Arc<Control>,
@@ -236,6 +249,7 @@ struct Ctx {
     mtu: u32,
     verbose: bool,
     notes: Vec<String>,
+    budget: Budget,
 }
 
 impl Ctx {
@@ -293,7 +307,7 @@ impl Ctx {
                 .insert(s.id, s.clone());
             if s.sender == Role::A {
                 if is_controlled(&s.pattern) {
-                    self.ctrlr.add(s.id, at, s.duration_ns);
+                    self.ctrlr.add(s.id, at, s.duration_ns, s.max_bytes);
                 }
                 self.ep.start_flow(s, at);
             }
@@ -349,8 +363,47 @@ impl Ctx {
         )
     }
 
-    fn heavy(&mut self, id: u8, sender: Role, phase: u16, dur_s: f64) -> FlowSpec {
-        self.mk(
+    /// Byte allowance for a saturating flow of `sender` lasting `dur_s`, or `None` (recorded
+    /// as `phase_skipped`) when too little budget is left (docs/design/probe.md §6).
+    fn allow(&mut self, id: u8, sender: Role, phase: u16, dur_s: f64) -> Option<u64> {
+        let k = usize::from(sender == Role::B);
+        let sh = &self.ep.shared;
+        let spent = match sender {
+            Role::A => sh.bytes_sent.load(Ordering::Relaxed),
+            Role::B => sh.peer_bytes_sent.load(Ordering::Relaxed),
+        };
+        let b = &mut self.budget;
+        let time_left = b
+            .end
+            .saturating_duration_since(Instant::now())
+            .as_secs_f64();
+        let reserve = (b.bg_bps * time_left) as u64 + b.cbr_bytes;
+        let a = crate::plan::allowance(b.cap[k], spent, reserve, dur_s, b.left_s[k]);
+        b.left_s[k] = (b.left_s[k] - dur_s).max(0.0);
+        if a < crate::plan::MIN_ALLOWANCE {
+            self.rec.event(
+                "phase_skipped",
+                Value::map()
+                    .with("phase", phase)
+                    .with("flow", id)
+                    .with("sender", sender.name())
+                    .with("allowance", a)
+                    .with("spent", spent)
+                    .with("reason", "budget"),
+            );
+            self.say(&format!(
+                "skipping flow {id} (P{phase}): data budget left for {} is {a} B",
+                sender.name()
+            ));
+            return None;
+        }
+        Some(a)
+    }
+
+    /// A saturating heavy flow with its byte allowance, or `None` if the budget is spent.
+    fn heavy(&mut self, id: u8, sender: Role, phase: u16, dur_s: f64) -> Option<FlowSpec> {
+        let max_bytes = self.allow(id, sender, phase, dur_s)?;
+        let mut s = self.mk(
             id,
             "heavy",
             sender,
@@ -362,7 +415,9 @@ impl Ctx {
             },
             phase,
             dur_s,
-        )
+        );
+        s.max_bytes = max_bytes;
+        Some(s)
     }
 }
 
@@ -615,7 +670,12 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let _ = ep.cmd.send(PacerCmd::SetTagger(Box::new(Tagger::new(
         &transport.handshake_hash,
     ))));
-    let ctrlr = Arc::new(Controller::new(Role::A, ep.cmd.clone(), opts.rate_cap_bps));
+    let ctrlr = Arc::new(Controller::new(
+        Role::A,
+        ep.cmd.clone(),
+        opts.rate_cap_bps,
+        shared.flow_bytes.clone(),
+    ));
     let wire = match tcp_ctrl.take() {
         Some(s) => {
             let reader = s.try_clone()?;
@@ -643,6 +703,22 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         shared.flows.write().expect("lock").insert(c.id, c);
     }
 
+    let track_s = opts.track_s.unwrap_or(opts.profile.track_s);
+    let p = &opts.profile;
+    let started = Instant::now();
+    let budget = Budget {
+        cap: [
+            p.data_cap,
+            p.data_cap.min(wb.u64_or("data_cap", p.data_cap)),
+        ],
+        left_s: [
+            p.saturation_s(Role::A, track_s),
+            p.saturation_s(Role::B, track_s),
+        ],
+        bg_bps: crate::plan::background_bps(p, mtu),
+        cbr_bytes: if p.refs { 2_000_000 / 8 * 5 } else { 0 },
+        end: started + Duration::from_secs_f64(p.planned_s(track_s)),
+    };
     let mut ctx = Ctx {
         ep,
         ctl,
@@ -652,8 +728,8 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         mtu,
         verbose: opts.verbose,
         notes,
+        budget,
     };
-    let started = Instant::now();
     let tcp_key = transport.session_key(TCP_KEY_CONTEXT);
     run_phases(&mut ctx, opts, dst, &all, &cert, &tcp_key, session);
 
@@ -1015,20 +1091,29 @@ fn run_phases(
 
     if p.sat_s > 0.0 {
         ctx.phase(4, "saturate a_to_b");
-        let s = ctx.heavy(ids::HEAVY_A, Role::A, 4, p.sat_s);
-        ctx.start(vec![s], 50);
-        ctx.sleep(p.sat_s + 1.0);
+        if let Some(s) = ctx.heavy(ids::HEAVY_A, Role::A, 4, p.sat_s) {
+            ctx.start(vec![s], 50);
+            ctx.sleep(p.sat_s + 1.0);
+        }
         ctx.phase(5, "saturate b_to_a");
-        let s = ctx.heavy(ids::HEAVY_B, Role::B, 5, p.sat_s);
-        ctx.start(vec![s], 50);
-        ctx.sleep(p.sat_s + 1.0);
+        if let Some(s) = ctx.heavy(ids::HEAVY_B, Role::B, 5, p.sat_s) {
+            ctx.start(vec![s], 50);
+            ctx.sleep(p.sat_s + 1.0);
+        }
     }
     if p.both_s > 0.0 {
         ctx.phase(6, "saturate both");
-        let a = ctx.heavy(ids::BOTH_A, Role::A, 6, p.both_s);
-        let b = ctx.heavy(ids::BOTH_B, Role::B, 6, p.both_s);
-        ctx.start(vec![a, b], 50);
-        ctx.sleep(p.both_s + 1.0);
+        let both: Vec<FlowSpec> = [
+            ctx.heavy(ids::BOTH_A, Role::A, 6, p.both_s),
+            ctx.heavy(ids::BOTH_B, Role::B, 6, p.both_s),
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if !both.is_empty() {
+            ctx.start(both, 50);
+            ctx.sleep(p.both_s + 1.0);
+        }
     }
     if p.class_sat_s > 0.0 {
         ctx.phase(7, "class differential");
@@ -1044,8 +1129,12 @@ fn run_phases(
                         .with("class", class)
                         .with("reason", "unreachable in P1"),
                 );
+                ctx.budget.left_s[0] = (ctx.budget.left_s[0] - p.class_sat_s).max(0.0);
                 continue;
             }
+            let Some(max_bytes) = ctx.allow(id, Role::A, 7, p.class_sat_s) else {
+                continue;
+            };
             let mut s = ctx.mk(
                 id,
                 "class-sat",
@@ -1061,6 +1150,7 @@ fn run_phases(
             );
             s.quic = quic;
             s.class = class.to_string();
+            s.max_bytes = max_bytes;
             ctx.start(vec![s], 50);
             ctx.sleep(p.class_sat_s + 0.5);
         }
@@ -1162,8 +1252,9 @@ fn run_phases(
             ctx.sleep(57.0);
             let sender = if i % 2 == 0 { Role::A } else { Role::B };
             let id = ids::TRACK0.saturating_add((i % 150) as u8);
-            let s = ctx.heavy(id, sender, 10, 3.0);
-            ctx.start(vec![s], 50);
+            if let Some(s) = ctx.heavy(id, sender, 10, 3.0) {
+                ctx.start(vec![s], 50);
+            }
             ctx.sleep(3.0);
         }
     }
@@ -1590,7 +1681,12 @@ fn responder_session(
     let _ = ep.cmd.send(PacerCmd::SetTagger(Box::new(Tagger::new(
         &transport.handshake_hash,
     ))));
-    let ctrlr = Arc::new(Controller::new(Role::B, ep.cmd.clone(), rate_cap));
+    let ctrlr = Arc::new(Controller::new(
+        Role::B,
+        ep.cmd.clone(),
+        rate_cap,
+        shared.flow_bytes.clone(),
+    ));
     let wire = match tcp {
         Some(s) => {
             let reader = s.try_clone()?;
@@ -1650,7 +1746,7 @@ fn responder_session(
                     shared.flows.write().expect("lock").insert(s.id, s.clone());
                     if s.sender == Role::B {
                         if is_controlled(&s.pattern) {
-                            ctrlr.add(s.id, at, s.duration_ns);
+                            ctrlr.add(s.id, at, s.duration_ns, s.max_bytes);
                         }
                         ep.start_flow(s, at);
                     }

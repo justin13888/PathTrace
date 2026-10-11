@@ -52,6 +52,25 @@ pub struct FbStats {
     pub updated: u64,
 }
 
+/// IP bytes sent per flow id, written by the pacer (byte allowances, docs/design/probe.md §6).
+#[derive(Debug)]
+pub struct FlowBytes(Box<[AtomicU64]>);
+
+impl Default for FlowBytes {
+    fn default() -> Self {
+        FlowBytes((0..256).map(|_| AtomicU64::new(0)).collect())
+    }
+}
+
+impl FlowBytes {
+    pub fn get(&self, flow: u8) -> u64 {
+        self.0[usize::from(flow)].load(Ordering::Relaxed)
+    }
+    pub fn add(&self, flow: u8, bytes: u64) {
+        self.0[usize::from(flow)].fetch_add(bytes, Ordering::Relaxed);
+    }
+}
+
 /// State shared between the pacer, receiver, control layer and session logic.
 #[derive(Debug)]
 pub struct Shared {
@@ -68,6 +87,10 @@ pub struct Shared {
     pub last_feedback: AtomicU64,
     pub last_ctrl: AtomicU64,
     pub bytes_sent: AtomicU64,
+    /// Per-flow bytes sent by this endpoint.
+    pub flow_bytes: Arc<FlowBytes>,
+    /// The peer's bytes sent, as last reported in its feedback (`sent`).
+    pub peer_bytes_sent: AtomicU64,
     pub data_cap: AtomicU64,
     pub rate_cap_bps: AtomicU64,
     pub stop: AtomicBool,
@@ -101,6 +124,8 @@ impl Shared {
             last_feedback: AtomicU64::new(now),
             last_ctrl: AtomicU64::new(now),
             bytes_sent: AtomicU64::new(0),
+            flow_bytes: Arc::new(FlowBytes::default()),
+            peer_bytes_sent: AtomicU64::new(0),
             data_cap: AtomicU64::new(data_cap),
             rate_cap_bps: AtomicU64::new(rate_cap_bps),
             stop: AtomicBool::new(false),
@@ -482,6 +507,11 @@ fn pacer_loop(
                 g.done = true;
                 continue;
             }
+            if g.spec.max_bytes > 0 && shared.flow_bytes.get(g.spec.id) >= g.spec.max_bytes {
+                stopped.push((g.spec.id, "allowance"));
+                g.done = true;
+                continue;
+            }
             match dead_man(&g.spec.kind, fb_lost, g.paused) {
                 DeadMan::Run => {}
                 DeadMan::Stop => {
@@ -661,6 +691,7 @@ fn pacer_loop(
             for ((flow, due, _, _, _, phase), sent_id) in items.iter().zip(&ok) {
                 let Some(sent_id) = sent_id else { continue };
                 bytes += u64::from(due.size);
+                shared.flow_bytes.add(*flow, u64::from(due.size));
                 rows.push(vec![
                     Some(sock as i64),
                     Some(i64::from(*flow)),
@@ -972,7 +1003,8 @@ fn send_feedback(shared: &Shared, now: u64) {
             "fb",
             Value::map()
                 .with("flows", Value::Array(chunk.to_vec()))
-                .with("t", now),
+                .with("t", now)
+                .with("sent", shared.bytes_sent.load(Ordering::Relaxed)),
         ));
     }
 }
