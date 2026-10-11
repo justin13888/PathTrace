@@ -2,3 +2,5 @@
 [toolchain]
 channel = "1.99.0"
 components = ["rustfmt", "clippy"]
+# Release binaries are static musl builds (release.yml); CI also checks this target on every PR.
+targets = ["x86_64-unknown-linux-musl", "aarch64-unknown-linux-musl"]
