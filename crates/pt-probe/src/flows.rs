@@ -292,6 +292,8 @@ pub struct Gen {
     /// Current rate for `Rate` patterns (bit/s).
     pub bps: u64,
     pub done: bool,
+    /// Paused by the dead-man switch (session-long observers only).
+    pub paused: bool,
 }
 
 /// One packet the pacer should send now.
@@ -321,6 +323,7 @@ impl Gen {
             idx: 0,
             bps,
             done: false,
+            paused: false,
         }
     }
 

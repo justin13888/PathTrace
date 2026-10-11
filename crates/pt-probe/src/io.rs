@@ -223,12 +223,28 @@ fn udp_overhead(v6: bool) -> u32 {
     if v6 { 48 } else { 28 }
 }
 
-/// Kinds subject to the 500 ms dead-man switch.
-fn dead_man_kind(kind: &str) -> bool {
-    matches!(
-        kind,
-        "heavy" | "chirp" | "train" | "cbr" | "class-sat" | "pmtu"
-    )
+/// What the 500 ms dead-man switch does to a flow (docs/design/probe.md §7, REQ-PRB-005).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeadMan {
+    /// Keep sending.
+    Run,
+    /// Stop for good (heavy, chirp, CBR and class-saturation flows).
+    Stop,
+    /// Stop sending until feedback returns (session-long observers: trains, PMTU ladder).
+    Pause,
+    /// Feedback returned: send again.
+    Resume,
+}
+
+/// Dead-man decision for a flow of `kind`, given whether feedback is lost and whether the flow
+/// is currently paused. The light flow has its own, longer rule (5 s without any control).
+fn dead_man(kind: &str, feedback_lost: bool, paused: bool) -> DeadMan {
+    match kind {
+        "heavy" | "chirp" | "cbr" | "class-sat" if feedback_lost => DeadMan::Stop,
+        "train" | "pmtu" if feedback_lost && !paused => DeadMan::Pause,
+        "train" | "pmtu" if !feedback_lost && paused => DeadMan::Resume,
+        _ => DeadMan::Run,
+    }
 }
 
 /// One packet scheduled for sending: flow, schedule entry, destination, QUIC framing, type, phase.
@@ -457,14 +473,40 @@ fn pacer_loop(
         let mut stopped = Vec::new();
         for g in gens.iter_mut() {
             let sock = ids.get(&g.spec.sock.name()).copied().unwrap_or(0);
-            let dm = dead_man_kind(&g.spec.kind)
-                && now.saturating_sub(last_fb) > DEAD_MAN_NS
+            let fb_lost = now.saturating_sub(last_fb) > DEAD_MAN_NS
                 && now.saturating_sub(g.start) > DEAD_MAN_NS;
             // The data cap is hard: every probe flow stops, the light flow included. Only the
             // control traffic needed to end the session continues (and is still counted).
-            if dm || over_cap {
-                stopped.push((g.spec.id, if dm { "dead_man" } else { "budget_cap" }));
+            if over_cap {
+                stopped.push((g.spec.id, "budget_cap"));
                 g.done = true;
+                continue;
+            }
+            match dead_man(&g.spec.kind, fb_lost, g.paused) {
+                DeadMan::Run => {}
+                DeadMan::Stop => {
+                    stopped.push((g.spec.id, "dead_man"));
+                    g.done = true;
+                    continue;
+                }
+                DeadMan::Pause | DeadMan::Resume => {
+                    g.paused = !g.paused;
+                    rec.event(
+                        if g.paused {
+                            "flow_paused"
+                        } else {
+                            "flow_resumed"
+                        },
+                        Value::map()
+                            .with("flow", g.spec.id)
+                            .with("reason", "dead_man"),
+                    );
+                }
+            }
+            // A paused ladder waits (every size must be probed); paused trains skip their
+            // schedule like the paused light flow.
+            if g.paused && g.spec.kind == "pmtu" {
+                g.next_due = g.next_due.max(now + 20_000_000);
                 continue;
             }
             let dst = match shared.role {
@@ -490,7 +532,7 @@ fn pacer_loop(
             };
             while g.next_due <= now + 20_000 && n < 64 {
                 let Some(due) = g.take() else { break };
-                let skip = g.spec.kind == "light" && light_paused;
+                let skip = g.paused || (g.spec.kind == "light" && light_paused);
                 if !skip {
                     per_sock.entry(sock).or_default().push((
                         g.spec.id,
@@ -952,4 +994,27 @@ pub fn is_controlled(p: &Pattern) -> bool {
             ..
         }
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dead_man_stops_saturating_flows_and_pauses_observers() {
+        for k in ["heavy", "chirp", "cbr", "class-sat"] {
+            assert_eq!(dead_man(k, true, false), DeadMan::Stop, "{k}");
+            assert_eq!(dead_man(k, false, false), DeadMan::Run, "{k}");
+        }
+        for k in ["train", "pmtu"] {
+            assert_eq!(dead_man(k, true, false), DeadMan::Pause, "{k}");
+            assert_eq!(dead_man(k, true, true), DeadMan::Run, "{k}");
+            assert_eq!(dead_man(k, false, true), DeadMan::Resume, "{k}");
+            assert_eq!(dead_man(k, false, false), DeadMan::Run, "{k}");
+        }
+        // The light flow, NAT and class probes follow other rules.
+        for k in ["light", "nat", "class", "control"] {
+            assert_eq!(dead_man(k, true, false), DeadMan::Run, "{k}");
+        }
+    }
 }
