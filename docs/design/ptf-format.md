@@ -4,7 +4,16 @@
 - adr: 0008, 0009, 0011
 - research: R-0001, R-0002, R-0005, R-0007
 
-This document is the normative specification of PTF 1.0. An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+This document is the normative specification of PTF 1.x (currently 1.1). An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+
+## Versions
+
+| Version | Release | Additions (minor versions only add, P6) |
+|---|---|---|
+| 1.0 | pathtrace 1.0.0 | Initial format |
+| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`; FLOW `max_bytes`; new EVNT types (probe.md §5) |
+
+A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
 Part I gives the design principles and the decision behind each. Part II is the byte-level specification. Part III defines the sections.
 
@@ -94,7 +103,7 @@ All integers are little-endian. "u16" means an unsigned 16-bit integer, and so o
 |---|---|---|---|
 | 0 | 8 | magic | `89 50 54 46 0D 0A 1A 0A` |
 | 8 | 2 | major | `1` |
-| 10 | 2 | minor | `0` |
+| 10 | 2 | minor | `1` (writers of PTF 1.1; readers accept any value) |
 | 12 | 4 | flags | `0`. Readers MUST reject a file with any flag bit set (reserved for future major versions) |
 
 A reader MUST reject a file whose `major` is greater than the highest major it supports, and MUST accept any `minor` (P6). The magic follows PNG's design: a non-ASCII first byte, CR-LF and LF to detect line-ending mangling, and Ctrl-Z.
@@ -270,21 +279,26 @@ Every table has `attrs.dir` (`a_to_b` / `b_to_a`) or `attrs.endpoint` (`a` / `b`
 
 | Table (section) | Key attr | Columns (type, canonical encoding, unit, clock) |
 |---|---|---|
-| `pkt` (OBSV) | dir | flow u64 rle; seq u64 delta; size u64 rle B (IP bytes); phase, train, train_idx, tos_tx, tx_sock u64 rle; tx_intended u64 delta2 ns `<sender>.mono`; tx_user_lag i64 varint ns; tx_sched u64? delta2 ns `<sender>.real`; tx_snd_lag i64? varint ns (SND − SCHED); rx u64? delta2 ns `<receiver>.real` (null = not received); rx_src u64? rle enum[kernel,user]; tos_rx, ttl_rx, src, rx_sock, rx_size u64? rle |
-| `dup` (OBSV) | dir | extra arrivals of an already-received (flow, seq): flow, seq, rx, tos_rx, ttl_rx, src, rx_sock |
+| `pkt` (OBSV) | dir | flow u64 rle; seq u64 delta; size u64 rle B (IP bytes); phase, train, train_idx, tos_tx, tx_sock u64 rle; tx_intended u64 delta2 ns `<sender>.mono`; tx_user_lag i64 varint ns; tx_sched u64? delta2 ns `<sender>.real`; tx_snd_lag i64? varint ns (SND − SCHED); rx u64? delta2 ns `<receiver>.real` (null = not received); rx_src u64? rle enum[kernel,user]; tos_rx, ttl_rx, src, rx_sock, rx_size u64? rle; rxq_drops u64? rle count (1.1) |
+| `dup` (OBSV) | dir | extra arrivals of an already-received (flow, seq): flow, seq, rx, tos_rx, ttl_rx, src, rx_sock; rx_src, size, rxq_drops (1.1) |
 | `unmatched` (OBSV) | dir | arrivals with no matching transmission (receiver `rx` row columns) |
 | `echo` (OBSV) | endpoint | arrivals at an endpoint of probes it sent itself (class/NAT echoes): receiver `rx` row columns |
 | `tcpinfo` (OBSV) | endpoint | flow, t (`<ep>.mono`), optlen (bytes the kernel returned), then one nullable u64 per `struct tcp_info` field up to kernel 6.7 (null when the kernel struct is shorter) |
 | `app` (OBSV) | endpoint | flow, t (`<ep>.mono`), event enum[connect_start, connected, tls_done, first_byte, progress, done, req_start, resp_done, error], bytes, value (i64) |
 | `bad` (OBSV) | endpoint | t, bad_tag, unknown (wrong session), truncated: per-second counters |
-| `pairs` (CLOK) | endpoint | mono (`<ep>.mono`), real (`<ep>.real`), width ns: min-width clock sandwich |
-| `exchange` (CLOK) | endpoint=a | t1, t4 (`a.mono`), t2, t3 (`b.mono`) |
+| `txts_unmatched` (OBSV, 1.1) | endpoint | kernel TX stamps that match no `tx` row (echoes, failed sends, mispredicted ids): sock, id, kind enum[sched, snd], real (`<ep>.real`) |
+| `pairs` (CLOK) | endpoint | mono (`<ep>.mono`), real (`<ep>.real`), width ns: min-width clock sandwich; boot u64? delta2 ns (CLOCK_BOOTTIME, read inside the sandwich; 1.1) |
+| `exchange` (CLOK) | endpoint=a | t1, t4 (`a.mono`), t2, t3 (`b.mono`); req_nonce, resp_nonce u64? delta (Noise nonces of the request and response datagrams, i.e. their seq as flows 250/251; 1.1) |
 | `ifstats` (CTXS) | endpoint | t, rx/tx bytes, packets, dropped, errors (cumulative counters) |
+| `netstack` (CTXS, 1.1) | endpoint | t; udp_in_errors, udp_rcvbuf_errors, udp_sndbuf_errors, udp_in_csum_errors, udp6_in_errors, udp6_rcvbuf_errors, udp6_sndbuf_errors, udp6_in_csum_errors, softnet_dropped, softnet_squeezed: u64? delta count, cumulative, from `/proc/net/snmp`, `/proc/net/snmp6`, `/proc/net/softnet_stat` (null = not readable) |
+| `qdisc` (CTXS, 1.1) | endpoint | t; bytes, packets, drops, requeues, overlimits u64? delta (cumulative); qlen, backlog (B) u64? rle: root qdisc of the egress interface (null = no root qdisc reported) |
 | `wifi` (CTXS) | endpoint=a | t, freq MHz, width enum (nl80211), signal dBm, beacon_signal dBm, tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bss (hash, pii quasi): all nullable |
 
 FLOW lists every flow (kind, sender, socket, class, pattern, TOS policy, QUIC shaping, echo). EVNT holds observed events (`phase_start`, `peer_addr`, `nat_rebind`, `addr_new`/`route_*`/`link_*`, `icmp`, `local_error`, `send_error`, `tcp_probe`, `saved_syn`, `ref_tcp`, `flow_stopped`, `budget_cap`, `light_paused`, `session_end`, …); identifying values are wrapped `{value, pii}` and listed in the head's `pii` map.
 
-Observation logs (`META.kind = "obslog"`) carry the per-endpoint precursors: `tx` (sock, flow, seq, size, phase, train, train_idx, tos_tx, id = kernel OPT_ID, tx_intended, tx_user_lag), `txts` (sock, id, kind enum[sched, snd], real) and `rx` (sock, flow, seq, size, rx, rx_src, tos_rx, ttl_rx, src). Any non-META section may repeat in logs. `merge` joins `tx`+`txts` by OPT_ID and then with the peer's `rx` by (flow, seq) into `pkt`, losslessly (`dup`, `unmatched`, `echo` keep everything else).
+Observation logs (`META.kind = "obslog"`) carry the per-endpoint precursors: `tx` (sock, flow, seq, size, phase, train, train_idx, tos_tx, id = OPT_ID, tx_intended, tx_user_lag), `txts` (sock, id, kind enum[sched, snd], real) and `rx` (sock, flow, seq, size, rx, rx_src, tos_rx, ttl_rx, src, rxq_drops). Any non-META section may repeat in logs. `merge` joins `tx`+`txts` by (sock, OPT_ID) and then with the peer's `rx` by (flow, seq) into `pkt`, losslessly (`dup`, `unmatched`, `echo` and `txts_unmatched` keep everything else, and log tables merge does not know are copied unchanged into OBSV).
+
+`rxq_drops` is the receiving socket's cumulative drop count (`SO_RXQ_OVFL`) when the datagram was queued: it increases between two arrivals on a socket exactly when that socket dropped datagrams in between. It is null where the socket could not enable the option. How OPT_IDs were assigned is recorded per socket in `META.endpoints.<ep>.sockets[].tx_ids` (`explicit`: exact; `predicted`: inferred, failures recorded as events; `none`: no TX stamps), probe.md §4.1.
 
 ## Derived series (SERS, critical + derived)
 

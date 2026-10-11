@@ -18,6 +18,14 @@ Methods are versioned independently. Changing a method's output semantics bumps 
 
 Packet transmit time is SND when present (closest to the wire), else SCHED, else user-space (`tx_intended + tx_user_lag`). The choice is counted per direction in `PATH.<dir>.timestamps`.
 
+## Host drops
+
+| Step | Method | Rule |
+|---|---|---|
+| Receiver host drops | `hostdrop.rxq-gap/1` | For each receiving socket, take its arrivals (all flows of the direction, by receive time). Where `rxq_drops` increases between two consecutive arrivals, the socket dropped datagrams in that gap. A lost packet to that socket whose transmit time lies between the transmit times of those two arrivals is a **host drop**: it is excluded from every loss statistic below, counted in `PATH.<dir>.host_drops {count, gaps}`, and treated as unknown (neither delivered nor lost). Traces without `rxq_drops` (PTF 1.0) have no host drops by this rule, and `host_drops.status` is `unknown` |
+
+Sender-side drops need no rule: a datagram the sender failed to send has no `tx` row (probe.md §4.1). Drops in the sender's own egress qdisc are a property of the access link as the host uses it; the `qdisc` table records them alongside, and `PATH.<dir>.local_qdisc_drops` reports the count during the session.
+
 ## Per-direction fields
 
 | Field | Method | Rule (summary) |
@@ -27,9 +35,9 @@ Packet transmit time is SND when present (closest to the wire), else SCHED, else
 | `size_delay` | `delay.size-slope/1` | Median OWD of quiet-period train packets (MTU) minus light packets (128 B) gives a per-byte serialisation delay estimate (R-0002 comp(s)) |
 | `capacity` | `capacity.saturated-arrivals/1` | Saturated windows are where the heavy flow's queueing delay exceeds `max(2 ms, 25% of the controller target)`, or where heavy-flow packets are being lost: loss also proves that demand exceeded capacity, and a policer builds no queue (REQ-PRB-013). Every arrival in that direction during those windows becomes a delivery opportunity (t, bytes) in SERS `capacity_opps[dir]` (`quantum_bytes` is the per-row size, R-0001). 100 ms rate bins go to `capacity_rate[dir]`. Segments: `saturated` with workload `heavy`, `estimated` from trains, `unknown` elsewhere |
 | `capacity_light` | `capacity.train-dispersion/1` | Per light train: arrival offsets relative to the first packet (SERS `train_offsets[dir]`), dispersion rate (n−1)·size·8/(t_last−t_first), losses, and the workload context (quiet or during saturation) (R-0002, ADR 0010) |
-| `queue` | `queue.loss-onset/1` | Per saturation: depth_time = the maximum heavy-flow queueing delay in the 500 ms before each loss (the full-buffer delay for tail drop), median across losses, taken over the flows whose losses revealed the buffer; the overall max if no flow lost packets (a lower bound). depth_bytes = depth_time × saturated rate, cross-checked against drain time after the sender stops. Discipline: `droptail` when losses cluster at the maximum delay (onset delay ≥ 80% of the max), `aqm_suspected` when losses or CE marks occur at lower varying delay, `policer` when losses occur with queueing delay < 2 ms, else `unknown` |
-| `policer` | `policer.lossy-flat/1` | When the discipline is `policer`: rate = delivery rate during lossy periods, burst = bytes delivered above that rate before the first loss |
-| `loss` | `loss.gilbert-runs/1` | Losses of quiet-period light-flow, light-train and control datagrams, taken in transmit order (the path's Gilbert chain advances on every packet, so every packet the probe puts on the path must be observed: EXP-0002) → events (t, burst length) in SERS `loss_events[dir]`. Gilbert model p = P(good→bad), r = P(bad→good), h = 1, k = 0 (netem `gemodel p r 1-h 1-k`, R-0005), with Wilson 95% intervals (`p_ci95`, `r_ci95`) and the transition counts behind them (`good_n`, `good_to_bad`, `bad_n`, `bad_to_good`; p = good_to_bad / good_n, r = bad_to_good / bad_n). The counts let any reader compute an interval at another level, for example a family-wise level when several intervals are judged together (EXP-0002-r6). Added in 1.0.1; older traces lack them, and `derive` adds them |
+| `queue` | `queue.loss-onset/2` | Per saturation: depth_time = the maximum heavy-flow queueing delay in the 500 ms before each loss (the full-buffer delay for tail drop), median across losses, taken over the flows whose losses revealed the buffer; the overall max if no flow lost packets (a lower bound). depth_bytes = depth_time × saturated rate, cross-checked against drain time after the sender stops. Discipline: `droptail` when losses cluster at the maximum delay (onset delay ≥ 80% of the max), `aqm_suspected` when losses or CE marks occur at lower varying delay, `policer` when losses occur with queueing delay < 2 ms, else `unknown` |
+| `policer` | `policer.lossy-flat/2` | When the discipline is `policer`: rate = delivery rate during lossy periods, burst = bytes delivered above that rate before the first loss |
+| `loss` | `loss.gilbert-runs/2` | Losses (host drops excluded; /1 counted them) of quiet-period light-flow, light-train and control datagrams, taken in transmit order (the path's Gilbert chain advances on every packet, so every packet the probe puts on the path must be observed: EXP-0002) → events (t, burst length) in SERS `loss_events[dir]`. Gilbert model p = P(good→bad), r = P(bad→good), h = 1, k = 0 (netem `gemodel p r 1-h 1-k`, R-0005), with Wilson 95% intervals (`p_ci95`, `r_ci95`) and the transition counts behind them (`good_n`, `good_to_bad`, `bad_n`, `bad_to_good`; p = good_to_bad / good_n, r = bad_to_good / bad_n). The counts let any reader compute an interval at another level, for example a family-wise level when several intervals are judged together (EXP-0002-r6). Added in 1.0.1; older traces lack them, and `derive` adds them |
 | `reorder` | `reorder.late-arrivals/1` | Per flow, a packet is reordered if it arrives after a packet with a higher sequence number; rate plus displacement histogram |
 | `duplicate` | `duplicate.count/1` | Rows in `dup` / received rows |
 | `mtu` | `mtu.ladder/1` | Path MTU = largest ladder size received. Black hole = larger sizes lost with no ICMP Packet Too Big; ICMP MTU values are recorded |
@@ -47,6 +55,8 @@ Packet transmit time is SND when present (closest to the wire), else SCHED, else
 | VALD | `vald.reference/1` | Bulk goodput per direction (bytes / elapsed between first byte and done), request/response completion p50/p95/p99, CBR one-way latency p50/p95/p99 and loss |
 
 ## Exports (REQ-FMT-021)
+
+Version 2 of `queue.loss-onset`, `policer.lossy-flat` and `loss.gilbert-runs` differs from version 1 only by excluding host drops; on a trace without `rxq_drops` the results are identical.
 
 - **netem** (`export.netem/1`): `delay <base>ms <jitter p50 spread>ms distribution` + `loss gemodel p r 1-h 1-k` + `rate <summary rate>` + `limit <buffer packets>` per direction. A static summary only, as netem cannot replay time-varying capacity (R-0005).
 - **Mahimahi** (`export.mahimahi/1`): delivery opportunities converted to ms timestamps, one line per 1504-byte quantum (per-byte accounting: an opportunity of n bytes emits n/1504 lines, carrying the remainder) (R-0001). Unknown periods are filled with the median saturated rate, and the file says so in a sidecar.

@@ -15,7 +15,7 @@
 | 0 | Success |
 | 1 | Failure or invalid input (including `trace check` finding the file invalid) |
 | 2 | Usage error (clap) |
-| 3 | Partial result: a session completed but the responder log is missing, phases failed, or a log was truncated. The trace is still written |
+| 3 | Partial result: a session completed but the responder log is missing, phases failed, a log was truncated, or the session was interrupted by SIGINT/SIGTERM. The trace is still written |
 
 ## Commands
 
@@ -26,8 +26,12 @@
 | `responder add <name> <host[:port]> <pairing>` / `responder list` | initiator | Manage known responders (`<config>/responders`, 0600) |
 | `serve [--port 4433] [--no-class-ports] [--state-dir] [--data-cap] [--rate-cap] [--retention-days] [--max-sessions] [-q]` | responder | Run the responder |
 | `probe <responder> --class <class> [--label] [--mobility] [--tag]… [--profile auto\|smoke\|light\|standard\|deep] [--track-secs] [--out DIR] [--ipv6] [--rate-cap] [-q]` | initiator | Run a session; write `<trace_id>.a.ptflog`, fetch `<trace_id>.b.ptflog`, merge into `<trace_id>.ptf` |
-| `merge <a.ptflog> [<b.ptflog>] -o <out.ptf>` | either | Offline merge (REQ-PRB-018) |
-| `fetch --responder <name> --session <hex> --token <hex> --out <file>` | initiator | Retrieve a responder log later (printed by `probe` when fetching failed) |
+| `merge <a.ptflog> [<b.ptflog>] -o <out.ptf>` | either | Offline merge (REQ-PRB-018), then derive |
+| `fetch --resume <id.session>` or `fetch --responder <name> --session <hex> --token <hex> --out <file>` | initiator | Retrieve a responder log later. `--resume` reads the session file `probe` writes after the handshake (it includes the pinned TLS certificate, so the log travels over TLS); the explicit form fetches over plain TCP on the responder's port |
+| `derive <file> [-o out]` | any | Re-derive PATH/SERS/PLCY/VALD from the raw layer |
+| `export netem <file>` / `export mahimahi <file> -o <prefix>` | any | Export the derived model (REQ-FMT-021) |
+| `import mahimahi <up> [<down>] -o <out.ptf>` | any | Import Mahimahi traces |
+| `trace redact <file> --level shareable\|anonymous -o <out>` | any | Remove identifying data (REQ-FMT-016) |
 | `trace check <file> [--json]` | any | Strict validation (REQ-FMT-018) |
 | `trace info <file> [--json]` | any | Summary: kind, ids, profile, class, sections, tables and rows, digest |
 | `trace dump <file> [-o out.jsonl]` / `trace load <in.jsonl> -o <out.ptf>` | any | Lossless JSON Lines twin (REQ-FMT-014) |
@@ -44,6 +48,10 @@
 
 ### `--profile auto`
 - **Choice**: `light` when NetworkManager reports the egress interface as metered (`yes`/`yes (guessed)`), otherwise `standard`. The choice is printed (REQ-PRB-016).
+
+### `probe` prints the session before measuring
+- **Problem**: the responder's half of a session can only be fetched with the session id and token. Printing them only at the end loses them when the probe is interrupted or crashes.
+- **Choice**: right after the handshake, `probe` prints `session: <hex>` and writes `<trace_id>.session` (mode 0600) beside its log. SIGINT/SIGTERM end the session gracefully (exit 3); a second signal terminates at once. `fetch --resume` uses the session file.
 
 ### Pairing in two commands
 - **Problem**: Noise IKpsk2 needs the responder's static key and a per-initiator PSK on the initiator, and the initiator's key on the responder.
