@@ -4,7 +4,7 @@
 - status: met
 - spec: §6.9, §7.6, §7.7, §7.8
 - design: docs/design/cli.md
-- evidence: EXP-0006-r3, EXP-0007-r3
+- evidence: EXP-0006-r4, EXP-0007-r3
 
 `pathtrace` provides `keygen`, `serve`, `probe`, `merge`, `fetch`, `derive`, `doctor`, `trace check|info|dump|load|redact`, `import mahimahi` and `export mahimahi|netem`.
 

@@ -143,7 +143,7 @@ PATH holds, per direction, capacity (delivery opportunities or rate segments wit
 ### REQ-FMT-021: Interoperability exports and imports
 - status: met
 - spec: §7.7
-- evidence: EXP-0002-r5, EXP-0006-r3
+- evidence: EXP-0002-r5, EXP-0006-r4
 
 Mahimahi traces can be imported (capacity only, all other fields `unknown`) and exported (uplink and downlink traces plus delay and loss arguments); a netem command line can be exported from a trace's static summary.
 
