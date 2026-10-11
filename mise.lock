@@ -49,6 +49,11 @@ checksum = "sha256:223ba936714cc861a9cdedad5a8eb664dfdd69d6fbdf6cea6aa8184f52329
 url = "https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.148/cargo-nextest-0.9.148-x86_64-unknown-linux-gnu.tar.gz"
 url_api = "https://api.github.com/repos/nextest-rs/nextest/releases/assets/620598748"
 
+[[tools."cargo:cargo-fuzz"]]
+version = "0.13.2"
+backend = "cargo:cargo-fuzz"
+specifiers = ["0.13.2"]
+
 [[tools."github:convco/convco"]]
 version = "0.7.2"
 backend = "github:convco/convco"
@@ -63,16 +68,6 @@ url_api = "https://api.github.com/repos/convco/convco/releases/assets/543270771"
 checksum = "sha256:f9cfad24af372018f4b8d430cf86d1b7b9b36fcb7e1db5dd30c54b2eed7dde75"
 url = "https://github.com/convco/convco/releases/download/v0.7.2/convco-x86_64-unknown-linux-musl.tar.gz"
 url_api = "https://api.github.com/repos/convco/convco/releases/assets/543270814"
-
-[[tools."github:rust-fuzz/cargo-fuzz"]]
-version = "0.13.2"
-backend = "github:rust-fuzz/cargo-fuzz"
-specifiers = ["0.13.2"]
-
-[tools."github:rust-fuzz/cargo-fuzz"."platforms.linux-x64"]
-checksum = "sha256:b5b704018b63e0f151c17a057ac53b5111e1db545d1b9f72fee79f08a545931c"
-url = "https://github.com/rust-fuzz/cargo-fuzz/releases/download/0.13.2/cargo-fuzz-0.13.2-x86_64-unknown-linux-musl.tar.gz"
-url_api = "https://api.github.com/repos/rust-fuzz/cargo-fuzz/releases/assets/442959815"
 
 [[tools.hk]]
 version = "2.5.0"

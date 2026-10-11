@@ -11,7 +11,8 @@ taplo = "0.10.0"
 actionlint = "1.7.12"
 shellcheck = "0.11.0"
 python = "3.14.8"
-"github:rust-fuzz/cargo-fuzz" = "0.13.2"
+# Built from source: cargo-fuzz publishes no aarch64 binaries.
+"cargo:cargo-fuzz" = "0.13.2"
 
 [settings]
 lockfile = true
