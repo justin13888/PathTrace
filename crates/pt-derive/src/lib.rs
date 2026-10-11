@@ -217,7 +217,8 @@ pub fn apply(f: &PtfFile, tool: &Tool) -> PtfFile {
     sections.extend(rest);
     let mut out = PtfFile {
         major: f.major,
-        minor: f.minor,
+        // Derived sections written by this tool may use this minor's additions.
+        minor: f.minor.max(pt_format::container::MINOR),
         sections,
     };
     pt_format::canonicalize(&mut out);

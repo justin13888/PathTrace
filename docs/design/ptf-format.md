@@ -11,7 +11,7 @@ This document is the normative specification of PTF 1.x (currently 1.1). An inde
 | Version | Release | Additions (minor versions only add, P6) |
 |---|---|---|
 | 1.0 | pathtrace 1.0.0 | Initial format |
-| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`; FLOW `max_bytes`; new EVNT types (probe.md §5) |
+| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and `txts_unmatched_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 

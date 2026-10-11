@@ -1,7 +1,7 @@
 //! Merge two observation logs into one canonical PTF trace (REQ-PRB-018,
 //! docs/design/probe.md §5). Lossless: every logged row ends up in the trace.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use pt_format::{
@@ -165,12 +165,25 @@ pub struct LogInfo {
     pub stopped: Option<String>,
 }
 
+/// How well kernel TX stamps joined transmissions in one direction (probe.md §4.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct StampCheck {
+    /// `tx` rows that got a SCHED stamp.
+    pub joined: usize,
+    /// Joined rows whose SCHED stamp is implausible in time (more than 1 ms before the
+    /// user-space send time, or more than 1 s after it): a sign of misaligned ids.
+    pub implausible: usize,
+}
+
 #[derive(Debug, Clone)]
 pub struct MergeReport {
     pub content_digest: String,
     pub logs: Vec<LogInfo>,
     pub pkt_rows: BTreeMap<String, usize>,
     pub unmatched: BTreeMap<String, usize>,
+    pub stamps: BTreeMap<String, StampCheck>,
+    /// Kernel TX stamps that matched no transmission, per endpoint.
+    pub txts_unmatched: BTreeMap<String, usize>,
 }
 
 struct Log {
@@ -237,14 +250,46 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
     })
 }
 
+/// Maps an endpoint's MONO_RAW to REALTIME with its nearest clock pair (coarse: only used to
+/// sanity-check stamp joins).
+struct MonoToReal(Vec<(i64, i64)>);
+
+impl MonoToReal {
+    fn new(log: &Log) -> MonoToReal {
+        let empty = Tab::default();
+        let t = log.tables.get("pairs").unwrap_or(&empty);
+        let (m, r) = (rows_of(t, "mono"), rows_of(t, "real"));
+        let mut v: Vec<(i64, i64)> = m
+            .iter()
+            .zip(&r)
+            .filter_map(|(m, r)| Some(((*m)?, (*r)? - (*m)?)))
+            .collect();
+        v.sort_unstable();
+        MonoToReal(v)
+    }
+
+    fn real(&self, mono: i64) -> Option<i64> {
+        let i = self.0.partition_point(|(m, _)| *m < mono);
+        let near = [i.checked_sub(1), Some(i)]
+            .into_iter()
+            .flatten()
+            .filter_map(|k| self.0.get(k))
+            .min_by_key(|(m, _)| (m - mono).abs())?;
+        Some(mono + near.1)
+    }
+}
+
 fn rows_of(t: &Tab, name: &str) -> Vec<Option<i64>> {
     t.col(name)
         .map(|c| c.rows.clone())
         .unwrap_or_else(|| vec![None; t.rows])
 }
 
+/// The joined direction: `pkt`, `dup`, `unmatched` columns and the stamp check.
+type Joined = (Vec<Col>, Vec<Col>, Vec<Col>, StampCheck);
+
 /// Join sender `tx`/`txts` with receiver `rx` for one direction.
-fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, Vec<Col>) {
+fn join_direction(sender: &Log, receiver: Option<&Log>) -> Joined {
     let s = sender.role.as_str();
     let r = if s == "a" { "b" } else { "a" };
     let empty = Tab::default();
@@ -309,6 +354,8 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
         rg("rxq_drops"),
     );
 
+    let to_real = MonoToReal::new(sender);
+    let mut check = StampCheck::default();
     let mut out: Vec<Vec<Option<i64>>> = (0..20).map(|_| Vec::with_capacity(order.len())).collect();
     let mut used: HashMap<(i64, i64), usize> = HashMap::new();
     let mut dup: Vec<Vec<Option<i64>>> = vec![Vec::new(); 10];
@@ -341,6 +388,15 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
                 {
                     dup[k].push(val);
                 }
+            }
+        }
+        if let Some(sched) = st.0 {
+            check.joined += 1;
+            let user = t_int[i]
+                .zip(t_lag[i])
+                .and_then(|(a, b)| to_real.real(a + b));
+            if user.is_some_and(|u| sched < u - 1_000_000 || sched > u + 1_000_000_000) {
+                check.implausible += 1;
             }
         }
         let at = |v: &Vec<Option<i64>>| first.and_then(|j| v[j]);
@@ -450,7 +506,28 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
         .iter()
         .map(|c| copy_col(c, un.iter().map(|&j| c.rows[j]).collect()))
         .collect();
-    (pkt, dup_cols, unmatched)
+    (pkt, dup_cols, unmatched, check)
+}
+
+/// Kernel TX stamps of `log` whose (sock, id) matches no `tx` row: echoes, failed sends and
+/// mispredicted ids (probe.md §4.1). Kept as `txts_unmatched` so nothing is dropped (P1).
+fn unmatched_stamps(log: &Log) -> Vec<Col> {
+    let empty = Tab::default();
+    let tx = log.tables.get("tx").unwrap_or(&empty);
+    let txts = log.tables.get("txts").unwrap_or(&empty);
+    let sent: HashSet<(i64, i64)> = rows_of(tx, "sock")
+        .into_iter()
+        .zip(rows_of(tx, "id"))
+        .filter_map(|(s, i)| s.zip(i))
+        .collect();
+    let (sock, id) = (rows_of(txts, "sock"), rows_of(txts, "id"));
+    let keep: Vec<usize> = (0..txts.rows)
+        .filter(|&j| sock[j].zip(id[j]).is_none_or(|k| !sent.contains(&k)))
+        .collect();
+    txts.cols
+        .iter()
+        .map(|c| copy_col(c, keep.iter().map(|&j| c.rows[j]).collect()))
+        .collect()
 }
 
 fn sender_owns(sender: &Log, flow: i64) -> bool {
@@ -588,6 +665,8 @@ pub fn merge_file(
         logs: logs.clone(),
         pkt_rows: BTreeMap::new(),
         unmatched: BTreeMap::new(),
+        stamps: BTreeMap::new(),
+        txts_unmatched: BTreeMap::new(),
     };
     let mut obsv_tables = Vec::new();
     for (sender, receiver) in [(Some(&a), b.as_ref()), (b.as_ref(), Some(&a))] {
@@ -597,7 +676,8 @@ pub fn merge_file(
         } else {
             "b_to_a"
         };
-        let (pkt, dup, unmatched) = join_direction(sender, receiver);
+        let (pkt, dup, unmatched, check) = join_direction(sender, receiver);
+        report.stamps.insert(dir.into(), check);
         let attrs = Value::map()
             .with("dir", dir)
             .with("sender", sender.role.as_str())
@@ -635,20 +715,24 @@ pub fn merge_file(
             &Value::map().with("endpoint", l.role.as_str()),
         ));
     }
-    // Per-endpoint raw tables copied as-is.
+    // Per-endpoint raw tables copied as-is; tables merge does not know go to OBSV unchanged.
     let mut clok = Vec::new();
     let mut ctxs = Vec::new();
     for l in std::iter::once(&a).chain(b.iter()) {
         let attrs = Value::map().with("endpoint", l.role.as_str());
         for (name, t) in &l.tables {
             let target = match name.as_str() {
-                "tcpinfo" | "app" | "bad" => &mut obsv_tables,
+                "tx" | "txts" | "rx" => continue,
                 "pairs" | "exchange" => &mut clok,
                 "ifstats" | "wifi" | "netstack" | "qdisc" => &mut ctxs,
-                _ => continue,
+                _ => &mut obsv_tables,
             };
             target.extend(chunks(name, &t.cols, &attrs));
         }
+        let orphans = unmatched_stamps(l);
+        let n = orphans.first().map_or(0, |c| c.rows.len());
+        report.txts_unmatched.insert(l.role.clone(), n);
+        obsv_tables.extend(chunks("txts_unmatched", &orphans, &attrs));
     }
     // One OBSV section per table chunk keeps sections bounded in memory.
     for t in obsv_tables {
@@ -686,6 +770,22 @@ pub fn merge_file(
         eh.insert(Key::from("pii"), Value::Map(epii));
     }
     sections.push(Section::new(b"EVNT", 0, eh));
+    // How well TX stamps joined (probe.md §4.1): misaligned ids show as implausible joins.
+    let mut checks = Value::map();
+    for (dir, c) in &report.stamps {
+        checks = checks.with(
+            dir,
+            Value::map()
+                .with("txts_joined", c.joined)
+                .with("txts_implausible", c.implausible),
+        );
+    }
+    for (ep, n) in &report.txts_unmatched {
+        checks = checks.with(&format!("txts_unmatched_{ep}"), *n);
+    }
+    if let Some(h) = sections[0].head_mut() {
+        h.insert(Key::from("merge_checks"), checks);
+    }
     let mut file = PtfFile {
         major: pt_format::container::MAJOR,
         minor: pt_format::container::MINOR,

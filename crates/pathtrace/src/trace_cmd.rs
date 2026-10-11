@@ -152,6 +152,7 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 "profile": meta.get("profile").or(meta.get("session").and_then(|s| s.get("profile"))).and_then(Value::as_str),
                 "network_class": meta.get("network").and_then(|n| n.get("class")).and_then(Value::as_str),
                 "complete": meta.get("complete").and_then(Value::as_bool),
+                "merge_checks": meta.get("merge_checks").map(pt_format::jsonl::cbor_to_json),
                 "redaction": meta.get("redaction").and_then(Value::as_str),
                 "tool_commit": meta.get("tool").and_then(|t| t.get("git_commit")).and_then(Value::as_str),
                 "sections": kinds,

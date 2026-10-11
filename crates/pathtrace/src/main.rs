@@ -441,6 +441,14 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
             for (dir, n) in &r.pkt_rows {
                 println!("packets {dir}: {n}");
             }
+            for (dir, c) in &r.stamps {
+                if c.implausible > 0 {
+                    eprintln!(
+                        "warning: {dir}: {} of {} TX stamp joins are implausible in time (see probe.md §4.1)",
+                        c.implausible, c.joined
+                    );
+                }
+            }
             if r.logs.iter().any(|l| l.stopped.is_some()) {
                 partial = true;
             }

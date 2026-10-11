@@ -72,6 +72,13 @@ fn smoke_session_through_netem() {
         let rows = info["tables"][dir]["rows"].as_u64().unwrap_or(0);
         assert!(rows > 1000, "{dir}: {rows} rows");
     }
+    assert_eq!(info["ptf_version"], "1.1", "{info}");
+    // Every TX stamp joins its own transmission (probe.md §4.1).
+    for dir in ["a_to_b", "b_to_a"] {
+        let c = &info["merge_checks"][dir];
+        assert!(c["txts_joined"].as_u64().unwrap_or(0) > 1000, "{dir}: {c}");
+        assert_eq!(c["txts_implausible"], 0, "{dir}: {c}");
+    }
     for t in [
         "tcpinfo[a]",
         "tcpinfo[b]",
@@ -81,6 +88,11 @@ fn smoke_session_through_netem() {
         "exchange[a]",
         "ifstats[a]",
         "echo[a]",
+        // Host-drop accounting on both endpoints (probe.md §4.2).
+        "netstack[a]",
+        "netstack[b]",
+        "qdisc[a]",
+        "qdisc[b]",
     ] {
         assert!(
             info["tables"][t]["rows"].as_u64().unwrap_or(0) > 0,

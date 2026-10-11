@@ -52,6 +52,7 @@ meta = {
   ? complete: bool,
   ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null }],
   ? imported: { * tstr => any },
+  ? merge_checks: { * tstr => any },                 ; 1.1: TX stamp join checks (probe.md §4.1)
   ? extra: any,
   ? pii: pii-map,
   * tstr => any
