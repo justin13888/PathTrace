@@ -1,0 +1,8 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0005-r2"
+title = "Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run at version 1.0.0)"
+hypothesis = "No target finds a crash, panic, hang or invariant violation in 120 s (libFuzzer exits 0 for all four)."
+command = "FUZZ_SECONDS=120 mise run fuzz"
+covers = ["crates/pt-format/src", "crates/pt-wire/src", "fuzz"]
+requirements = ["REQ-FMT-016", "REQ-SEC-004"]
+supersedes = ["EXP-0005"]
