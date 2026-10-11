@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/jitter/01a1283b-cabf-7349-9e7b-11d791821c2d.ptf
+content_digest: 28100db2656174d9be6f6f183fc9461b08aca28a51fec2680fde46d90fade92e
+packets a_to_b: 3193
+packets b_to_a: 34808
+session: f9111a5a

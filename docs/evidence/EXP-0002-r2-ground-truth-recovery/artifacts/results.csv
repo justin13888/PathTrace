@@ -1,0 +1,101 @@
+scenario,check,truth,got,pass
+rate-delay-asym,"session complete","true","true",true
+rate-delay-asym,"capacity a_to_b (bit/s, ±10%)","19815059","19749920.0000",true
+rate-delay-asym,"capacity b_to_a (bit/s, ±10%)","9907530","9891600.0000",true
+rate-delay-asym,"base delay sum a+b (ms, ±1)","25","25.0051",true
+rate-delay-asym,"split method recorded","symmetric_assumed","symmetric_assumed",true
+rate-delay-asym,"buffer a_to_b (bytes, ±15%)","150000","149378.4014",true
+rate-delay-asym,"buffer b_to_a (bytes, ±15%)","75000","74735.8478",true
+rate-delay-asym,"discipline a_to_b","droptail","droptail",true
+rate-delay-asym,"netem export present","yes","see closure",true
+rate-delay-asym,"closure capacity a_to_b (±10%)","19749920.0000","19749600.0000",true
+rate-delay-asym,"closure buffer a_to_b (±15%)","149378.4014","149359.5519",true
+rate-delay-asym,"closure capacity b_to_a (±10%)","9891600.0000","9891200.0000",true
+rate-delay-asym,"closure buffer b_to_a (±15%)","74735.8478","74714.0719",true
+rate-delay-asym,"closure base delay sum (ms, ±1)","25.0051","25.0052",true
+rate-delay-asym,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.568 over 70382 packets",true
+symmetric-delay,"base delay a_to_b (ms, ±1)","20","20.0271",true
+symmetric-delay,"base delay b_to_a (ms, ±1)","20","20.0222",true
+symmetric-delay,"clock offset (ms, ±1; same host clock)","0","-0.0022",true
+symmetric-delay,"light-train dispersion a_to_b (netem 50 Mbit/s, ±15%)","49537649","49544865.0000",true
+symmetric-delay,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.564 over 19529 packets",true
+jitter,"jitter stddev a_to_b (ms, ±30%)","4","3.7990",true
+jitter,"jitter stddev b_to_a (ms, < 0.5)","0","0.0035",true
+jitter,"reordering detected a_to_b (jitter reorders in netem)","> 0","0.2458",true
+jitter,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.820 over 38001 packets",true
+loss-random,"GE p 95% CI covers truth","0.02","Some((0.00869712619721074, 0.02760533210250088))",true
+loss-random,"GE r 95% CI covers truth","0.98","Some((0.7411599827511859, 1.0))",true
+loss-random,"no loss b_to_a","0","0.0000",true
+loss-random,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","4.984 over 275316 packets",true
+loss-gemodel,"GE p 95% CI covers truth","0.02","Some((0.01246833904368247, 0.03471547416522463))",true
+loss-gemodel,"GE r 95% CI covers truth","0.4","Some((0.1824141606186338, 0.43179527736167544))",true
+loss-gemodel,"no loss b_to_a","0","0.0000",true
+loss-gemodel,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.003 over 275336 packets",true
+rate-step,"capacity series NRMSE a_to_b (≤ 10%)","≤ 0.10","0.0129 over 193 bins",true
+rate-step,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.592 over 68548 packets",true
+policer,"discipline a_to_b","policer","policer",true
+policer,"policed rate a_to_b (±15%)","4953765","4971200.0000",true
+policer,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.511 over 158927 packets",true
+aqm-ecn,"discipline a_to_b","aqm_suspected","aqm_suspected",true
+aqm-ecn,"ECT(0) marked by fq_codel","marked","marked",true
+aqm-ecn,"capacity a_to_b (htb 20 Mbit/s, ±15%)","19815059","19840960.0000",true
+aqm-ecn,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.097 over 186673 packets",true
+mtu-icmp,"path MTU a_to_b","1400","1400.0000",true
+mtu-icmp,"path MTU b_to_a","1500","1500.0000",true
+mtu-icmp,"a_to_b black hole flag","false","Some(false)",true
+mtu-icmp,"a_to_b ICMP Packet Too Big (MTU 1400) observed","true","true",true
+mtu-icmp,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.662 over 37011 packets",true
+mtu-blackhole,"path MTU a_to_b","1400","1400.0000",true
+mtu-blackhole,"path MTU b_to_a","1500","1500.0000",true
+mtu-blackhole,"a_to_b black hole flag","true","Some(true)",true
+mtu-blackhole,"a_to_b ICMP Packet Too Big (MTU 1400) observed","false","false",true
+mtu-blackhole,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.039 over 42198 packets",true
+tos-rewrite,"DSCP EF rewritten a_to_b","rewritten","rewritten",true
+tos-rewrite,"ECT(0) bleached a_to_b","bleached","bleached",true
+tos-rewrite,"DSCP EF preserved b_to_a","preserved","preserved",true
+tos-rewrite,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","4.703 over 69099 packets",true
+udp443-throttle,"udp/443 capacity ratio vs udp/high-port (2 vs ~20 Mbit/s)","< 0.3","0.1072",true
+udp443-throttle,"udp/443-quic capacity ratio","< 0.3","0.1072",true
+udp443-throttle,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.385 over 71993 packets",true
+udp-blocked,"control fell back to TCP","tcp","tcp",true
+udp-blocked,"udp/high-port unreachable","false","Some(false)",true
+udp-blocked,"tcp/443 reachable","true","Some(true)",true
+udp-blocked,"trace written despite blocked UDP","exit 0 or 3","3",true
+udp-blocked,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.957 over 1292 packets",true
+nat-timeout,"binding alive after 15 s idle (timeout 20 s)","true","Some(true)",true
+nat-timeout,"binding expired after 30 s idle","false","Some(false)",true
+nat-timeout,"binding expired after 60 s idle","false","Some(false)",true
+nat-timeout,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.163 over 275214 packets",true
+rebind,"responder recorded nat_rebind",">= 1","1",true
+rebind,"initiator recorded addr_new",">= 1","1",true
+rebind,"session complete after rebinding","true","true",true
+rebind,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","4.723 over 275212 packets",true
+deadman,"responder heavy packets sent 0.7–3 s into the outage","0","Some(0)",true
+deadman,"responder stopped within (ms after outage start)","≤ 600","498.8206",true
+deadman,"dead_man flow_stopped event recorded by responder","true","true",true
+deadman,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.470 over 71489 packets",true
+data-cap,"responder UDP bytes sent ≤ cap + one batch (3 MB + 100 kB)","3000000","Some(3100895)",false
+data-cap,"budget_cap event recorded by responder","true","true",true
+data-cap,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","7.527 over 9124 packets",true
+ipv6,"session complete over IPv6","true","true",true
+ipv6,"initiator used the IPv6 responder address","[fd00:2::2]:4433","[fd00:2::2]:4433",true
+ipv6,"capacity a_to_b over IPv6 (±10%)","19815059","19731200.0000",true
+ipv6,"udp/443 reachable over IPv6","true","Some(true)",true
+ipv6,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","7.361 over 11220 packets",true
+light,"session complete","true","true",true
+light,"light profile UDP bytes sent per endpoint (≤ 2 MB)","2000000","a=Some(609442) b=Some(609141)",true
+light,"light trace file size (≤ 200 kB)","200000","57158",true
+light,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","8.799 over 4374 packets",true
+deep,"session complete","true","true",true
+deep,"periodic tracking saturations (120 s → 2)","2","2",true
+deep,"deep NAT probes include 300 s idle","true","true",true
+deep,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","6.509 over 112787 packets",true
+rate-cap,"initiator heavy send rate under --rate-cap 5 Mbit/s (≤ 5.5 Mbit/s)","5000000","4938488.7672",true
+rate-cap,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","8.330 over 6753 packets",true
+rate-100m,"capacity a_to_b at 100 Mbit/s (±10%)","99075297","99040960.0000",true
+rate-100m,"standard trace file size at 100 Mbit/s (≤ 10 MB)","10000000","1855908",true
+rate-100m,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","5.232 over 267227 packets",true
+reorder-dup,"reordering detected a_to_b","> 0","0.0328",true
+reorder-dup,"duplicate rate a_to_b (2% ± 1%)","0.02","0.0181",true
+reorder-dup,"no duplicates b_to_a","0","0.0000",true
+reorder-dup,"pkt bytes per packet (canonical; applies to standard/deep sessions)","<= 8","4.778 over 45841 packets",true

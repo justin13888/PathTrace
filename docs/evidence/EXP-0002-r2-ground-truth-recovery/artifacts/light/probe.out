@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/light/01a12841-f58c-715d-ba3c-fb89be8b8d93.ptf
+content_digest: 7b60c8417dfb66edd4490a8223bb79c0a39ea0670910fe53d2bc8f0eb9098841
+packets a_to_b: 2194
+packets b_to_a: 2180
+session: e1ab81ac
