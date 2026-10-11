@@ -1,0 +1,22 @@
+audit: 105 requirements {"deferred": 17, "met": 83, "planned": 3, "user-acceptance": 2}, 24 experiments
+STALE   EXP-0002-r5: covered paths changed since 4c2cd761da62
+STALE   EXP-0005-r2: covered paths changed since 1050952ca3c2
+STALE   EXP-0007-r3: covered paths changed since d7517e223074
+PENDING EXP-0002-r6: defined but not yet run (Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run after the musl fix))
+PENDING EXP-0005-r3: defined but not yet run (Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run at version 1.0.0))
+PENDING EXP-0007-r4: defined but not yet run (Repository process, scope, CLI surface, derivation purity and in-trace provenance)
+ERROR   REQ-PRB-001 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-002 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-004 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-006 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-007 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-008 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-009 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-012 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-017 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-018 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-024 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SCOPE-007 (docs/spec/REQ-SCOPE.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SEC-002 (docs/spec/REQ-SEC.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SEC-003 (docs/spec/REQ-SEC.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SEC-005 (docs/spec/REQ-SEC.md): status met but no listed evidence has a current `pass` verdict
