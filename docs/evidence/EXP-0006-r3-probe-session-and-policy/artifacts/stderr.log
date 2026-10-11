@@ -1,0 +1,9 @@
+   Compiling pathtrace v1.0.0 (/var/mnt/scratch/golemite/dev/justin13888/PathTrace/crates/pathtrace)
+   Compiling pt-probe v1.0.0 (/var/mnt/scratch/golemite/dev/justin13888/PathTrace/crates/pt-probe)
+    Finished `release` profile [optimized + debuginfo] target(s) in 3.12s
+────────────
+ Nextest run ID c59674fd-a5c4-4a43-9018-2c54ee9468cb with nextest profile: default
+    Starting 1 test across 2 binaries
+        PASS [  42.928s] (1/1) pathtrace::netns smoke_session_through_netem
+────────────
+     Summary [  42.929s] 1 test run: 1 passed, 0 skipped
