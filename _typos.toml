@@ -18,6 +18,9 @@ ECT = "ECT"
 controllen = "controllen"
 reord = "reord"
 rto = "rto"
+# capacity_opps: delivery opportunities (PTF SERS table name).
+opps = "opps"
 
 [files]
-extend-exclude = ["LICENSE", "mise.lock"]
+# Evidence artifacts are immutable machine output (digests, logs).
+extend-exclude = ["LICENSE", "mise.lock", "docs/evidence/*/artifacts/**", "conformance/**/*.ptf"]

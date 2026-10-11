@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/tos-rewrite/01a1283e-e50f-731f-ad48-94ed19a95f37.ptf
+content_digest: 0ebf8b9e8e32daac900bacb567702f805d5ec0f7c7b8d0701b6d1cd77db8c101
+packets a_to_b: 34575
+packets b_to_a: 34524
+session: ca4bc181

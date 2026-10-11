@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/data-cap/01a12840-6d59-755e-9486-1910403a8609.ptf
+content_digest: 43f59fdf9609ad9aeb436419e85285769800d5a251ab44405320e3b7d6f1391a
+packets a_to_b: 5603
+packets b_to_a: 3521
+session: 8085bb37

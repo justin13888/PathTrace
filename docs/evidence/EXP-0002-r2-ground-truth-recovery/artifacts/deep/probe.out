@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/deep/01a12841-f58c-7221-a273-379092457ad9.ptf
+content_digest: 4fd0cd4a5832f20d055a75179851e40fc17171e29e5cf70f5e8d289e97485e48
+packets a_to_b: 63283
+packets b_to_a: 49504
+session: 7a94f05d

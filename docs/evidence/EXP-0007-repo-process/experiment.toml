@@ -1,0 +1,11 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0007"
+title = "Repository process: conventional history, merge-commit-only settings, license, agents file, design-first PRs"
+hypothesis = """Every non-merge commit on HEAD's history is a valid conventional commit with a scope from the \
+closed set; GitHub allows only merge commits and the main ruleset blocks force-push and deletion; GitHub \
+detects the license as Apache-2.0; CLAUDE.md is a symlink to AGENTS.md; every tool is pinned in mise.lock; \
+in every merged PR the first commit is documentation (design, spec, ADR or research)."""
+command = "sh docs/evidence/EXP-0007-repo-process/check.sh"
+covers = [".convco", "hk.pkl", "mise.toml", "mise.lock", "AGENTS.md", "LICENSE"]
+requirements = ["REQ-REPO-003", "REQ-REPO-004", "REQ-REPO-005", "REQ-REPO-006", "REQ-REPO-007", "REQ-REPO-008"]
+supersedes = []

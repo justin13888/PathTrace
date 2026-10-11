@@ -21,6 +21,9 @@ use crate::record::{Recorder, pii};
 pub const FEEDBACK_INTERVAL_NS: u64 = 20_000_000;
 pub const DEAD_MAN_NS: u64 = 500_000_000;
 pub const LIGHT_DEAD_MAN_NS: u64 = 5_000_000_000;
+/// Flow ids under which control datagrams are observed (sender a / sender b).
+pub const CONTROL_FLOW_A: u8 = 250;
+pub const CONTROL_FLOW_B: u8 = 251;
 
 /// A control datagram handed from the receiver to the control layer.
 #[derive(Debug)]
@@ -115,12 +118,14 @@ pub enum PacerCmd {
     StopAll,
     SetRate(u8, u64),
     SetTagger(Box<Tagger>),
-    /// Send raw bytes at MONO_RAW time `at` (0 = now).
+    /// Send raw bytes at MONO_RAW time `at` (0 = now). `log` = (flow, seq) records the datagram
+    /// as an observation (control datagrams: flow 250/251, seq = Noise nonce).
     Raw {
         sock: usize,
         dst: SocketAddr,
         bytes: Vec<u8>,
         at: u64,
+        log: Option<(u8, u64)>,
     },
     Shutdown,
 }
@@ -187,6 +192,7 @@ impl Endpoint {
             dst,
             bytes,
             at: 0,
+            log: None,
         });
     }
 
@@ -226,6 +232,12 @@ fn dead_man_kind(kind: &str) -> bool {
 /// One packet scheduled for sending: flow, schedule entry, destination, QUIC framing, type, phase.
 type DueItem = (u8, Due, SocketAddr, bool, PktType, u16);
 
+/// A scheduled raw datagram: due time, socket, destination, bytes, optional observation.
+type Delayed = (u64, usize, SocketAddr, Vec<u8>, Option<(u8, u64)>);
+
+/// A due raw datagram: socket, destination, bytes, optional observation (flow, seq).
+type RawItem = (usize, SocketAddr, Vec<u8>, Option<(u8, u64)>);
+
 fn pacer_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -235,13 +247,13 @@ fn pacer_loop(
 ) {
     let mut gens: Vec<Gen> = Vec::new();
     let mut tagger: Option<Tagger> = None;
-    let mut delayed: Vec<(u64, usize, SocketAddr, Vec<u8>)> = Vec::new();
+    let mut delayed: Vec<Delayed> = Vec::new();
     let mut light_paused = false;
     let mut cap_logged = false;
     let handle = |c: PacerCmd,
                   gens: &mut Vec<Gen>,
                   tagger: &mut Option<Tagger>,
-                  delayed: &mut Vec<(u64, usize, SocketAddr, Vec<u8>)>|
+                  delayed: &mut Vec<Delayed>|
      -> bool {
         match c {
             PacerCmd::Start(spec, at) => {
@@ -262,7 +274,8 @@ fn pacer_loop(
                 dst,
                 bytes,
                 at,
-            } => delayed.push((at, sock, dst, bytes)),
+                log,
+            } => delayed.push((at, sock, dst, bytes, log)),
             PacerCmd::Shutdown => return false,
         }
         true
@@ -313,24 +326,45 @@ fn pacer_loop(
         let now = mono_raw();
 
         // Raw datagrams (control, echoes) that are due.
-        let mut raw_due: Vec<(usize, SocketAddr, Vec<u8>)> = Vec::new();
+        let mut raw_due: Vec<RawItem> = Vec::new();
         delayed.retain_mut(|d| {
             if d.0 <= now {
-                raw_due.push((d.1, d.2, std::mem::take(&mut d.3)));
+                raw_due.push((d.1, d.2, std::mem::take(&mut d.3), d.4));
                 false
             } else {
                 true
             }
         });
-        for (sock, dst, bytes) in &raw_due {
+        let mut raw_rows = Vec::new();
+        for (sock, dst, bytes, log) in &raw_due {
             if let Some(s) = socks.get(*sock) {
-                let _ = s.send_batch(&[OutMsg {
+                let id = s.next_tx_id();
+                let t = mono_raw();
+                let sent = s.send_batch(&[OutMsg {
                     dst: *dst,
                     payload: bytes,
                     tos: 0,
                 }]);
+                if let (Ok(1), Some((flow, seq))) = (sent, log) {
+                    let ip = bytes.len() as i64 + i64::from(udp_overhead(s.is_v6()));
+                    raw_rows.push(vec![
+                        Some(*sock as i64),
+                        Some(i64::from(*flow)),
+                        Some(*seq as i64),
+                        Some(ip),
+                        Some(0),
+                        Some(0),
+                        Some(0),
+                        Some(0),
+                        Some(i64::from(id)),
+                        Some(t as i64),
+                        Some(0),
+                    ]);
+                    shared.bytes_sent.fetch_add(ip as u64, Ordering::Relaxed);
+                }
             }
         }
+        rec.rows("tx", raw_rows);
 
         let Some(tg) = tagger.as_mut() else { continue };
         let session = shared.session.load(Ordering::Relaxed);
@@ -367,7 +401,9 @@ fn pacer_loop(
             let dm = dead_man_kind(&g.spec.kind)
                 && now.saturating_sub(last_fb) > DEAD_MAN_NS
                 && now.saturating_sub(g.start) > DEAD_MAN_NS;
-            if dm || (over_cap && g.spec.kind != "light") {
+            // The data cap is hard: every probe flow stops, the light flow included. Only the
+            // control traffic needed to end the session continues (and is still counted).
+            if dm || over_cap {
                 stopped.push((g.spec.id, if dm { "dead_man" } else { "budget_cap" }));
                 g.done = true;
                 continue;
@@ -467,41 +503,55 @@ fn pacer_loop(
                 .collect();
             let first_id = s.next_tx_id();
             let t_user = mono_raw();
-            let mut sent = 0;
-            while sent < msgs.len() {
-                match s.send_batch(&msgs[sent..]) {
+            // Send everything; a failing datagram (e.g. EMSGSIZE above a cached PMTU) is skipped
+            // and recorded, never the rest of the batch. OPT_IDs advance only on success.
+            let mut ok: Vec<Option<u32>> = vec![None; msgs.len()];
+            let mut i = 0;
+            let mut id = first_id;
+            while i < msgs.len() {
+                match s.send_batch(&msgs[i..]) {
                     Ok(0) => break,
-                    Ok(k) => sent += k,
-                    Err(_) => break,
+                    Ok(k) => {
+                        for slot in ok.iter_mut().skip(i).take(k) {
+                            *slot = Some(id);
+                            id = id.wrapping_add(1);
+                        }
+                        i += k;
+                    }
+                    Err(e) => {
+                        let (flow, due, ..) = &items[i];
+                        rec.event(
+                            "send_error",
+                            Value::map()
+                                .with("sock", sock)
+                                .with("flow", *flow)
+                                .with("seq", due.seq)
+                                .with("size", due.size)
+                                .with("errno", e.raw_os_error().unwrap_or(0) as i64)
+                                .with("error", e.to_string()),
+                        );
+                        i += 1;
+                    }
                 }
             }
-            let mut rows = Vec::with_capacity(sent);
+            let mut rows = Vec::with_capacity(items.len());
             let mut bytes = 0u64;
-            for (i, (flow, due, _, _, _, phase)) in items.iter().take(sent).enumerate() {
-                let phase = *phase;
+            for ((flow, due, _, _, _, phase), sent_id) in items.iter().zip(&ok) {
+                let Some(sent_id) = sent_id else { continue };
                 bytes += u64::from(due.size);
                 rows.push(vec![
                     Some(sock as i64),
                     Some(i64::from(*flow)),
                     Some(due.seq as i64),
                     Some(i64::from(due.size)),
-                    Some(i64::from(phase)),
+                    Some(i64::from(*phase)),
                     Some(i64::from(due.train)),
                     Some(i64::from(due.train_idx)),
                     Some(i64::from(due.tos)),
-                    Some(i64::from(first_id.wrapping_add(i as u32))),
+                    Some(i64::from(*sent_id)),
                     Some(due.t_intended as i64),
                     Some(t_user as i64 - due.t_intended as i64),
                 ]);
-            }
-            if sent < items.len() {
-                rec.event(
-                    "send_short",
-                    Value::map()
-                        .with("sock", sock)
-                        .with("wanted", items.len())
-                        .with("sent", sent),
-                );
             }
             shared.bytes_sent.fetch_add(bytes, Ordering::Relaxed);
             rec.rows("tx", rows);
@@ -556,7 +606,7 @@ fn receiver_loop(
                                 "icmp",
                                 Value::map()
                                     .with("sock", si)
-                                    .with("real", pt_sys::clock::realtime())
+                                    .with("real", pii(pt_sys::clock::realtime(), "quasi"))
                                     .with("errno", errno)
                                     .with("icmp_type", icmp_type)
                                     .with("code", code)
@@ -598,6 +648,29 @@ fn receiver_loop(
                     continue;
                 }
                 if Frame::is_control(data) {
+                    // Control datagrams are observations too (they share the path with probes).
+                    if let Some(Frame::Data { nonce, .. }) = Frame::decode(data) {
+                        let flow = if shared.role == Role::A {
+                            CONTROL_FLOW_B
+                        } else {
+                            CONTROL_FLOW_A
+                        };
+                        let (rx, rx_src) = match m.rx_kernel {
+                            Some(k) => (k, 0),
+                            None => (m.rx_user, 1),
+                        };
+                        rows.push(vec![
+                            Some(si as i64),
+                            Some(i64::from(flow)),
+                            Some(nonce as i64),
+                            Some(m.len as i64),
+                            Some(rx as i64),
+                            Some(rx_src),
+                            m.tos.map(i64::from),
+                            m.ttl.map(i64::from),
+                            Some(0),
+                        ]);
+                    }
                     if let Some(frame) = Frame::decode(data)
                         && let Some(tx) = shared.ctrl_in.lock().expect("lock").as_ref()
                     {
@@ -683,6 +756,7 @@ fn receiver_loop(
                             dst: m.src,
                             bytes: data.to_vec(),
                             at,
+                            log: None,
                         });
                     }
                 }
@@ -715,7 +789,23 @@ fn receiver_loop(
             }
             last_bad = now;
         }
-        if now - last_fb_sent >= FEEDBACK_INTERVAL_NS {
+        // Feedback at 50 Hz while a controlled flow arrives, else 5 Hz (fewer control datagrams
+        // on the path; still far inside the 500 ms dead-man window).
+        let busy = shared.fb.lock().expect("lock").iter().any(|(id, st)| {
+            now.saturating_sub(st.updated) < 1_000_000_000
+                && shared
+                    .flows
+                    .read()
+                    .expect("lock")
+                    .get(id)
+                    .is_some_and(|f| is_controlled(&f.pattern) || f.kind == "chirp")
+        });
+        let interval = if busy {
+            FEEDBACK_INTERVAL_NS
+        } else {
+            10 * FEEDBACK_INTERVAL_NS
+        };
+        if now - last_fb_sent >= interval {
             last_fb_sent = now;
             send_feedback(&shared, now);
         }

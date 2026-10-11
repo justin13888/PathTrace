@@ -128,11 +128,21 @@ impl Control {
                     return;
                 }
                 if let Some(dst) = *self.shared.ctrl_dst.read().expect("lock") {
+                    let nonce = match Frame::decode(&bytes) {
+                        Some(Frame::Data { nonce, .. }) => Some(nonce),
+                        _ => None,
+                    };
+                    let flow = if self.shared.role == Role::A {
+                        crate::io::CONTROL_FLOW_A
+                    } else {
+                        crate::io::CONTROL_FLOW_B
+                    };
                     let _ = cmd.send(PacerCmd::Raw {
                         sock: *sock,
                         dst,
                         bytes,
                         at: 0,
+                        log: nonce.map(|n| (flow, n)),
                     });
                 }
             }

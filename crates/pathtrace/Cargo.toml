@@ -13,6 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+pt-derive = { path = "../pt-derive" }
 pt-format = { path = "../pt-format" }
 pt-probe = { path = "../pt-probe" }
 pt-sys = { path = "../pt-sys" }

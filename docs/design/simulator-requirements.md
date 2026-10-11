@@ -64,7 +64,27 @@ These features would not exist if the draft spec were followed literally. Each o
 
 ## Sufficiency verdict
 
-Filled in from evidence once the ground-truth experiments have run (step 6 of the build plan). Each stage S1–S18 gets a row: fields, EXP id, verdict (`recovered`, `recovered-with-limits`, `recorded-unverified`, `not-representable`).
+From the pinned evidence. Verdicts: `recovered` (ground truth recovered within the experiment's tolerance), `recovered-with-limits` (recovered, with the stated limit), `recorded-unverified` (the fields are recorded, but no ground truth is available yet), `not-representable` (none).
 
-| Stage | EXP | Verdict |
-|---|---|---|
+| Stage | EXP | Verdict | Basis |
+|---|---|---|---|
+| S1 Classify | EXP-0002-r4 | `recovered` | class probes on every class; reachability per class and per family (udp443-throttle, udp-blocked, ipv6) |
+| S2 Policy | EXP-0002-r4 | `recovered` | UDP/443 ratio 0.108 against truth ~0.1; policer 4.97 vs 4.95 Mbit/s; all-UDP block detected, with TCP fallback |
+| S3 NAT | EXP-0002-r4 | `recovered` | binding alive at 15 s, expired at 30/60 s (timeout 20 s); rebind: `nat_rebind` + `addr_new`, session complete |
+| S4 MTU | EXP-0002-r4 | `recovered` | 1400 with PTB seen / 1400 with black hole; reverse 1500 |
+| S5 Queue | EXP-0002-r4 | `recovered` | buffers 149 374 / 74 727 B vs 150 000 / 75 000; droptail, aqm_suspected, policer; ECT(0) marked |
+| S6 Link (heavy) | EXP-0002-r4 | `recovered` | static ±0.5% (20/10/100 Mbit/s, IPv6); steps NRMSE 1.35% |
+| S7 Link (light) | EXP-0002-r4 | `recovered-with-limits` | train dispersion 49.55 vs 49.54 Mbit/s; the switching rule between light and heavy is the simulator's (R-0002); not checked against a workload-reactive scheduler (R-0003) |
+| S8 Workload provenance | EXP-0003-r3, EXP-0007-r3 | `recovered` | every capacity segment carries `workload`; bookkeeping, checked by the corpus |
+| S9 Loss | EXP-0002-r4 | `recovered` | 95% CIs for p and r cover the truth for Bernoulli and Gilbert-Elliott; requires that every packet sent is observed (EXP-0002) |
+| S10 Delay | EXP-0002-r4 | `recovered-with-limits` | base delay ±0.03 ms, RTT sum ±0.01 ms, jitter σ 4.21 vs 4 ms; the one-way split is not identifiable without synchronised clocks (`symmetric_assumed`, #17); size-dependent delay is recorded but not scored |
+| S11 Reorder | EXP-0002-r4 | `recovered` | detected under netem jitter and `reorder` |
+| S12 Duplicate | EXP-0002-r4 | `recovered` | 2.17% vs 2% |
+| S13 Header treatment | EXP-0002-r4 | `recovered` | DSCP rewritten, ECT bleached, reverse preserved; fq_codel marking |
+| S14 Timeline | EXP-0002-r4 | `recovered-with-limits` | address change and rebind events recorded; the derived outage (`PATH.timeline`) is not scored separately |
+| S15 Calibrated summary | EXP-0002-r4 | `recovered` | closure: the netem export replayed and re-captured reproduces capacity, buffer and delay within 0.1% |
+| S16 Direction coupling | — | `recorded-unverified` | no ground truth exists here (netem directions are independent) |
+| S17 Validation ground truth | EXP-0006-r2 | `recorded-unverified` | reference flows recorded in `VALD`; their use is fidelity scoring (#7) |
+| S18 Proxy | — | `recorded-unverified` | `PLCY.proxy_suspected` recorded; validation is #22 |
+
+**Conclusion (REQ-FMT-022).** No anticipated stage is `not-representable`. Fifteen of eighteen stages are recovered from ground truth, three of them with stated limits. The netem export of a trace reproduces that trace when replayed (closure). S16, S17 and S18 are recorded but cannot be verified with the present harness, and each is tracked. Limits that no recorded trace can remove are listed under *Known limits* above.

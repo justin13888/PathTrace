@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/deadman/01a12863-f393-7642-8ee8-1047f8673505.ptf
+content_digest: 848709c47bd6b5b5a3f4453863f4a6bab6f92fefc218e79327c935b8b6bf79b7
+packets a_to_b: 45685
+packets b_to_a: 27617
+session: 5cda3fe9

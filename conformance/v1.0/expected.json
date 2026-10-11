@@ -1,0 +1,20 @@
+{
+  "invalid-bad-magic.ptf": {"valid": false, "kind": "bad_magic"},
+  "invalid-cbor-key-order.ptf": {"valid": false, "kind": "cbor"},
+  "invalid-column-trailing-byte.ptf": {"valid": false, "kind": "column"},
+  "invalid-crc.ptf": {"valid": false, "kind": "crc"},
+  "invalid-decompression-bomb.ptf": {"valid": false, "kind": "limit"},
+  "invalid-file-flags.ptf": {"valid": false, "kind": "reserved"},
+  "invalid-index-hash.ptf": {"valid": false, "kind": "schema"},
+  "invalid-meta-not-first.ptf": {"valid": false, "kind": "order"},
+  "invalid-truncated.ptf": {"valid": false, "kind": "truncated"},
+  "invalid-unknown-critical.ptf": {"valid": false, "kind": "unknown_critical"},
+  "invalid-unknown-flag-on-critical.ptf": {"valid": false, "kind": "reserved"},
+  "invalid-unsupported-major.ptf": {"valid": false, "kind": "unsupported_major"},
+  "valid-all-encodings.ptf": {"valid": true, "content_digest": "c3327c734777b2f989fe6a1293f9a3ed22399363c20cccc93947232d7708b6af"},
+  "valid-compressed.ptf": {"valid": true, "content_digest": "3e4e0c48d08b9f2e926b1995f4b8492a5d5da5d8cbd100ac24144ecd67349f82"},
+  "valid-future-minor.ptf": {"valid": true, "content_digest": "d8676d01ec2bb0c296bcc852769b952eeed3e297a45e231df91419e76fef8cbf"},
+  "valid-minimal.ptf": {"valid": true, "content_digest": "2cab6b922f1e1fd027339790ea0fea5f3eeebd04ddf42881b1db5cca6a30ec17"},
+  "valid-uncompressed-no-index.ptf": {"valid": true, "content_digest": "c3327c734777b2f989fe6a1293f9a3ed22399363c20cccc93947232d7708b6af"},
+  "valid-unknown-noncritical.ptf": {"valid": true, "content_digest": "3fe7e78562324b313f94fc90323dbabf966348af3a62e3bc0d9ce7b2e8c229b7"}
+}

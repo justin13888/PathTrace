@@ -1,0 +1,14 @@
+[package]
+name = "pt-derive"
+description = "PathTrace derivation: raw observations to the path model (PATH, SERS, PLCY, VALD) and exports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+pt-format = { path = "../pt-format" }
+
+[lints]
+workspace = true

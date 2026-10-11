@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/nat-timeout/01a12863-f3b4-7029-9441-a26638339ff8.ptf
+content_digest: 1c7c2082ecfa255b1c509b885c38bc1784b6c8f65f324cf998f347272e9eafb1
+packets a_to_b: 134958
+packets b_to_a: 135342
+session: f8224df9

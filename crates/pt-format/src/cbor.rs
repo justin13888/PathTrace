@@ -44,7 +44,7 @@ impl From<&str> for Key {
 pub type Map = BTreeMap<Key, Value>;
 
 /// A CBOR data item within the PTF profile.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum Value {
     /// Major type 0.
     Uint(u64),
@@ -55,6 +55,7 @@ pub enum Value {
     Array(Vec<Value>),
     Map(Map),
     Bool(bool),
+    #[default]
     Null,
     Float(f64),
 }

@@ -282,6 +282,46 @@ mod tests {
         assert!(ih.finish(&noise, 1).is_err());
     }
 
+    /// REQ-PRB-004: before the initiator's address is validated the responder's only reply is
+    /// message 2, which must stay below 3x the padded message 1 even with a realistic welcome
+    /// (TLS certificate and host facts).
+    #[test]
+    fn responder_reply_respects_anti_amplification() {
+        let (rk, ik) = (generate_keypair(), generate_keypair());
+        let psk = [9u8; 32];
+        let auth = vec![Authorized {
+            public: ik.public,
+            psk,
+            label: "x".into(),
+        }];
+        let (_, m1) =
+            initiator_start(&ik, &rk.public, &psk, &Envelope::new("hello", Value::map())).unwrap();
+        let Some(Frame::Init { noise }) = Frame::decode(&m1) else {
+            panic!()
+        };
+        let acc = responder_accept(&rk, &auth, &noise).unwrap();
+        let cert = rcgen::generate_simple_self_signed(vec!["pathtrace-responder".into()])
+            .unwrap()
+            .cert
+            .der()
+            .to_vec();
+        let welcome = Value::map()
+            .with("wire_major", 1u64)
+            .with("wire_minor", 0u64)
+            .with("session", 1u64)
+            .with("tls_cert", Value::Bytes(cert))
+            .with("facts", crate::context::host_facts())
+            .with("data_cap", 1_000_000_000u64);
+        let (_, m2) = acc.respond(1, &Envelope::new("welcome", welcome)).unwrap();
+        assert!(m1.len() >= 1200);
+        assert!(
+            m2.len() < 3 * m1.len(),
+            "reply {} B vs request {} B",
+            m2.len(),
+            m1.len()
+        );
+    }
+
     #[test]
     fn replay_window() {
         let mut r = Replay::default();

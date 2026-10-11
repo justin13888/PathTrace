@@ -1,0 +1,113 @@
+; PTF 1.0 section heads, CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
+; All maps are deterministic CBOR (ptf-format.md Part II §4). Every map is open: readers ignore
+; unknown keys (`* tstr => any`), so minor versions can add keys (P6).
+
+; ---------------------------------------------------------------- generic payload (§3, §5)
+section-head = {
+  ? tables: [* table],
+  ? pii: pii-map,
+  * tstr => any
+}
+table = {
+  name: tstr,
+  rows: uint,
+  columns: [* column],
+  ? attrs: { * tstr => any },
+  * tstr => any
+}
+column = {
+  name: tstr,
+  type: "u64" / "i64" / "f64" / "bool" / tstr,     ; unknown types are skipped
+  enc: "plain" / "varint" / "delta" / "delta2" / "rle" / "bitmap" / tstr,
+  len: uint,
+  ? nullable: bool,
+  ? unit: tstr,
+  ? clock: clock-id,
+  ? enum: [* tstr],
+  ? pii: pii-class,
+  ? desc: tstr,
+  * tstr => any
+}
+pii-map = { * json-pointer => pii-class }
+pii-class = "id" / "quasi"
+json-pointer = tstr                                  ; RFC 6901, relative to the head
+clock-id = tstr                                      ; "a.mono", "a.real", "b.mono", "b.real", "trace"
+method = tstr .regexp "[a-z0-9.-]+/[0-9]+"           ; e.g. "capacity.saturated-arrivals/1"
+
+; ---------------------------------------------------------------- META (critical)
+meta = {
+  kind: "trace" / "obslog",
+  ? trace_id: tstr,                                  ; UUIDv7
+  ? created_utc: tstr,                               ; RFC 3339 (pii quasi)
+  ? tool: tool,
+  ? captured_by: { ? a: tool, ? b: tool },
+  ? role: "a" / "b",                                 ; obslog only
+  ? session: { * tstr => any },                      ; per endpoint: id, profile, t0_mono, t0_real
+  ? profile: tstr,
+  ? endpoints: { ? a: endpoint, ? b: endpoint },
+  ? endpoint: endpoint,                              ; obslog only
+  ? network: { ? class: tstr, ? label: tstr, ? mobility: tstr, ? tags: [* tstr], * tstr => any },
+  ? clocks: { * clock-id => { kind: "monotonic_raw" / "realtime" / "tai" / "trace", ? endpoint: "a" / "b", ? shifted: bool, * tstr => any } },
+  redaction: "full" / "shareable" / "anonymous",
+  ? complete: bool,
+  ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null }],
+  ? imported: { * tstr => any },
+  ? extra: any,
+  ? pii: pii-map,
+  * tstr => any
+}
+tool = { name: tstr, version: tstr, git_commit: tstr, git_dirty: bool, * tstr => any }
+endpoint = {
+  ? os: tstr, ? kernel: tstr, ? arch: tstr, ? hostname: tstr, ? cpu: tstr, ? cpus: uint,
+  ? clocksource: tstr, ? tcp_cc_default: tstr, ? tcp_cc_available: tstr,
+  ? addr: tstr, ? peer_addr: tstr, ? metered: tstr,
+  ? iface: { ? name: tstr, ? index: uint, ? type: tstr, ? driver: tstr / null, ? mtu: uint / null, ? usb: bool, * tstr => any },
+  ? timestamping: { * tstr => any },
+  * tstr => any
+}
+
+; ---------------------------------------------------------------- FLOW
+flow-head = { flows: [* flow], * tstr => any }
+flow = {
+  id: uint, kind: tstr, sender: "a" / "b", sock: tstr, dst_port: uint, class: tstr,
+  ? quic_shape: "header/1" / tstr / null, phase: uint, size: uint,
+  pattern: { type: "iso" / "train" / "chirp" / "rate" / "ladder" / "burst" / tstr, * tstr => any },
+  tos: uint / "cycle", duration_ns: uint, echo: bool, echo_delay_ns: uint,
+  * tstr => any
+}
+
+; ---------------------------------------------------------------- EVNT
+evnt-head = { events: [* event], ? pii: pii-map, * tstr => any }
+event = { t: uint, clock: clock-id, endpoint: "a" / "b", type: tstr, detail: { * tstr => any }, * tstr => any }
+; Identifying event values are wrapped as { value: any, pii: pii-class } and listed in pii.
+
+; ---------------------------------------------------------------- PATH (critical, derived)
+path-head = {
+  ? derivation: { ? tool: tool, methods: [* method], * tstr => any },
+  ? time_base: { * tstr => any },
+  ? clock: { * tstr => any },
+  directions: { ? a_to_b: direction, ? b_to_a: direction },
+  ? coupling: { * tstr => any },
+  ? timeline: [* { * tstr => any }],
+  * tstr => any
+}
+direction = { * tstr => field }                      ; base_delay, jitter, capacity, queue, ...
+field = {
+  status: "known" / "estimated" / "unknown",
+  method: method,
+  ? confidence: float,                               ; [0, 1]
+  ? source: [* tstr],                                ; raw tables used, e.g. "pkt[a_to_b]"
+  * tstr => any
+} / [* any]                                          ; e.g. outages
+
+; ---------------------------------------------------------------- PLCY, VALD (derived)
+plcy-head = { method: method, ? classes: { * tstr => { * tstr => any } }, * tstr => any }
+vald-head = { method: method, reference: [* { name: tstr, * tstr => any }], ? fidelity: any, * tstr => any }
+
+; ---------------------------------------------------------------- INDX
+index-head = {   ; INDX section
+  sections: [* { type: tstr, offset: uint, length: uint }],
+  file_blake3: tstr,                                 ; 64 lowercase hex
+  content_digest: tstr,                              ; 64 lowercase hex
+  * tstr => any
+}

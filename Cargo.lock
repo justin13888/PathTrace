@@ -1021,6 +1021,7 @@ name = "pathtrace"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "pt-derive",
  "pt-format",
  "pt-probe",
  "pt-sys",
@@ -1128,6 +1129,13 @@ dependencies = [
  "pt-format",
  "serde_json",
  "zstd",
+]
+
+[[package]]
+name = "pt-derive"
+version = "0.1.0"
+dependencies = [
+ "pt-format",
 ]
 
 [[package]]
@@ -1915,8 +1923,11 @@ dependencies = [
  "anyhow",
  "blake3",
  "clap",
+ "pt-derive",
+ "pt-format",
  "serde",
  "toml",
+ "zstd",
 ]
 
 [[package]]

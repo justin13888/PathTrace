@@ -272,7 +272,7 @@ impl Ctx {
                 .insert(s.id, s.clone());
             if s.sender == Role::A {
                 if is_controlled(&s.pattern) {
-                    self.ctrlr.add(s.id);
+                    self.ctrlr.add(s.id, at, s.duration_ns);
                 }
                 self.ep.start_flow(s, at);
             }
@@ -613,6 +613,10 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         rec.clone(),
     );
     let sampler = Sampler::start(Some(iface.clone()), rec.clone(), true);
+    for c in crate::plan::control_specs(dst.port()) {
+        rec.flow(c.to_value());
+        shared.flows.write().expect("lock").insert(c.id, c);
+    }
 
     let mut ctx = Ctx {
         ep,
@@ -1586,6 +1590,10 @@ fn responder_session(
         rec: rec.clone(),
     });
     let sampler = Sampler::start(Some(iface), rec.clone(), false);
+    for c in crate::plan::control_specs(opts.main_port) {
+        rec.flow(c.to_value());
+        shared.flows.write().expect("lock").insert(c.id, c);
+    }
 
     let mut reason = "bye";
     loop {
@@ -1614,7 +1622,7 @@ fn responder_session(
                     shared.flows.write().expect("lock").insert(s.id, s.clone());
                     if s.sender == Role::B {
                         if is_controlled(&s.pattern) {
-                            ctrlr.add(s.id);
+                            ctrlr.add(s.id, at, s.duration_ns);
                         }
                         ep.start_flow(s, at);
                     }

@@ -1,34 +1,75 @@
 # PathTrace
 
-PathTrace records what a network path does to packets and writes it to **PTF** (Path Trace Format), an open, versioned trace file built so that a trace-driven emulator can later replay the path for unmodified protocol implementations.
+PathTrace records what a network path does to packets and writes it to **PTF** (Path Trace Format), an open, versioned, self-describing trace file. A trace-driven emulator can later replay the path for unmodified protocol implementations.
 
-A trace records path behaviour (capacity over time, delay, jitter, loss and its burst structure, queue depth, policers, reordering, duplication, MTU, ECN/DSCP handling, per-transport treatment), never what a protocol achieved over that path.
+A trace records path behaviour, never what a protocol achieved over the path. That behaviour covers:
 
-> Status: under active development toward v1.0 (capture-ready). See [docs/spec/](docs/spec/) for requirement status.
+- capacity over time, including what short bursts experience;
+- one-way delay and jitter;
+- loss and its burst structure;
+- queue depth and discipline, and policers;
+- reordering and duplication;
+- path MTU and ECN/DSCP handling;
+- per-transport treatment (UDP high port, UDP/443, QUIC-shaped, TCP/80, TCP/443 TLS);
+- NAT binding lifetime.
+
+Every derived number carries its method, version and confidence. Every raw observation is kept, so traces can be re-derived as methods improve.
 
 ## Scope
 
-- Linux only (x86_64, aarch64, kernel ≥ 6.1), IPv4 and IPv6.
-- Two endpoints you control: an initiator (your laptop on any access network) and a responder (a public Linux VM).
-- Access networks up to 1 Gbit/s.
+- Linux only (x86_64, aarch64, kernel ≥ 6.1), IPv4 and IPv6. ([ADR 0002](docs/adr/0002-linux-only.md))
+- Two endpoints you control: an initiator (your laptop, on any access network) and a responder (a public Linux VM).
+- Access networks up to 1 Gbit/s. One path, two endpoints: no topology or cross-traffic modelling.
+- This release captures, derives and exports. The emulator, runner and fidelity scoring are tracked as issues labelled [`deferred`](https://github.com/justin13888/PathTrace/labels/deferred).
+
+## Quickstart
+
+1. Install the static binary from the latest [release](https://github.com/justin13888/PathTrace/releases) on both machines, or build it: `mise install && cargo build --release -p pathtrace`.
+2. Deploy the responder on the VM and pair the laptop: [docs/runbooks/responder-deploy.md](docs/runbooks/responder-deploy.md).
+3. Verify: `pathtrace doctor vm`, then `pathtrace probe vm --class home --profile smoke`.
+4. Capture on real networks: [docs/runbooks/field-session.md](docs/runbooks/field-session.md).
+
+```sh
+pathtrace probe vm --class hotel-wifi --label "Hotel X lobby"   # ~100 s, ≤ 200 MB (light: ≤ 2 MB on metered links)
+pathtrace trace info <id>.ptf
+pathtrace export netem <id>.ptf          # replay a static summary with tc netem today
+pathtrace export mahimahi <id>.ptf -o t  # Mahimahi up/down traces
+pathtrace trace redact <id>.ptf --level shareable -o shared.ptf
+```
+
+## What is proven
+
+Claims are backed by commit-pinned experiments ([docs/evidence/](docs/evidence/)) and checked mechanically by `cargo xtask audit`:
+
+- The probe recovers known capacity, delay, buffer, loss, jitter, reordering, duplication, MTU, policer, AQM/ECN, DSCP rewriting, per-class throttling, UDP blocking with TCP fallback, and NAT binding and rebinding behaviour. These impairments are injected in unprivileged network namespaces. All 89 checks pass across 23 scenarios, including IPv6, every profile, and the dead-man, data and rate caps. A trace exported to netem reproduces itself within 0.1% when re-captured ([EXP-0002-r4](docs/evidence/EXP-0002-r4-ground-truth-recovery/)).
+- PTF carries what the future simulator needs. No anticipated stage is unrepresentable; 15 of 18 are recovered from ground truth and 3 are recorded but not yet verifiable ([sufficiency verdict](docs/design/simulator-requirements.md#sufficiency-verdict)).
+- PTF's encoding costs 5–8 bytes per packet; a standard session at 100 Mbit/s produces a 2.4 MB file. The encoding is 2–2.6× smaller than Arrow IPC, CBOR rows or JSON Lines with zstd ([EXP-0001-r2](docs/evidence/EXP-0001-r2-ptf-encoding-bakeoff/), EXP-0002-r4).
+- A Python reader written only from the specification agrees with the Rust reader on every conformance case and on a real trace ([EXP-0003-r3](docs/evidence/EXP-0003-r3-conformance-independent-reader/)). Fuzzing four parsers for about 16 M executions found nothing ([EXP-0005](docs/evidence/EXP-0005-fuzz-smoke/)).
+
+Not proven here, and needing real networks: behaviour on real access networks and carrier middleboxes, Wi-Fi metadata on a live interface, and hardware timestamps. The field corpus is user acceptance ([#16](https://github.com/justin13888/PathTrace/issues/16)).
 
 ## Repository map
 
 | Path | Contents |
 |---|---|
-| [`crates/`](crates/) | Rust workspace: format, wire, sys, probe, derive, CLI |
-| [`xtask/`](xtask/) | Repository automation: evidence runner, audit, test harness |
+| [`crates/`](crates/) | `pt-format` (PTF), `pt-wire`, `pt-sys` (Linux syscalls), `pt-probe` (capture), `pt-derive` (model, exports), `pathtrace` (CLI) |
+| [`xtask/`](xtask/) | Evidence runner, audit, ground-truth experiments |
 | [`docs/`](docs/) | Requirements → designs → ADRs → evidence, plus research and runbooks |
+| [`deploy/`](deploy/) | systemd unit and firewall ports for the responder |
+| [`tools/`](tools/) | Namespace test harness; independent Python PTF reader |
 | [`references/`](references/) | Third-party fixtures with provenance |
 | [`AGENTS.md`](AGENTS.md) | Contributor and agent rules: scopes, commits, merging, evidence workflow |
+
+The PTF specification is [docs/design/ptf-format.md](docs/design/ptf-format.md).
 
 ## Development
 
 ```sh
 mise install        # pinned toolchain and tools
 hk install          # git hooks (pre-commit, commit-msg)
-mise run check      # format, lint
+mise run check      # format, lint, spelling, deny
 mise run test       # tests
+mise run test-netns # end-to-end session in unprivileged network namespaces
 mise run audit      # requirement → evidence chain
 ```
 

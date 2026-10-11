@@ -54,6 +54,17 @@ pub fn is_known_type(kind: &[u8; 4]) -> bool {
     )
 }
 
+/// Canonical section order (spec Part II §7): known sections by rank, unknown sections after
+/// them in their original relative order. Stable, so repeated sections keep their order.
+pub fn canonicalize(file: &mut PtfFile) {
+    const ORDER: [&[u8; 4]; 10] = [
+        b"META", b"FLOW", b"CLOK", b"OBSV", b"CTXS", b"EVNT", b"PLCY", b"PATH", b"SERS", b"VALD",
+    ];
+    let rank = |k: &[u8; 4]| ORDER.iter().position(|o| *o == k).unwrap_or(ORDER.len());
+    file.sections.retain(|s| &s.kind != b"INDX");
+    file.sections.sort_by_key(|s| rank(&s.kind));
+}
+
 /// A parsed PTF file.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PtfFile {

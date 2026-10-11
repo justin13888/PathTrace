@@ -1,0 +1,9 @@
+qdisc noqueue 0: dev lo root refcnt 2 
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 80a3: dev ma0 root refcnt 17 limit 1000 delay 10ms seed 15259708742541421
+ Sent 203516930 bytes 138578 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 809c: dev mb0 root refcnt 17 limit 1000 delay 10ms loss 2% seed 911142561579131950
+ Sent 198640899 bytes 135495 pkt (dropped 2720, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0

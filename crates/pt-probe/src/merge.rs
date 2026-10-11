@@ -448,13 +448,12 @@ fn remap_pii(meta: &Value, role: &str, into: &mut Map) {
     }
 }
 
-/// Merge `log_a` (initiator) and optionally `log_b` (responder) into a canonical trace at `out`.
-pub fn merge(
+/// Merge `log_a` (initiator) and optionally `log_b` (responder) into a canonical trace.
+pub fn merge_file(
     log_a: &Path,
     log_b: Option<&Path>,
-    out: &Path,
     tool: &ToolInfo,
-) -> pt_format::Result<MergeReport> {
+) -> pt_format::Result<(PtfFile, MergeReport)> {
     let a = read_log(log_a)?;
     let b = match log_b {
         Some(p) => Some(read_log(p)?),
@@ -659,16 +658,34 @@ pub fn merge(
         eh.insert(Key::from("pii"), Value::Map(epii));
     }
     sections.push(Section::new(b"EVNT", 0, eh));
-    let file = PtfFile {
+    let mut file = PtfFile {
         major: pt_format::container::MAJOR,
         minor: pt_format::container::MINOR,
         sections,
     };
+    pt_format::canonicalize(&mut file);
+    Ok((file, report))
+}
+
+/// Write a trace canonically and atomically (temp file + rename). Returns the content digest.
+pub fn write_trace(file: &PtfFile, out: &Path) -> pt_format::Result<String> {
     let tmp = out.with_extension("ptf.tmp");
     let mut f = std::fs::File::create(&tmp)?;
-    report.content_digest = pt_format::write(&file, &WriteOptions::canonical(), &mut f)?;
+    let d = pt_format::write(file, &WriteOptions::canonical(), &mut f)?;
     f.sync_all()?;
     std::fs::rename(&tmp, out)?;
+    Ok(d)
+}
+
+/// Merge and write (no derivation).
+pub fn merge(
+    log_a: &Path,
+    log_b: Option<&Path>,
+    out: &Path,
+    tool: &ToolInfo,
+) -> pt_format::Result<MergeReport> {
+    let (file, mut report) = merge_file(log_a, log_b, tool)?;
+    report.content_digest = write_trace(&file, out)?;
     Ok(report)
 }
 

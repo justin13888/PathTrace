@@ -47,7 +47,8 @@ jobs:
         with:
           key: audit
       - name: Requirement → evidence chain
-        run: cargo xtask audit ${{ startsWith(github.ref, 'refs/tags/') && '--release' || '' }}
+        # Release mode (stale evidence fails) runs in release.yml, which gates publishing.
+        run: cargo xtask audit
   test:
     strategy:
       fail-fast: false

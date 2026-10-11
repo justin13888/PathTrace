@@ -26,6 +26,15 @@ pub enum TraceCmd {
         #[arg(short, long)]
         out: Option<PathBuf>,
     },
+    /// Write a redacted copy (`shareable` removes identifying data; `anonymous` also removes
+    /// quasi-identifiers and shifts wall-clock times to start at 0).
+    Redact {
+        file: PathBuf,
+        #[arg(long, value_parser = ["shareable", "anonymous"])]
+        level: String,
+        #[arg(short, long)]
+        out: PathBuf,
+    },
     /// Read a JSON Lines twin back into canonical PTF.
     Load {
         file: PathBuf,
@@ -170,6 +179,25 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 Some(p) => std::fs::write(&p, text).map_err(|e| e.to_string())?,
                 None => print!("{text}"),
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        TraceCmd::Redact { file, level, out } => {
+            let (f, _) = read(&file, false)?;
+            let lvl = pt_format::redact::Level::parse(&level).ok_or("bad level")?;
+            let (red, rep) = pt_format::redact::redact(&f, lvl).map_err(|e| e.to_string())?;
+            // Raw data changed: regenerate the derived layer (spec P14).
+            let red = pt_derive::apply(&red, &crate::derive_tool());
+            let mut buf = Vec::new();
+            let d = pt_format::write(&red, &WriteOptions::canonical(), &mut buf)
+                .map_err(|e| e.to_string())?;
+            std::fs::write(&out, buf).map_err(|e| e.to_string())?;
+            println!(
+                "{} level={level} removed_pointers={} removed_columns={} shifted_columns={} content_digest={d}",
+                out.display(),
+                rep.pointers,
+                rep.columns,
+                rep.shifted_columns
+            );
             Ok(ExitCode::SUCCESS)
         }
         TraceCmd::Load { file, out } => {

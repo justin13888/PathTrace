@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/policer/01a12826-658b-73c9-86f4-55618afd7e22.ptf
+content_digest: 316258fbb1de10e3156fea864b4e3847ac08094e7b1ff8b7a63b45d96bff166f
+packets a_to_b: 19156
+packets b_to_a: 136945
+session: d9eaa0fb

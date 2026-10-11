@@ -1,0 +1,87 @@
+| Scenario (simulator stages) | Check | Truth | Recovered | Pass |
+|---|---|---|---|---|
+| rate-delay-asym (S5 S6 S10 S15) | session complete | true | true | yes |
+| rate-delay-asym (S5 S6 S10 S15) | capacity a_to_b (bit/s, ±10%) | 19815059 | 19720960.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | capacity b_to_a (bit/s, ±10%) | 9907530 | 9771200.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | base delay sum a+b (ms, ±1) | 25 | 25.0047 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | split method recorded | symmetric_assumed | symmetric_assumed | yes |
+| rate-delay-asym (S5 S6 S10 S15) | buffer a_to_b (bytes, ±15%) | 150000 | 149162.0545 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | buffer b_to_a (bytes, ±15%) | 75000 | 73826.4311 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | discipline a_to_b | droptail | droptail | yes |
+| rate-delay-asym (S5 S6 S10 S15) | netem export present | yes | see closure | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure capacity a_to_b (±10%) | 19720960.0000 | 19720960.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure buffer a_to_b (±15%) | 149162.0545 | 149150.7643 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure capacity b_to_a (±10%) | 9771200.0000 | 9771200.0000 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure buffer b_to_a (±15%) | 73826.4311 | 73826.3382 | yes |
+| rate-delay-asym (S5 S6 S10 S15) | closure base delay sum (ms, ±1) | 25.0047 | 25.0047 | yes |
+| rate-delay-asym | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.182 over 66801 packets | yes |
+| symmetric-delay (S10) | base delay a_to_b (ms, ±1) | 20 | 20.0260 | yes |
+| symmetric-delay (S10) | base delay b_to_a (ms, ±1) | 20 | 20.0241 | yes |
+| symmetric-delay (S10) | clock offset (ms, ±1; same host clock) | 0 | -0.0011 | yes |
+| symmetric-delay (S10) | light-train dispersion a_to_b (netem 50 Mbit/s, ±15%) | 49537649 | 49553078.0000 | yes |
+| symmetric-delay | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.837 over 18687 packets | yes |
+| jitter (S10 S11) | jitter stddev a_to_b (ms, ±30%) | 4 | 4.1607 | yes |
+| jitter (S10 S11) | jitter stddev b_to_a (ms, < 0.5) | 0 | 0.0713 | yes |
+| jitter (S10 S11) | reordering detected a_to_b (jitter reorders in netem) | > 0 | 0.2276 | yes |
+| jitter | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.467 over 37154 packets | yes |
+| loss-random (S9) | GE p 95% CI covers truth | 0.02 | Some((0.005210078872912683, 0.02199405090476534)) | yes |
+| loss-random (S9) | GE r 95% CI covers truth | 0.98 | Some((0.6456611570247934, 1.0)) | yes |
+| loss-random (S9) | no loss b_to_a | 0 | 0.0000 | yes |
+| loss-random | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.262 over 273727 packets | yes |
+| loss-gemodel (S9) | GE p 95% CI covers truth | 0.02 | Some((0.018090097367084734, 0.04456953358502662)) | yes |
+| loss-gemodel (S9) | GE r 95% CI covers truth | 0.4 | Some((0.47824419872105484, 0.8135694555640665)) | **no** |
+| loss-gemodel (S9) | no loss b_to_a | 0 | 0.0000 | yes |
+| loss-gemodel | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.286 over 273699 packets | yes |
+| rate-step (S6) | capacity series NRMSE a_to_b (≤ 10%) | ≤ 0.10 | 0.0192 over 192 bins | yes |
+| rate-step | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.244 over 64998 packets | yes |
+| policer (S2 S5) | discipline a_to_b | policer | policer | yes |
+| policer (S2 S5) | policed rate a_to_b (±15%) | 4953765 | 4851200.0000 | yes |
+| policer | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.209 over 156101 packets | yes |
+| aqm-ecn (S5 S13) | discipline a_to_b | aqm_suspected | aqm_suspected | yes |
+| aqm-ecn (S5 S13) | ECT(0) marked by fq_codel | marked | marked | yes |
+| aqm-ecn (S5 S13) | capacity a_to_b (htb 20 Mbit/s, ±15%) | 19815059 | 19731200.0000 | yes |
+| aqm-ecn | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.644 over 184001 packets | yes |
+| mtu-icmp (S4) | path MTU a_to_b | 1400 | 1400.0000 | yes |
+| mtu-icmp (S4) | path MTU b_to_a | 1500 | 1500.0000 | yes |
+| mtu-icmp (S4) | a_to_b black hole flag | false | Some(false) | yes |
+| mtu-icmp (S4) | a_to_b ICMP Packet Too Big (MTU 1400) observed | true | true | yes |
+| mtu-icmp | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 6.695 over 36530 packets | yes |
+| mtu-blackhole (S4) | path MTU a_to_b | 1400 | 1400.0000 | yes |
+| mtu-blackhole (S4) | path MTU b_to_a | 1500 | 1500.0000 | yes |
+| mtu-blackhole (S4) | a_to_b black hole flag | true | Some(true) | yes |
+| mtu-blackhole (S4) | a_to_b ICMP Packet Too Big (MTU 1400) observed | false | false | yes |
+| mtu-blackhole | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 6.603 over 41226 packets | yes |
+| tos-rewrite (S13) | DSCP EF rewritten a_to_b | rewritten | rewritten | yes |
+| tos-rewrite (S13) | ECT(0) bleached a_to_b | bleached | bleached | yes |
+| tos-rewrite (S13) | DSCP EF preserved b_to_a | preserved | preserved | yes |
+| tos-rewrite | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.338 over 68503 packets | yes |
+| udp443-throttle (S1 S2) | udp/443 capacity ratio vs udp/high-port (2 vs ~20 Mbit/s) | < 0.3 | 0.1078 | yes |
+| udp443-throttle (S1 S2) | udp/443-quic capacity ratio | < 0.3 | 0.1078 | yes |
+| udp443-throttle | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 6.419 over 68325 packets | yes |
+| udp-blocked (S2) | control fell back to TCP | tcp | tcp | yes |
+| udp-blocked (S2) | udp/high-port unreachable | false | Some(false) | yes |
+| udp-blocked (S2) | tcp/443 reachable | true | Some(true) | yes |
+| udp-blocked (S2) | trace written despite blocked UDP | exit 0 or 3 | 3 | yes |
+| udp-blocked | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 6.042 over 1297 packets | n/a (< 10 000 packets) |
+| nat-timeout (S3) | binding alive after 15 s idle (timeout 20 s) | true | Some(true) | yes |
+| nat-timeout (S3) | binding expired after 30 s idle | false | Some(false) | yes |
+| nat-timeout (S3) | binding expired after 60 s idle | false | Some(false) | yes |
+| nat-timeout | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.988 over 273597 packets | yes |
+| rebind (S3 S14) | responder recorded nat_rebind | >= 1 | 1 | yes |
+| rebind (S3 S14) | initiator recorded addr_new | >= 1 | 2 | yes |
+| rebind (S3 S14) | session complete after rebinding | true | true | yes |
+| rebind | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.158 over 273597 packets | yes |
+| deadman (S14 safety) | responder heavy packets sent 0.7–3 s into the outage | 0 | Some(0) | yes |
+| deadman (S14 safety) | responder stopped within (ms after outage start) | ≤ 600 | 511.0348 | yes |
+| deadman (S14 safety) | dead_man flow_stopped event recorded by responder | true | true | yes |
+| deadman | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 6.531 over 68543 packets | yes |
+| data-cap (safety) | responder UDP bytes sent ≤ cap + one batch (3 MB + 100 kB) | 3000000 | Some(3082442) | yes |
+| data-cap (safety) | budget_cap event recorded by responder | true | true | yes |
+| data-cap | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 7.315 over 8389 packets | n/a (< 10 000 packets) |
+| rate-100m (S6 size) | capacity a_to_b at 100 Mbit/s (±10%) | 99075297 | 98931200.0000 | yes |
+| rate-100m (S6 size) | standard trace file size at 100 Mbit/s (≤ 10 MB) | 10000000 | 1950652 | yes |
+| rate-100m | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.479 over 268053 packets | yes |
+| reorder-dup (S11 S12) | reordering detected a_to_b | > 0 | 0.0244 | yes |
+| reorder-dup (S11 S12) | duplicate rate a_to_b (2% ± 1%) | 0.02 | 0.0228 | yes |
+| reorder-dup (S11 S12) | no duplicates b_to_a | 0 | 0.0000 | yes |
+| reorder-dup | pkt table bytes/packet (canonical; applies at ≥ 10 000 packets) | ≤ 8 | 5.009 over 41856 packets | yes |

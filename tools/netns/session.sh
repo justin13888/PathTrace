@@ -12,6 +12,8 @@
 #   QDISC_BA   tc qdisc spec for b->a
 #   SETUP_PM   extra shell commands run in the middlebox namespace after setup (e.g. nft rules)
 #   PROBE_ARGS extra arguments for `pathtrace probe`
+#   SERVE_ARGS extra arguments for `pathtrace serve`
+#   RESP_ADDR  responder address the initiator uses (default 10.0.2.2; fd00:2::2 for IPv6)
 #   SCRIPT_PM  shell commands run in the middlebox namespace in the background during the probe
 #              (e.g. scripted `tc qdisc change` for time-varying capacity)
 set -eu
@@ -23,6 +25,8 @@ QDISC_BA=${QDISC_BA:-netem delay 10ms rate 20mbit limit 100}
 SETUP_PM=${SETUP_PM:-}
 SCRIPT_PM=${SCRIPT_PM:-}
 PROBE_ARGS=${PROBE_ARGS:-}
+SERVE_ARGS=${SERVE_ARGS:-}
+RESP_ADDR=${RESP_ADDR:-10.0.2.2}
 IP=ip
 
 mount -t tmpfs none /run
@@ -71,8 +75,9 @@ mkdir -p "$OUT/r" "$OUT/i" "$OUT/state"
 $IP netns exec pb "$BIN" --config-dir "$OUT/r" keygen >/dev/null
 IPUB=$($IP netns exec pa "$BIN" --config-dir "$OUT/i" keygen)
 PAIR=$($IP netns exec pb "$BIN" --config-dir "$OUT/r" authorize "$IPUB" --name harness 2>/dev/null)
-$IP netns exec pa "$BIN" --config-dir "$OUT/i" responder add vm 10.0.2.2 "$PAIR" 2>/dev/null
-$IP netns exec pb "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" --max-sessions 1 >"$OUT/serve.log" 2>&1 &
+$IP netns exec pa "$BIN" --config-dir "$OUT/i" responder add vm "$RESP_ADDR" "$PAIR" 2>/dev/null
+# shellcheck disable=SC2086
+$IP netns exec pb "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" --max-sessions 1 $SERVE_ARGS >"$OUT/serve.log" 2>&1 &
 SERVE=$!
 sleep 1
 PM_PID=

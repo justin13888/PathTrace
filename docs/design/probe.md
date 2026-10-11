@@ -89,6 +89,8 @@ Per endpoint, in its observation log (`META.kind = "obslog"`, `META.role = "a" |
 | `wifi` (CTXS, initiator) | 1 Hz | t, freq_mhz, signal_dbm, tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bssid_hash (pii quasi) |
 | EVNT | events | phase start/end/failed, addr_change, iface_change, nat_rebind, control_fallback, budget_cap, dead_man, channel_overflow, ... |
 
+Control datagrams are observations too: the sender logs each sealed control datagram in `tx` as flow 250 (sent by a) or 251 (sent by b) with seq = Noise nonce, and the receiver logs it in `rx`. Every packet the probe puts on the path is therefore observed, which loss-model estimation requires (EXP-0002). Feedback runs at 50 Hz while a controlled flow arrives and at 5 Hz otherwise.
+
 `merge` joins `tx` with `txts` by OPT_ID, which gives `tx_sched` (real) and `tx_snd_lag` (SND minus SCHED). It then joins the result with the peer's `rx` per direction, keyed by (flow, seq), to form the trace's `pkt` table. Duplicates go to `dup` and unmatched arrivals to `unmatched`. Nothing is dropped (P1).
 
 Source addresses are never per-row columns. Each new source tuple a receiver sees is logged once as a `peer_addr {idx, addr}` event, with the address marked `pii: id`, and rows carry `src = idx`. Rebinding is visible, and redaction stays trivial.
@@ -118,15 +120,16 @@ Standard profile (about 90 s of data phases):
 
 **TCP connections** (class probes and reference flows) start with a 48-byte authenticated header: session id, flow id, kind, direction, byte and time limits, and a keyed-BLAKE3 tag under the session key. The responder serves only connections whose header verifies for the active session, so it cannot be used as a traffic source by strangers (REQ-SEC-001).
 
-The data budget is planned once the P3 estimate is known: saturation phases shrink proportionally (minimum 2 s each) so that the projected total stays under the cap. If a hard limit is reached anyway, the pacer stops sending and records a `budget_cap` event.
+The data budget is planned once the P3 estimate is known: saturation phases shrink proportionally (minimum 2 s each) so that the projected total stays under the cap. If a hard limit is reached anyway, the pacer stops every probe flow, the light flow included, and records a `budget_cap` event. Only the control traffic needed to finish the session continues, and it is still counted (EXP-0002-r2).
 
 ## 7. Saturation controller
 
 The receiver reports feedback every 10 ms (unreliable): delivery rate over the last 100 ms, and the queueing-delay estimate `q = (rx − t_intended) − min(rx − t_intended)` over the phase, which is valid for relative changes despite the unknown clock offset. The sender:
 1. **ramp** (2 s): rate rises linearly from 0.5× to 2× the chirp estimate. The knee, where q starts rising, marks the bottleneck.
 2. **hold**: `rate = delivery_rate × clamp(1 + 0.5 × (q_target − q) / q_target, 0.7, 1.3)` with q_target = max(10 ms, half the base RTT). This keeps a standing queue (a backlog, so arrivals are delivery opportunities) without flooding.
-3. **drain**: stop and keep receiving for 1 s, so the queue drain can be measured.
-4. **dead-man**: heavy, chirp, train, CBR and class flows stop if no authenticated feedback arrives for 500 ms (REQ-PRB-005). The light flow (40 kbit/s) keeps observing through short outages, which makes outages visible in the trace, but it also stops after 5 s without any authenticated control message. The hard rate cap and data cap always apply.
+3. **overdrive** (last 1.5 s of saturations longer than 3 s): send at 1.5× the delivery rate. A tail-drop buffer then fills, and its depth becomes observable at loss onset (draft spec §6.5: "ramp … to 2× the estimate"). Holding a 10 ms queue alone never reveals the buffer.
+4. **drain**: stop and keep receiving for 1 s, so the queue drain can be measured.
+5. **dead-man**: heavy, chirp, train, CBR and class flows stop if no authenticated feedback arrives for 500 ms (REQ-PRB-005). The light flow (40 kbit/s) keeps observing through short outages, which makes outages visible in the trace, but it also stops after 5 s without any authenticated control message. The hard rate cap and data cap always apply.
 
 The controller only decides what to send. Whether an arrival counts as a delivery opportunity is decided later by derivation from the logged data (REQ-PRB-013).
 

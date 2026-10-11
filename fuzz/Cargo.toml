@@ -1,0 +1,46 @@
+[package]
+name = "pt-fuzz"
+description = "cargo-fuzz targets for PTF and wire parsers (REQ-FMT-016, REQ-SEC-004)"
+version = "0.0.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+pt-format = { path = "../crates/pt-format" }
+pt-wire = { path = "../crates/pt-wire" }
+
+# Not a workspace member: built with nightly by cargo-fuzz only.
+[workspace]
+
+[[bin]]
+name = "ptf_read"
+path = "fuzz_targets/ptf_read.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cbor_decode"
+path = "fuzz_targets/cbor_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "jsonl_load"
+path = "fuzz_targets/jsonl_load.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "wire"
+path = "fuzz_targets/wire.rs"
+test = false
+doc = false
+bench = false

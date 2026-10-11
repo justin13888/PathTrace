@@ -263,3 +263,39 @@ This part is completed together with the implementation. The CDDL in `docs/desig
 | `SERS` | yes | yes | yes | Tables referenced by PATH |
 | `VALD` | no | yes | no | Reference-flow results and fidelity scores |
 | `INDX` | no | no | no | Offsets, file BLAKE3, content digest |
+
+## Raw tables (trace, after merge)
+
+Every table has `attrs.dir` (`a_to_b` / `b_to_a`) or `attrs.endpoint` (`a` / `b`). Time columns declare their clock. Rows of the same table name and attrs across chunks concatenate in file order.
+
+| Table (section) | Key attr | Columns (type, canonical encoding, unit, clock) |
+|---|---|---|
+| `pkt` (OBSV) | dir | flow u64 rle; seq u64 delta; size u64 rle B (IP bytes); phase, train, train_idx, tos_tx, tx_sock u64 rle; tx_intended u64 delta2 ns `<sender>.mono`; tx_user_lag i64 varint ns; tx_sched u64? delta2 ns `<sender>.real`; tx_snd_lag i64? varint ns (SND − SCHED); rx u64? delta2 ns `<receiver>.real` (null = not received); rx_src u64? rle enum[kernel,user]; tos_rx, ttl_rx, src, rx_sock, rx_size u64? rle |
+| `dup` (OBSV) | dir | extra arrivals of an already-received (flow, seq): flow, seq, rx, tos_rx, ttl_rx, src, rx_sock |
+| `unmatched` (OBSV) | dir | arrivals with no matching transmission (receiver `rx` row columns) |
+| `echo` (OBSV) | endpoint | arrivals at an endpoint of probes it sent itself (class/NAT echoes): receiver `rx` row columns |
+| `tcpinfo` (OBSV) | endpoint | flow, t (`<ep>.mono`), optlen (bytes the kernel returned), then one nullable u64 per `struct tcp_info` field up to kernel 6.7 (null when the kernel struct is shorter) |
+| `app` (OBSV) | endpoint | flow, t (`<ep>.mono`), event enum[connect_start, connected, tls_done, first_byte, progress, done, req_start, resp_done, error], bytes, value (i64) |
+| `bad` (OBSV) | endpoint | t, bad_tag, unknown (wrong session), truncated: per-second counters |
+| `pairs` (CLOK) | endpoint | mono (`<ep>.mono`), real (`<ep>.real`), width ns: min-width clock sandwich |
+| `exchange` (CLOK) | endpoint=a | t1, t4 (`a.mono`), t2, t3 (`b.mono`) |
+| `ifstats` (CTXS) | endpoint | t, rx/tx bytes, packets, dropped, errors (cumulative counters) |
+| `wifi` (CTXS) | endpoint=a | t, freq MHz, width enum (nl80211), signal dBm, beacon_signal dBm, tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bss (hash, pii quasi): all nullable |
+
+FLOW lists every flow (kind, sender, socket, class, pattern, TOS policy, QUIC shaping, echo). EVNT holds observed events (`phase_start`, `peer_addr`, `nat_rebind`, `addr_new`/`route_*`/`link_*`, `icmp`, `local_error`, `send_error`, `tcp_probe`, `saved_syn`, `ref_tcp`, `flow_stopped`, `budget_cap`, `light_paused`, `session_end`, …); identifying values are wrapped `{value, pii}` and listed in the head's `pii` map.
+
+Observation logs (`META.kind = "obslog"`) carry the per-endpoint precursors: `tx` (sock, flow, seq, size, phase, train, train_idx, tos_tx, id = kernel OPT_ID, tx_intended, tx_user_lag), `txts` (sock, id, kind enum[sched, snd], real) and `rx` (sock, flow, seq, size, rx, rx_src, tos_rx, ttl_rx, src). Any non-META section may repeat in logs. `merge` joins `tx`+`txts` by OPT_ID and then with the peer's `rx` by (flow, seq) into `pkt`, losslessly (`dup`, `unmatched`, `echo` keep everything else).
+
+## Derived series (SERS, critical + derived)
+
+| Table | Columns |
+|---|---|
+| `capacity_opps[dir]` | t (trace ns), bytes: delivery opportunities in saturated windows |
+| `capacity_rate[dir]` | t, rate bit/s: 100 ms bins inside saturated windows |
+| `base_delay[dir]` | t, delay ns: 1 s segments |
+| `jitter[dir]` | t, residual ns (i64) |
+| `loss_events[dir]` | t, burst (packets) |
+| `trains[dir]` | t, train, sent, received, dispersion_rate bit/s, context enum[quiet, loaded] |
+| `train_offsets[dir]` | train, idx, offset ns (nullable = lost) |
+
+PATH fields reference these by name (e.g. `"opportunities": "capacity_opps[a_to_b]"`). The CDDL for every head is `ptf-1.0.cddl`.

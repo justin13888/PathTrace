@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/mtu-blackhole/01a12826-6593-728d-bd82-0508a313bd5d.ptf
+content_digest: 122973bd825507aa2da54009fef163d92341bfae691a2df02e5e2dcf3d6601c5
+packets a_to_b: 4896
+packets b_to_a: 36330
+session: b7f29487

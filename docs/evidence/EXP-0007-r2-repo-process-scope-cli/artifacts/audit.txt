@@ -1,0 +1,7 @@
+audit: 105 requirements {"deferred": 17, "planned": 87, "user-acceptance": 1}, 14 experiments
+STALE   EXP-0002-r3: covered paths changed since 297103da8012
+STALE   EXP-0007: covered paths changed since 1fc7566a2628
+PENDING EXP-0002-r4: defined but not yet run (Ground-truth recovery and netem closure across 23 namespace scenarios (release re-run))
+PENDING EXP-0005: defined but not yet run (Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target))
+PENDING EXP-0007-r2: defined but not yet run (Repository process, scope, CLI surface, derivation purity and in-trace provenance)
+audit: chain intact

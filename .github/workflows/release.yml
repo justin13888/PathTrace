@@ -1,0 +1,77 @@
+name: Release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+permissions:
+  contents: write
+env:
+  CARGO_TERM_COLOR: always
+  MISE_LOCKED: "1"
+  MISE_RUSTUP_HOME: /home/runner/.local/share/mise/rustup
+  MISE_CARGO_HOME: /home/runner/.local/share/mise/cargo
+jobs:
+  # A release must not ship with stale or pending evidence (REQ-REPO-001).
+  audit:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+      - name: Requirement → evidence chain (release mode)
+        run: cargo xtask audit --release
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: jdx/mise-action@v5
+      - run: sudo apt-get install -y -qq musl-tools
+      - name: Build static binary
+        env:
+          CC: musl-gcc
+          RUSTFLAGS: -C target-feature=+crt-static
+        run: |
+          rustup target add "${{ matrix.target }}"
+          cargo build --release --locked -p pathtrace --target "${{ matrix.target }}"
+      - name: Check it is static and runs
+        run: |
+          bin="target/${{ matrix.target }}/release/pathtrace"
+          file "$bin"
+          "$bin" --version
+          ! ldd "$bin" 2>/dev/null | grep -q '=>'
+      - name: Package
+        run: |
+          name="pathtrace-${GITHUB_REF_NAME}-${{ matrix.target }}"
+          mkdir "$name"
+          cp "target/${{ matrix.target }}/release/pathtrace" LICENSE README.md deploy/pathtrace-responder.service "$name/"
+          tar czf "$name.tar.gz" "$name"
+          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+      - uses: actions/upload-artifact@v5
+        with:
+          name: ${{ matrix.target }}
+          path: pathtrace-*.tar.gz*
+  publish:
+    needs: [audit, build]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v5
+        with:
+          merge-multiple: true
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat ./*.sha256 > SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Static Linux binaries (x86_64, aarch64). Verify with SHA256SUMS." ./*.tar.gz SHA256SUMS

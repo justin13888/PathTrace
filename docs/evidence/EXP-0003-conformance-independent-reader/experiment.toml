@@ -1,0 +1,10 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0003"
+title = "Independent Python reader and Rust reader agree on the v1.0 conformance corpus"
+hypothesis = """The pure-stdlib Python reader written only from docs/design/ptf-format.md accepts every \
+valid corpus file with the same content digest as the Rust reader and rejects every invalid file for the \
+expected reason; the Rust reader matches expected.json and the JSON twin round-trips the valid files."""
+command = "python3 -I tools/ptf-py/ptf.py conformance conformance/v1.0 && cargo test --release --locked -q -p pt-format --test conformance"
+covers = ["crates/pt-format/src", "tools/ptf-py", "conformance", "docs/design/ptf-format.md"]
+requirements = ["REQ-FMT-001", "REQ-FMT-002", "REQ-FMT-003", "REQ-FMT-005", "REQ-FMT-009", "REQ-FMT-010", "REQ-FMT-013", "REQ-FMT-014", "REQ-FMT-018"]
+supersedes = []

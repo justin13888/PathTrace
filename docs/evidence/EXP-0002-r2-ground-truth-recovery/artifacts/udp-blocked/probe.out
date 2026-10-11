@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/udp-blocked/01a12840-6d5f-7292-a2dd-6922d417189e.ptf
+content_digest: 2a2918941becc9952fc985093e796d5c799bccfc309e596f9466d21e0b1fb378
+packets a_to_b: 1292
+packets b_to_a: 0
+session: 36c86ea9
