@@ -224,6 +224,8 @@ pub struct ProbeOutcome {
     pub session: u32,
     pub log_a: PathBuf,
     pub log_b: Option<PathBuf>,
+    /// `<trace_id>.session`, needed by `fetch --resume` (delete once the trace is complete).
+    pub session_file: PathBuf,
     pub notes: Vec<String>,
 }
 
@@ -250,6 +252,8 @@ struct Ctx {
     verbose: bool,
     notes: Vec<String>,
     budget: Budget,
+    /// A stop signal was received and recorded (docs/design/probe.md §8).
+    interrupted: bool,
 }
 
 impl Ctx {
@@ -259,7 +263,35 @@ impl Ctx {
         }
     }
 
-    fn phase(&self, id: u16, name: &str) {
+    /// Whether a stop signal arrived; records `interrupted` the first time.
+    fn interrupted(&mut self) -> bool {
+        if !self.interrupted
+            && let Some(sig) = pt_sys::signal::stop_requested()
+        {
+            self.interrupted = true;
+            let name = pt_sys::signal::name(sig);
+            self.rec
+                .event("interrupted", Value::map().with("signal", name));
+            self.notes.push(format!(
+                "interrupted by {name}: remaining phases skipped, session ended early"
+            ));
+            self.say(&format!(
+                "{name}: ending the session (send it again to quit at once)"
+            ));
+        }
+        self.interrupted
+    }
+
+    /// Start phase `id`; returns false (and starts nothing) once the session is interrupted.
+    fn phase(&mut self, id: u16, name: &str) -> bool {
+        if self.interrupted() {
+            return false;
+        }
+        self.log_phase(id, name);
+        true
+    }
+
+    fn log_phase(&self, id: u16, name: &str) {
         self.say(&format!("phase P{id} {name}"));
         let body = Value::map().with("phase", id).with("name", name);
         self.rec.event("phase_start", body.clone());
@@ -267,6 +299,9 @@ impl Ctx {
     }
 
     fn start(&mut self, specs: Vec<FlowSpec>, delay_ms: u64) -> bool {
+        if self.interrupted() {
+            return false;
+        }
         // Control datagrams carry DF (PMTU probing on the main socket), so each message must
         // fit in one packet: send flow definitions in batches of bounded encoded size.
         let mut batches: Vec<Vec<Value>> = vec![Vec::new()];
@@ -334,8 +369,16 @@ impl Ctx {
         }
     }
 
-    fn sleep(&self, s: f64) {
-        std::thread::sleep(Duration::from_secs_f64(s));
+    /// Sleep `s` seconds, returning early when a stop signal arrives.
+    fn sleep(&mut self, s: f64) {
+        let end = Instant::now() + Duration::from_secs_f64(s);
+        while !self.interrupted() {
+            let left = end.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return;
+            }
+            std::thread::sleep(left.min(Duration::from_millis(100)));
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -418,6 +461,66 @@ impl Ctx {
         );
         s.max_bytes = max_bytes;
         Some(s)
+    }
+}
+
+/// What `pathtrace fetch --resume` needs to retrieve a responder log later: written as
+/// `<trace_id>.session` (0600) right after the handshake (docs/design/probe.md §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFile {
+    pub responder: String,
+    pub session: u32,
+    pub token: [u8; 32],
+    /// The responder's TLS certificate (DER), pinned through the Noise handshake.
+    pub cert: Vec<u8>,
+    /// Where the responder log goes.
+    pub log_b: PathBuf,
+}
+
+impl SessionFile {
+    pub fn path(out_dir: &Path, trace_id: &str) -> PathBuf {
+        out_dir.join(format!("{trace_id}.session"))
+    }
+
+    pub fn write(&self, path: &Path) -> io::Result<()> {
+        let text = format!(
+            "# pathtrace session file: pathtrace fetch --resume {}\nresponder {}\nsession {:08x}\ntoken {}\ncert {}\nlog_b {}\n",
+            path.display(),
+            self.responder,
+            self.session,
+            config::hex(&self.token),
+            config::hex(&self.cert),
+            self.log_b.display()
+        );
+        config::write_secret(path, &text)
+    }
+
+    pub fn read(path: &Path) -> io::Result<SessionFile> {
+        let text = config::read_private(path)?;
+        let field = |k: &str| {
+            text.lines()
+                .find_map(|l| l.strip_prefix(k)?.strip_prefix(' '))
+                .map(str::trim)
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("{}: missing {k}", path.display()),
+                    )
+                })
+        };
+        let bad = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
+        let cert_hex = field("cert")?;
+        let cert = (0..cert_hex.len() / 2)
+            .map(|i| u8::from_str_radix(&cert_hex[2 * i..2 * i + 2], 16))
+            .collect::<Result<Vec<u8>, _>>()
+            .map_err(|e| bad(e.to_string()))?;
+        Ok(SessionFile {
+            responder: field("responder")?.to_string(),
+            session: u32::from_str_radix(field("session")?, 16).map_err(|e| bad(e.to_string()))?,
+            token: config::unhex32(field("token")?)?,
+            cert,
+            log_b: PathBuf::from(field("log_b")?),
+        })
     }
 }
 
@@ -651,6 +754,25 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         p.insert(Key::from("/extra/responder/name"), Value::from("quasi"));
     }
     let (rec, rec_join) = record::start(&log_a, meta, Role::A)?;
+    // Before measuring: everything needed to fetch the responder's half later, even if this
+    // process is interrupted or the network goes away (docs/design/probe.md §8).
+    let log_b = opts.out_dir.join(format!("{trace_id}.b.ptflog"));
+    let token = transport.session_key(FETCH_KEY_CONTEXT);
+    let session_file = SessionFile::path(&opts.out_dir, &trace_id);
+    SessionFile {
+        responder: opts.responder.name.clone(),
+        session,
+        token,
+        cert: cert.clone(),
+        log_b: log_b.clone(),
+    }
+    .write(&session_file)?;
+    if opts.verbose {
+        eprintln!(
+            "[pathtrace] session {session:08x}, trace {trace_id}; session file {}",
+            session_file.display()
+        );
+    }
     rec.event(
         "handshake",
         Value::map()
@@ -729,6 +851,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         verbose: opts.verbose,
         notes,
         budget,
+        interrupted: false,
     };
     let tcp_key = transport.session_key(TCP_KEY_CONTEXT);
     run_phases(&mut ctx, opts, dst, &all, &cert, &tcp_key, session);
@@ -750,10 +873,10 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         ));
         ctx.sleep(max_nat - el);
     }
-    ctx.phase(9, "end");
+    ctx.log_phase(9, "end");
     ctx.stop(&[ids::LIGHT_A, ids::LIGHT_B, ids::TRAIN_A, ids::TRAIN_B]);
     let _ = ctx.ep.cmd.send(PacerCmd::StopAll);
-    ctx.sleep(1.0);
+    std::thread::sleep(Duration::from_secs(1));
     let bye_ok = ctx
         .ctl
         .request("bye", Value::map(), Duration::from_secs(5))
@@ -796,15 +919,11 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     }
 
     // Fetch the responder log.
-    let log_b = opts.out_dir.join(format!("{trace_id}.b.ptflog"));
-    let token = transport.session_key(FETCH_KEY_CONTEXT);
-    let fetched = fetch_with_retry(dst.ip(), &cert, session, &token, &log_b, opts.verbose);
+    let fetched = fetch_with_retry(dst, &cert, session, &token, &log_b, opts.verbose);
     if let Err(e) = &fetched {
         notes.push(format!(
-            "could not fetch responder log yet ({e}); later run: pathtrace fetch --responder {} --session {session:08x} --token {} --out {}",
-            opts.responder.name,
-            config::hex(&token),
-            log_b.display()
+            "could not fetch responder log yet ({e}); later run: pathtrace fetch --resume {}",
+            session_file.display()
         ));
     }
     Ok(ProbeOutcome {
@@ -812,12 +931,16 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         session,
         log_a,
         log_b: fetched.ok().map(|_| log_b),
+        session_file,
         notes,
     })
 }
 
+/// Fetch a finished session's responder log from `dst` (the responder's control address).
+/// With the pinned certificate: TLS on the responder's port, then TLS on 443. Without it:
+/// plain TCP on the responder's port (docs/design/probe.md §8).
 pub fn fetch_with_retry(
-    ip: IpAddr,
+    dst: SocketAddr,
     cert: &[u8],
     session: u32,
     token: &[u8; 32],
@@ -825,18 +948,19 @@ pub fn fetch_with_retry(
     verbose: bool,
 ) -> io::Result<u64> {
     let mut last = io::Error::other("no attempt");
+    let tls = if cert.is_empty() {
+        None
+    } else {
+        tcp::client_config(cert).ok()
+    };
+    let routes: Vec<(u16, Option<Arc<rustls::ClientConfig>>)> = match &tls {
+        Some(c) => vec![(dst.port(), Some(c.clone())), (443, Some(c.clone()))],
+        None => vec![(dst.port(), None)],
+    };
     for attempt in 0..10 {
-        for (port, tls) in [(4433u16, false), (443, true)] {
-            let cfg = if tls && !cert.is_empty() {
-                tcp::client_config(cert).ok()
-            } else {
-                None
-            };
-            if tls && cfg.is_none() {
-                continue;
-            }
+        for (port, cfg) in routes.iter().cloned() {
             match tcp::fetch(
-                SocketAddr::new(ip, port),
+                SocketAddr::new(dst.ip(), port),
                 cfg,
                 session,
                 token,
@@ -878,7 +1002,9 @@ fn run_phases(
     };
 
     // Background: light flow + light trains (whole session), PMTU ladders, NAT probes.
-    ctx.phase(0, "background");
+    if !ctx.phase(0, "background") {
+        return;
+    }
     let mut bg = Vec::new();
     for (id, sender) in [(ids::LIGHT_A, Role::A), (ids::LIGHT_B, Role::B)] {
         let mut s = ctx.mk(
@@ -965,7 +1091,9 @@ fn run_phases(
     ctx.start(vec![lb], 50);
 
     // P1 reachability: UDP classes (echoed) and TCP classes.
-    ctx.phase(1, "reachability");
+    if !ctx.phase(1, "reachability") {
+        return;
+    }
     let mut cls = Vec::new();
     for (id, sock, quic, class) in [
         (ids::CLASS_MAIN, Sock::Main, false, "udp/high-port"),
@@ -1049,11 +1177,15 @@ fn run_phases(
         Value::map().with("udp443", udp443_ok).with("quic", quic_ok),
     );
 
-    ctx.phase(2, "quiet");
+    if !ctx.phase(2, "quiet") {
+        return;
+    }
     ctx.sleep(p.quiet_s);
 
     if p.chirp_s > 0.0 {
-        ctx.phase(3, "chirps");
+        if !ctx.phase(3, "chirps") {
+            return;
+        }
         let a = ctx.mk(
             ids::CHIRP_A,
             "chirp",
@@ -1090,19 +1222,25 @@ fn run_phases(
     }
 
     if p.sat_s > 0.0 {
-        ctx.phase(4, "saturate a_to_b");
+        if !ctx.phase(4, "saturate a_to_b") {
+            return;
+        }
         if let Some(s) = ctx.heavy(ids::HEAVY_A, Role::A, 4, p.sat_s) {
             ctx.start(vec![s], 50);
             ctx.sleep(p.sat_s + 1.0);
         }
-        ctx.phase(5, "saturate b_to_a");
+        if !ctx.phase(5, "saturate b_to_a") {
+            return;
+        }
         if let Some(s) = ctx.heavy(ids::HEAVY_B, Role::B, 5, p.sat_s) {
             ctx.start(vec![s], 50);
             ctx.sleep(p.sat_s + 1.0);
         }
     }
     if p.both_s > 0.0 {
-        ctx.phase(6, "saturate both");
+        if !ctx.phase(6, "saturate both") {
+            return;
+        }
         let both: Vec<FlowSpec> = [
             ctx.heavy(ids::BOTH_A, Role::A, 6, p.both_s),
             ctx.heavy(ids::BOTH_B, Role::B, 6, p.both_s),
@@ -1116,7 +1254,9 @@ fn run_phases(
         }
     }
     if p.class_sat_s > 0.0 {
-        ctx.phase(7, "class differential");
+        if !ctx.phase(7, "class differential") {
+            return;
+        }
         for (id, sock, quic, class, ok) in [
             (ids::CSAT_MAIN, Sock::Main, false, "udp/high-port", true),
             (ids::CSAT_443, Sock::Udp443, false, "udp/443", udp443_ok),
@@ -1156,7 +1296,9 @@ fn run_phases(
         }
     }
     if p.refs {
-        ctx.phase(8, "reference flows");
+        if !ctx.phase(8, "reference flows") {
+            return;
+        }
         let budget = p
             .data_cap
             .saturating_sub(ctx.ep.shared.bytes_sent.load(Ordering::Relaxed));
@@ -1246,10 +1388,15 @@ fn run_phases(
     }
     let track = opts.track_s.unwrap_or(p.track_s);
     if track > 0 {
-        ctx.phase(10, "tracking");
+        if !ctx.phase(10, "tracking") {
+            return;
+        }
         let rounds = track / 60;
         for i in 0..rounds {
             ctx.sleep(57.0);
+            if ctx.interrupted() {
+                return;
+            }
             let sender = if i % 2 == 0 { Role::A } else { Role::B };
             let id = ids::TRACK0.saturating_add((i % 150) as u8);
             if let Some(s) = ctx.heavy(id, sender, 10, 3.0) {
@@ -1489,6 +1636,15 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
             .collect();
         let mut got: Option<(usize, Vec<u8>, SocketAddr, Option<TcpStream>)> = None;
         while got.is_none() {
+            if let Some(sig) = pt_sys::signal::stop_requested() {
+                if opts.verbose {
+                    eprintln!(
+                        "[pathtrace] {}: responder stopping",
+                        pt_sys::signal::name(sig)
+                    );
+                }
+                return Ok(());
+            }
             if let Ok(s) = ctl_rx.try_recv() {
                 let mut s = s;
                 if let Ok(b) = read_framed(&mut s) {
@@ -1535,6 +1691,9 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
             }
             Ok(None) => {}
             Err(e) => eprintln!("[pathtrace] session error: {e}"),
+        }
+        if pt_sys::signal::stop_requested().is_some() {
+            return Ok(());
         }
         if opts.max_sessions > 0 && done >= opts.max_sessions {
             // Give the initiator time to fetch the log.
@@ -1626,6 +1785,11 @@ fn responder_session(
         .join(format!("{session:08x}"));
     std::fs::create_dir_all(&dir)?;
     let log = dir.join("b.ptflog");
+    // The fetch token is persisted before measuring, so the log stays fetchable after a
+    // responder restart mid-session (docs/design/probe.md §8). Fetch is refused while the
+    // session runs: only `finished` sessions are served.
+    let token = transport.session_key(FETCH_KEY_CONTEXT);
+    config::write_secret(&dir.join("fetch_token"), &config::hex(&token))?;
     let mut socks: Vec<(Sock, Arc<UdpSock>)> = vec![(Sock::Main, main.clone())];
     if let Some(u) = &u443 {
         socks.push((Sock::Udp443, u.clone()));
@@ -1708,6 +1872,11 @@ fn responder_session(
         Box::new(move |b| c2.on_feedback(b)),
         rec.clone(),
     );
+    // A repeat of the handshake that opened this session means our reply was lost: resend it
+    // (docs/design/probe.md §3.1).
+    if let Some(Frame::Init { noise }) = Frame::decode(data) {
+        ctl.set_handshake_replay(noise, msg2.clone());
+    }
     *state.active.lock().expect("lock") = Some(Active {
         session,
         tcp_key: transport.session_key(TCP_KEY_CONTEXT),
@@ -1721,6 +1890,10 @@ fn responder_session(
 
     let mut reason = "bye";
     loop {
+        if pt_sys::signal::stop_requested().is_some() {
+            reason = "signal";
+            break;
+        }
         let Some(env) = ctl.recv(Duration::from_millis(500)) else {
             if mono_raw().saturating_sub(shared.last_ctrl.load(Ordering::Relaxed)) > 30_000_000_000
             {
@@ -1781,18 +1954,6 @@ fn responder_session(
     drop(ctl);
     drop(rec);
     let _ = rec_join.join();
-    let token = transport.session_key(FETCH_KEY_CONTEXT);
-    {
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        let mut f = std::fs::OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .mode(0o600)
-            .open(dir.join("fetch_token"))?;
-        f.write_all(config::hex(&token).as_bytes())?;
-    }
     state
         .finished
         .lock()
@@ -1804,4 +1965,31 @@ fn responder_session(
 /// Drain helper for tests: wait until `rx` yields or times out.
 pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
     rx.recv_timeout(d).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn session_file_roundtrips_and_is_private() {
+        let dir = std::env::temp_dir().join(format!("pt-sessfile-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = SessionFile::path(&dir, "trace-1");
+        let f = SessionFile {
+            responder: "vm".into(),
+            session: 0x0abc_def1,
+            token: [7u8; 32],
+            cert: vec![0x30, 0x82, 0x01, 0xff],
+            log_b: dir.join("trace-1.b.ptflog"),
+        };
+        f.write(&path).unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(SessionFile::read(&path).unwrap(), f);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -53,6 +53,9 @@ struct Rel {
     srtt_ns: u64,
 }
 
+/// Responder: the handshake message that opened the session, our reply, and resends left.
+type Replay = (Vec<u8>, Vec<u8>, u32);
+
 pub struct Control {
     pub transport: Arc<Transport>,
     wire: Wire,
@@ -61,6 +64,7 @@ pub struct Control {
     acked: Condvar,
     incoming: Mutex<Receiver<Envelope>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    replay: Mutex<Option<Replay>>,
 }
 
 impl std::fmt::Debug for Control {
@@ -93,6 +97,7 @@ impl Control {
             acked: Condvar::new(),
             incoming: Mutex::new(in_rx),
             thread: Mutex::new(None),
+            replay: Mutex::new(None),
         });
         let c2 = ctl.clone();
         let h = std::thread::Builder::new()
@@ -225,6 +230,33 @@ impl Control {
         None
     }
 
+    /// Responder: resend `reply` (at most 3 times) when the initiator repeats the handshake
+    /// message `init_noise`, because our reply to it was lost (docs/design/probe.md §3.1).
+    pub fn set_handshake_replay(&self, init_noise: Vec<u8>, reply: Vec<u8>) {
+        *self.replay.lock().expect("lock") = Some((init_noise, reply, 3));
+    }
+
+    fn replay_handshake(&self, noise: &[u8], src: std::net::SocketAddr) -> bool {
+        let mut r = self.replay.lock().expect("lock");
+        let Some((init, reply, left)) = r.as_mut() else {
+            return false;
+        };
+        if init.as_slice() != noise || *left == 0 {
+            return false;
+        }
+        *left -= 1;
+        if let Wire::Udp { cmd, sock } = &self.wire {
+            let _ = cmd.send(PacerCmd::Raw {
+                sock: *sock,
+                dst: src,
+                bytes: reply.clone(),
+                at: 0,
+                log: None,
+            });
+        }
+        true
+    }
+
     pub fn srtt(&self) -> Duration {
         Duration::from_nanos(self.rel.lock().expect("lock").srtt_ns)
     }
@@ -266,6 +298,12 @@ impl Control {
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
+            if let Frame::Init { noise } = &msg.frame {
+                if self.replay_handshake(noise, msg.src) {
+                    rec.event("handshake_resent", Value::map());
+                }
+                continue;
+            }
             let Some(env) = self.transport.open(&msg.frame) else {
                 continue;
             };

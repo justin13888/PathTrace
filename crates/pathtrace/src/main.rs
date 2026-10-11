@@ -97,16 +97,21 @@ enum Cmd {
     },
     /// Download a responder log for a finished session.
     Fetch {
-        #[arg(long)]
-        responder: String,
+        /// Session file `probe` wrote (`<trace_id>.session`): fetches over TLS with the pinned
+        /// certificate. Replaces the four options below.
+        #[arg(long, conflicts_with_all = ["responder", "session", "token"])]
+        resume: Option<PathBuf>,
+        #[arg(long, required_unless_present = "resume")]
+        responder: Option<String>,
         /// Session id (hex, from the probe output).
-        #[arg(long)]
-        session: String,
+        #[arg(long, required_unless_present = "resume")]
+        session: Option<String>,
         /// Fetch token (hex, from the probe output).
-        #[arg(long)]
-        token: String,
-        #[arg(long)]
-        out: PathBuf,
+        #[arg(long, required_unless_present = "resume")]
+        token: Option<String>,
+        /// Output file (default with --resume: the path recorded in the session file).
+        #[arg(long, required_unless_present = "resume")]
+        out: Option<PathBuf>,
     },
     /// Inspect, validate and convert PTF files.
     Trace {
@@ -283,6 +288,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         },
         Cmd::Serve(a) => {
+            pt_sys::signal::install_stop_handler().map_err(|e| e.to_string())?;
             let opts = ServeOpts {
                 config_dir: cfg,
                 state_dir: a.state_dir.unwrap_or_else(config::default_state_dir),
@@ -309,18 +315,42 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             }
         }
         Cmd::Fetch {
+            resume,
             responder,
             session,
             token,
             out,
         } => {
-            let r = find_responder(&cfg, &responder)?;
+            let (name, sid, tok, cert, out) = match resume {
+                Some(file) => {
+                    let f = session::SessionFile::read(&file).map_err(|e| e.to_string())?;
+                    (
+                        f.responder,
+                        f.session,
+                        f.token,
+                        f.cert,
+                        out.unwrap_or(f.log_b),
+                    )
+                }
+                None => {
+                    let session = session.unwrap_or_default();
+                    let sid = u32::from_str_radix(session.trim_start_matches("0x"), 16)
+                        .map_err(|e| e.to_string())?;
+                    let tok =
+                        config::unhex32(&token.unwrap_or_default()).map_err(|e| e.to_string())?;
+                    // No pinned certificate: plain TCP on the responder's port.
+                    (
+                        responder.unwrap_or_default(),
+                        sid,
+                        tok,
+                        Vec::new(),
+                        out.unwrap_or_default(),
+                    )
+                }
+            };
+            let r = find_responder(&cfg, &name)?;
             let (dst, _) = session::resolve(&r.addr, false).map_err(|e| e.to_string())?;
-            let sid = u32::from_str_radix(session.trim_start_matches("0x"), 16)
-                .map_err(|e| e.to_string())?;
-            let tok = config::unhex32(&token).map_err(|e| e.to_string())?;
-            // The TLS certificate is unknown offline; fetch over the plain main port.
-            let n = session::fetch_with_retry(dst.ip(), &[], sid, &tok, &out, true)
+            let n = session::fetch_with_retry(dst, &cert, sid, &tok, &out, true)
                 .map_err(|e| e.to_string())?;
             println!("{} ({n} bytes)", out.display());
         }
@@ -424,6 +454,7 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
         track_s: a.track_secs,
         verbose: !a.quiet,
     };
+    pt_sys::signal::install_stop_handler().map_err(|e| e.to_string())?;
     let outcome = session::run_probe(&opts).map_err(|e| e.to_string())?;
     let trace = a.out.join(format!("{}.ptf", outcome.trace_id));
     let mut partial = outcome.log_b.is_none() || !outcome.notes.is_empty();
@@ -461,6 +492,10 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
     println!("session: {:08x}", outcome.session);
     for n in &outcome.notes {
         eprintln!("note: {n}");
+    }
+    // The session file is only needed to fetch the responder log later; it holds a secret.
+    if !partial {
+        let _ = std::fs::remove_file(&outcome.session_file);
     }
     Ok(if partial {
         ExitCode::from(3)

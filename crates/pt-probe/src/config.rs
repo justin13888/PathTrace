@@ -75,6 +75,18 @@ fn write_private(path: &Path, content: &str, append: bool) -> io::Result<()> {
     f.write_all(content.as_bytes())
 }
 
+/// Write a secret file (mode 0600) without touching its directory's permissions.
+pub fn write_secret(path: &Path, content: &str) -> io::Result<()> {
+    let mut f = fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)?;
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    f.write_all(content.as_bytes())
+}
+
 /// Read a secret file, refusing group- or world-accessible permissions.
 pub fn read_private(path: &Path) -> io::Result<String> {
     let meta = fs::metadata(path)?;

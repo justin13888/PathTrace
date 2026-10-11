@@ -16,6 +16,9 @@
 #   RESP_ADDR  responder address the initiator uses (default 10.0.2.2; fd00:2::2 for IPv6)
 #   SCRIPT_PM  shell commands run in the middlebox namespace in the background during the probe
 #              (e.g. scripted `tc qdisc change` for time-varying capacity)
+#   PROBE_SIGNAL_AFTER  send SIGINT to the probe after this many seconds (interruption tests)
+#   POST_PA    shell commands run in the initiator namespace after the probe exits, with
+#              BIN, OUT and CFG (the initiator config dir) set; output in post_pa.log
 set -eu
 : "${BIN:?BIN must point at the pathtrace binary}"
 : "${OUT:?OUT must be an output directory}"
@@ -26,6 +29,8 @@ SETUP_PM=${SETUP_PM:-}
 SCRIPT_PM=${SCRIPT_PM:-}
 PROBE_ARGS=${PROBE_ARGS:-}
 SERVE_ARGS=${SERVE_ARGS:-}
+PROBE_SIGNAL_AFTER=${PROBE_SIGNAL_AFTER:-}
+POST_PA=${POST_PA:-}
 RESP_ADDR=${RESP_ADDR:-10.0.2.2}
 IP=ip
 
@@ -87,8 +92,18 @@ if [ -n "$SCRIPT_PM" ]; then
 fi
 set +e
 # shellcheck disable=SC2086
-$IP netns exec pa "$BIN" --config-dir "$OUT/i" probe vm --class lab --profile "$PROFILE" --out "$OUT" $PROBE_ARGS >"$OUT/probe.out" 2>"$OUT/probe.err"
+$IP netns exec pa "$BIN" --config-dir "$OUT/i" probe vm --class lab --profile "$PROFILE" --out "$OUT" $PROBE_ARGS >"$OUT/probe.out" 2>"$OUT/probe.err" &
+PROBE=$!
+if [ -n "$PROBE_SIGNAL_AFTER" ]; then
+  sleep "$PROBE_SIGNAL_AFTER"
+  kill -INT "$PROBE" 2>/dev/null
+fi
+wait "$PROBE"
 echo "$?" >"$OUT/probe.exit"
+if [ -n "$POST_PA" ]; then
+  $IP netns exec pa env BIN="$BIN" OUT="$OUT" CFG="$OUT/i" sh -c "$POST_PA" >"$OUT/post_pa.log" 2>&1
+  echo "$?" >"$OUT/post_pa.exit"
+fi
 wait "$SERVE"
 echo "$?" >"$OUT/serve.exit"
 if [ -n "$PM_PID" ]; then kill "$PM_PID" 2>/dev/null; fi
