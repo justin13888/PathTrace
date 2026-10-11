@@ -4,7 +4,7 @@
 - status: met
 - spec: §8
 - design: docs/design/derivation.md
-- evidence: EXP-0007-r5
+- evidence: EXP-0007-r6
 
 Derivation is a deterministic, pure function of the raw layer. `pathtrace derive` regenerates the derived sections (PATH, SERS, PLCY, VALD) of any trace, old or new, and leaves raw sections byte-identical.
 
@@ -82,7 +82,7 @@ Path MTU with the black-hole flag, ECN and DSCP handling, and the per-class poli
 ### REQ-DRV-012: Named, versioned methods
 - status: met
 - spec: §7.5
-- evidence: EXP-0007-r5
+- evidence: EXP-0007-r6
 
 Every derivation method has a stable name and version (`capacity.saturated-arrivals/1`). Changing a method's output semantics bumps its version.
 
