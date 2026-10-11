@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/loss-random/01a1285f-4ccb-70cc-8395-39c0061f6b96.ptf
+content_digest: 2bee2c312cf8b52c9618b7327af8b99f2cb0d593160836ffda4779a0886c96c4
+packets a_to_b: 134968
+packets b_to_a: 135376
+session: c21df33b
