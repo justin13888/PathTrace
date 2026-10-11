@@ -1,0 +1,17 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0007-r6"
+title = "Repository process, scope, CLI surface, derivation purity and in-trace provenance"
+hypothesis = """Process rules hold (conventional history with the closed scope set, merge-commit-only settings and \
+ruleset, Apache-2.0 detected, CLAUDE.md symlink, pinned tools, design-first PRs, audit chain intact); the code \
+stays in scope (Linux only, two endpoints, protocol results never feed PATH, rate cap default 500 Mbit/s); every \
+documented command exists, JSON output parses, exit codes are 0/1/2 as documented; derivation is deterministic \
+and idempotent and leaves raw sections byte-identical; traces carry the tool commit and every PATH field a \
+versioned method and status; doctor runs and reports JSON."""
+command = "sh docs/evidence/EXP-0007-r6-repo-process-scope-cli/check.sh"
+covers = [".convco", "hk.pkl", "mise.toml", "mise.lock", "AGENTS.md", "LICENSE", "crates/pathtrace/src", "crates/pt-derive/src", "crates/pt-probe/src/flows.rs", "conformance/v1.0-real"]
+requirements = [
+  "REQ-REPO-001", "REQ-REPO-002", "REQ-REPO-003", "REQ-REPO-004", "REQ-REPO-005", "REQ-REPO-006", "REQ-REPO-007", "REQ-REPO-008",
+  "REQ-SCOPE-001", "REQ-SCOPE-002", "REQ-SCOPE-003", "REQ-SCOPE-004",
+  "REQ-CLI-001", "REQ-CLI-003", "REQ-DRV-001", "REQ-DRV-012", "REQ-FMT-008", "REQ-PRB-025",
+]
+supersedes = ["EXP-0007-r5"]
