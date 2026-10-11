@@ -84,7 +84,7 @@ From the pinned evidence. Verdicts: `recovered` (ground truth recovered within t
 | S14 Timeline | EXP-0002-r8 | `recovered-with-limits` | address change and rebind events recorded; the derived outage (`PATH.timeline`) is not scored separately |
 | S15 Calibrated summary | EXP-0002-r8 | `recovered` | closure: the netem export replayed and re-captured reproduces capacity, buffer and delay within 0.1% |
 | S16 Direction coupling | — | `recorded-unverified` | no ground truth exists here (netem directions are independent) |
-| S17 Validation ground truth | EXP-0006-r4 | `recorded-unverified` | reference flows recorded in `VALD`; their use is fidelity scoring (#7) |
+| S17 Validation ground truth | EXP-0006-r5 | `recorded-unverified` | reference flows recorded in `VALD`; their use is fidelity scoring (#7) |
 | S18 Proxy | — | `recorded-unverified` | `PLCY.proxy_suspected` recorded; validation is #22 |
 
 **Conclusion (REQ-FMT-022).** No anticipated stage is `not-representable`. Fifteen of eighteen stages are recovered from ground truth, four of them with stated limits. The netem export of a trace reproduces that trace when replayed (closure). S16, S17 and S18 are recorded but cannot be verified with the present harness, and each is tracked. Limits that no recorded trace can remove are listed under *Known limits* above.

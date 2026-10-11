@@ -3,14 +3,14 @@
 ### REQ-PRB-001: One symmetric binary
 - status: met
 - spec: §6.1
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 One `pathtrace` binary acts as initiator (`probe`) or responder (`serve`). The roles differ only in who sends first, and measurement runs in both directions with the same code.
 
 ### REQ-PRB-002: Authenticated sessions
 - status: met
 - spec: §6.2
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Sessions are authenticated with Noise `IKpsk2` (X25519, ChaCha20-Poly1305, BLAKE2s), and the responder accepts only initiator keys listed in its authorized-keys file.
 
@@ -24,7 +24,7 @@ Control messages are delivered reliably over UDP. When UDP is blocked the sessio
 ### REQ-PRB-004: Anti-amplification
 - status: met
 - spec: §6.2
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Before an initiator's address is validated, the responder sends at most three times the bytes it has received from that address.
 
@@ -38,21 +38,21 @@ A sender stops within 500 ms of losing authenticated feedback from its peer.
 ### REQ-PRB-006: Authenticated probe packets
 - status: met
 - spec: §6.2
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Probe packets carry an 8-byte keyed BLAKE3 tag derived from the session keys, and random padding so that compression cannot distort sizes. Packets with a bad tag are counted and never treated as observations.
 
 ### REQ-PRB-007: Clock observation
 - status: met
 - spec: §6.3
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Each side timestamps with CLOCK_MONOTONIC_RAW for scheduling and logs paired REALTIME/MONOTONIC_RAW readings throughout the session. Four-timestamp offset exchanges run on the control channel for the whole session.
 
 ### REQ-PRB-008: Best available packet timestamps, recorded
 - status: met
 - spec: §6.3
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Send and receive times use kernel `SO_TIMESTAMPING` (hardware, then software, then userspace fallback). The source actually used is recorded per flow and direction. Logs hold the actual transmit time, and the packet carries the intended send time.
 
@@ -60,7 +60,7 @@ Send and receive times use kernel `SO_TIMESTAMPING` (hardware, then software, th
 - status: met
 - spec: §6.4
 - design: docs/design/probe.md
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Probe packets carry a fixed little-endian header (version and type, flow, phase, session, sequence, intended send time, train id and index, flags) followed by padding and the tag.
 
@@ -82,7 +82,7 @@ The standard profile runs handshake, reachability, quiet baseline, chirps, satur
 ### REQ-PRB-012: Reference flows
 - status: met
 - spec: §6.5, §11.3
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 The probe runs fixed reference workloads over the real path: TCP bulk transfer, TCP request/response and constant-rate UDP. It records application events, `TCP_INFO` every 10 ms and the congestion-control algorithm, as ground truth for future fidelity scoring.
 
@@ -110,21 +110,21 @@ For each class (`udp/high-port`, `udp/443 opaque`, `udp/443 QUIC-shaped`, `tcp/4
 ### REQ-PRB-016: Safety limits
 - status: met
 - spec: §6.7
-- evidence: EXP-0002-r8, EXP-0006-r4
+- evidence: EXP-0002-r8, EXP-0006-r5
 
 Every session has a hard data cap and a hard rate cap. Saturation is feedback-controlled to hold a standing queue, and a metered connection selects `light` automatically.
 
 ### REQ-PRB-017: Timing-faithful Linux I/O
 - status: met
 - spec: §6.8
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Probe sockets use `sendmmsg`/`recvmmsg`, kernel timestamping, `IP_RECVTOS`/`IPV6_RECVTCLASS`, TTL/hop-limit reception and error-queue PMTU signals. UDP GSO/GRO stay disabled, and sending and receiving run on dedicated threads with sleep-then-spin pacing.
 
 ### REQ-PRB-018: Observation logs and merge
 - status: met
 - spec: §6.9
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 Each side writes a crash-safe observation log. After the session the logs are merged over the control channel, or offline with `pathtrace merge`, into one trace.
 
@@ -168,7 +168,7 @@ The `udp/443 QUIC-shaped` class sends packets with valid QUIC v1 long- and short
 - status: met
 - spec: §6.6
 - adr: 0006
-- evidence: EXP-0006-r4
+- evidence: EXP-0006-r5
 
 The `tcp/443` class runs a real TLS 1.3 session. The responder certificate is pinned through the Noise-authenticated control channel.
 
