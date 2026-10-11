@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/symmetric-delay/01a128b6-2e11-73eb-8d6e-0b8d0aa2b1ef.ptf
+content_digest: d2fa4f072a391e72fec53c567fa57120fd00f5557bab50928c213d5d72005f2d
+packets a_to_b: 9849
+packets b_to_a: 9701
+session: e9db4cde

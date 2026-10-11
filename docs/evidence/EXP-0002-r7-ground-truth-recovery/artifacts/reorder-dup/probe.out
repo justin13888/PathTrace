@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/reorder-dup/01a128bc-58fe-7010-82b8-b98cc9a01618.ptf
+content_digest: ab8884e5e174c75a84231f686619345b9d0e483c6fcde1a489bd87f1a6c8476e
+packets a_to_b: 16591
+packets b_to_a: 34207
+session: bd5d23fd

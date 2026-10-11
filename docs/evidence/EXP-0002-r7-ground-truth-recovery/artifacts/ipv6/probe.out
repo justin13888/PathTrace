@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/target/groundtruth/ipv6/01a128ba-d09b-769a-8949-5802baa70f28.ptf
+content_digest: 50f8575733f939e6cc210f4832ba88a104472824e89f8079e46c9241170e5390
+packets a_to_b: 5652
+packets b_to_a: 5560
+session: 80c6572d
