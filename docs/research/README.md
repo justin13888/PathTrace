@@ -52,3 +52,4 @@ Pin source code to a commit or version. Keep notes under about 80 lines.
 | [R-0012](R-0012-tcp-info-congestion-saved-syn.md) | TCP_INFO layout across kernels, TCP_CONGESTION, TCP_SAVED_SYN | refuted | |
 | [R-0013](R-0013-netlink-wifi-interface-metadata.md) | rtnetlink events, nl80211 station info, interface classification, metered state | confirmed | |
 | [R-0014](R-0014-rust-crate-selection-for-measurement.md) | Rust crate selection for sync measurement code | confirmed | |
+| [R-0015](R-0015-tx-id-errors-socket-drops-qdisc-stats.md) | OPT_ID on send errors, socket receive drops, qdisc and UDP drop counters | partially-confirmed | |
