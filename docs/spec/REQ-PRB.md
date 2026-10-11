@@ -206,3 +206,17 @@ At least 50 traces across at least 4 network classes are captured on real access
 - issue: #17
 
 When both endpoints have a verified synchronised clock (for example PTP), the one-way delay split is measured (`synced_clocks`) instead of assumed symmetric.
+
+### REQ-PRB-030: Host-side losses are distinguishable from path loss
+- status: planned
+- spec: new
+- design: docs/design/probe.md
+
+Every place where the probe's own hosts can lose or skip a datagram is recorded, so that derivation never counts it as path loss: sends the kernel rejected or the pacer skipped (with their transmit ids), drops at the receiving socket (per datagram), UDP and softnet stack drops and egress qdisc drops (sampled on both endpoints), and observations lost to the recorder. TX timestamps are matched to their own transmissions after send failures.
+
+### REQ-PRB-031: Sessions survive interruption and lost handshake replies
+- status: planned
+- spec: new
+- design: docs/design/probe.md
+
+SIGINT or SIGTERM ends a session cleanly on either endpoint, with a partial trace. The responder's log stays fetchable after an interruption of the initiator or a restart of the responder, using a session file written before measuring. A lost handshake reply does not end the session.
