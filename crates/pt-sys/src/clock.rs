@@ -29,12 +29,21 @@ pub fn realtime() -> u64 {
     now(libc::CLOCK_REALTIME)
 }
 
+/// CLOCK_BOOTTIME in ns: like MONO_RAW's monotonic clock, but it keeps counting during suspend.
+#[inline]
+pub fn boottime() -> u64 {
+    now(libc::CLOCK_BOOTTIME)
+}
+
 /// One clock pair: REALTIME sampled between two MONO_RAW reads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ClockPair {
     /// Midpoint of the two MONO_RAW reads.
     pub mono: u64,
     pub real: u64,
+    /// CLOCK_BOOTTIME, read inside the same sandwich: BOOTTIME − MONO_RAW jumps by the time
+    /// the system spent suspended.
+    pub boot: u64,
     /// Width of the sandwich (uncertainty), ns.
     pub width: u64,
 }
@@ -44,17 +53,20 @@ pub fn pair(tries: usize) -> ClockPair {
     let mut best = ClockPair {
         mono: 0,
         real: 0,
+        boot: 0,
         width: u64::MAX,
     };
     for _ in 0..tries.max(1) {
         let m0 = mono_raw();
         let r = realtime();
+        let b = boottime();
         let m1 = mono_raw();
         let w = m1 - m0;
         if w < best.width {
             best = ClockPair {
                 mono: m0 + w / 2,
                 real: r,
+                boot: b,
                 width: w,
             };
         }
@@ -92,6 +104,9 @@ mod tests {
         let p = pair(8);
         assert!(p.width < 1_000_000, "sandwich width {} ns", p.width);
         assert!(p.real > 1_600_000_000_000_000_000);
+        // BOOTTIME ≥ the monotonic clocks' origin and advances with them while awake.
+        let q = pair(8);
+        assert!(q.boot >= p.boot && q.boot - p.boot < 1_000_000_000);
     }
 
     #[test]
