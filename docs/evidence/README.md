@@ -43,4 +43,5 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0006](EXP-0006-probe-session-and-policy/) | Probe, wire and syscall tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r2 | 18 (see `experiment.toml`) |
 | [EXP-0006-r2](EXP-0006-r2-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | **current** | 17 (see `experiment.toml`) |
 | [EXP-0007](EXP-0007-repo-process/) | Repository process: conventional history, merge-commit-only settings, license, agents file, design-first PRs | pass | superseded by EXP-0007-r2 | REQ-REPO-003, REQ-REPO-004, REQ-REPO-005, REQ-REPO-006, REQ-REPO-007, REQ-REPO-008 |
-| [EXP-0007-r2](EXP-0007-r2-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | **current** | 18 (see `experiment.toml`) |
+| [EXP-0007-r2](EXP-0007-r2-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | superseded by EXP-0007-r3 | 18 (see `experiment.toml`) |
+| [EXP-0007-r3](EXP-0007-r3-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | **current** | 18 (see `experiment.toml`) |

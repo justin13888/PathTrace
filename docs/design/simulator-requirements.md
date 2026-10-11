@@ -75,7 +75,7 @@ From the pinned evidence. Verdicts: `recovered` (ground truth recovered within t
 | S5 Queue | EXP-0002-r4 | `recovered` | buffers 149 374 / 74 727 B vs 150 000 / 75 000; droptail, aqm_suspected, policer; ECT(0) marked |
 | S6 Link (heavy) | EXP-0002-r4 | `recovered` | static ±0.5% (20/10/100 Mbit/s, IPv6); steps NRMSE 1.35% |
 | S7 Link (light) | EXP-0002-r4 | `recovered-with-limits` | train dispersion 49.55 vs 49.54 Mbit/s; the switching rule between light and heavy is the simulator's (R-0002); not checked against a workload-reactive scheduler (R-0003) |
-| S8 Workload provenance | EXP-0003-r3, EXP-0007-r2 | `recovered` | every capacity segment carries `workload`; bookkeeping, checked by the corpus |
+| S8 Workload provenance | EXP-0003-r3, EXP-0007-r3 | `recovered` | every capacity segment carries `workload`; bookkeeping, checked by the corpus |
 | S9 Loss | EXP-0002-r4 | `recovered` | 95% CIs for p and r cover the truth for Bernoulli and Gilbert-Elliott; requires that every packet sent is observed (EXP-0002) |
 | S10 Delay | EXP-0002-r4 | `recovered-with-limits` | base delay ±0.03 ms, RTT sum ±0.01 ms, jitter σ 4.21 vs 4 ms; the one-way split is not identifiable without synchronised clocks (`symmetric_assumed`, #17); size-dependent delay is recorded but not scored |
 | S11 Reorder | EXP-0002-r4 | `recovered` | detected under netem jitter and `reorder` |
