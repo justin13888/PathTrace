@@ -48,3 +48,4 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0007](EXP-0007-repo-process/) | Repository process: conventional history, merge-commit-only settings, license, agents file, design-first PRs | pass | superseded by EXP-0007-r2 | REQ-REPO-003, REQ-REPO-004, REQ-REPO-005, REQ-REPO-006, REQ-REPO-007, REQ-REPO-008 |
 | [EXP-0007-r2](EXP-0007-r2-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | superseded by EXP-0007-r3 | 18 (see `experiment.toml`) |
 | [EXP-0007-r3](EXP-0007-r3-repo-process-scope-cli/) | Repository process, scope, CLI surface, derivation purity and in-trace provenance | pass | **current** | 18 (see `experiment.toml`) |
+| [EXP-0008](EXP-0008-release-artefacts/) | Release v1.0.0: published static binaries verified end to end | pass | **current** | REQ-REPO-009 |

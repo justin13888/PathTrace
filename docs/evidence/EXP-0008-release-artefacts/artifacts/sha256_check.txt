@@ -1,0 +1,2 @@
+pathtrace-v1.0.0-aarch64-unknown-linux-musl.tar.gz: OK
+pathtrace-v1.0.0-x86_64-unknown-linux-musl.tar.gz: OK
