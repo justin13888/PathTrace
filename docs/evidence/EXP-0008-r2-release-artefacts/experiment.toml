@@ -1,0 +1,12 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0008-r2"
+title = "Release v1.0.1: published static binaries verified end to end"
+hypothesis = """The v1.0.1 GitHub release is an annotated tag on a main merge commit and publishes static musl \
+pathtrace archives for x86_64 and aarch64 plus SHA256SUMS. The checksums verify; each binary is statically linked \
+for its architecture; each archive holds the binary, LICENSE, README.md and the systemd unit. The released x86_64 \
+binary reports version 1.0.1, passes doctor (reporting kernel RX and TX stamps), and completes a smoke session in the namespace harness whose trace is \
+valid and records version 1.0.1, the tag's commit and a clean build. `cargo xtask audit --release` passes at the tag."""
+command = "sh docs/evidence/EXP-0008-r2-release-artefacts/check.sh"
+covers = [".github/workflows/release.yml"]
+requirements = ["REQ-REPO-009"]
+supersedes = ["EXP-0008"]

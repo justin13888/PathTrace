@@ -63,6 +63,6 @@ Each change that adds or alters behaviour lands its design section first; decisi
 ### REQ-REPO-009: Release artefacts
 - status: met
 - spec: new
-- evidence: EXP-0008
+- evidence: EXP-0008-r2
 
 Tagged releases publish static (musl) `pathtrace` binaries for x86_64 and aarch64 Linux with SHA-256 checksums.
