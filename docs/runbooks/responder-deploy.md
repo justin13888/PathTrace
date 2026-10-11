@@ -86,11 +86,13 @@ pathtrace trace info <id>.ptf | head -30     # "complete": true
 |---|---|
 | `responder vm unreachable over UDP 4433 and TCP 443/4433` | Firewall or service down: `systemctl status pathtrace-responder`, check the security group |
 | `initiator key not authorized` in `journalctl` | Re-run step 3 with the right laptop key |
-| `could not fetch responder log yet …` | The trace is partial (exit 3). Run the printed `pathtrace fetch …` command later, then `pathtrace merge <id>.a.ptflog <id>.b.ptflog -o <id>.ptf` |
+| `could not fetch responder log yet …` | The trace is partial (exit 3). Run `pathtrace fetch --resume <id>.session` later (the probe prints the exact command), then `pathtrace merge <id>.a.ptflog <id>.b.ptflog -o <id>.ptf` |
+| `warning: … TX stamp joins are implausible` | Transmit stamps could not be matched reliably (kernels before 6.13 predict them). The trace is usable; the raw logs keep every stamp for a later re-merge |
 | `wire protocol mismatch` | Laptop and VM run different major versions; install the same release on both |
 | `doctor` warns about `kernel timestamps` | Traces still work with user-space timestamps (recorded per packet); precision is lower |
 
 ## Maintenance
 
-- Session logs: `/var/lib/pathtrace/state/sessions/<id>/`, deleted after 14 days (`--retention-days`).
+- Session logs: `/var/lib/pathtrace/state/sessions/<id>/`, deleted after 14 days (`--retention-days`). A session's log is fetchable once the session has ended, also after a restart of the service (`systemctl stop` ends a running session cleanly).
+- Kernel ≥ 6.13 on both machines gives exact transmit-stamp matching (`tx_ids: explicit` in `trace info`); older kernels work with predicted ids.
 - Upgrading: replace `/usr/local/bin/pathtrace` and run `systemctl restart pathtrace-responder`. Traces from every PTF ≥ 1.0 release stay readable.
