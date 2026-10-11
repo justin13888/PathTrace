@@ -76,7 +76,7 @@ fn main() -> Result<()> {
         Command::Corpus => corpus::generate(&root),
         Command::Audit { release } => {
             let report = audit::audit(&root)?;
-            report.print();
+            report.print(release);
             if report.failed(release) {
                 std::process::exit(1);
             }

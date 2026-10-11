@@ -49,7 +49,7 @@ impl Report {
         !self.errors.is_empty() || (release && !(self.stale.is_empty() && self.pending.is_empty()))
     }
 
-    pub fn print(&self) {
+    pub fn print(&self, release: bool) {
         println!(
             "audit: {} requirements {:?}, {} experiments",
             self.requirements, self.by_status, self.experiments
@@ -65,6 +65,9 @@ impl Report {
         }
         if self.errors.is_empty() {
             println!("audit: chain intact");
+        }
+        if release && self.failed(true) {
+            println!("audit: release blocked by stale or pending evidence");
         }
     }
 }
