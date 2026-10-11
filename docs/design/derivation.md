@@ -22,9 +22,9 @@ Packet transmit time is SND when present (closest to the wire), else SCHED, else
 
 | Step | Method | Rule |
 |---|---|---|
-| Receiver host drops | `hostdrop.rxq-gap/1` | For each receiving socket, take its arrivals (all flows of the direction, by receive time). Where `rxq_drops` increases between two consecutive arrivals, the socket dropped datagrams in that gap. A lost packet to that socket whose transmit time lies between the transmit times of those two arrivals is a **host drop**: it is excluded from every loss statistic below, counted in `PATH.<dir>.host_drops {count, gaps}`, and treated as unknown (neither delivered nor lost). Traces without `rxq_drops` (PTF 1.0) have no host drops by this rule, and `host_drops.status` is `unknown` |
+| Receiver host drops | `hostdrop.rxq-gap/1` | For each receiving socket, take its arrivals (all flows of the direction, by receive time). Where `rxq_drops` increases between two consecutive arrivals, the socket dropped datagrams in that gap. A lost packet to that socket whose transmit time lies between the transmit times of those two arrivals is a **host drop**: it is excluded from every loss statistic below, counted in `PATH.<dir>.host_drops {packets, gaps, socket_drops}`, and treated as unknown (neither delivered nor lost). The receiving socket of a lost packet is the one most arrivals of its flow used (the main socket if none arrived). Traces without `rxq_drops` (PTF 1.0) have no host drops by this rule, and `host_drops.status` is `unknown` |
 
-Sender-side drops need no rule: a datagram the sender failed to send has no `tx` row (probe.md §4.1). Drops in the sender's own egress qdisc are a property of the access link as the host uses it; the `qdisc` table records them alongside, and `PATH.<dir>.local_qdisc_drops` reports the count during the session.
+Sender-side drops need no rule: a datagram the sender failed to send has no `tx` row (probe.md §4.1). Drops in the sender's own egress qdisc are a property of the access link as the host uses it; the `qdisc` table records them alongside, and `PATH.<dir>.local_qdisc_drops {drops}` (`qdisc.drop-count/1`) reports the sender's root-qdisc drops during the session.
 
 ## Per-direction fields
 
