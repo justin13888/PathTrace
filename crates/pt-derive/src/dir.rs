@@ -46,10 +46,14 @@ fn median(v: &mut [f64]) -> Option<f64> {
 
 /// Wilson 95% interval for k successes in n trials.
 pub fn wilson(k: f64, n: f64) -> (f64, f64) {
+    wilson_z(k, n, 1.96)
+}
+
+/// Wilson interval for k successes in n trials at the two-sided level given by its z quantile.
+pub fn wilson_z(k: f64, n: f64, z: f64) -> (f64, f64) {
     if n <= 0.0 {
         return (0.0, 1.0);
     }
-    let z = 1.96;
     let p = k / n;
     let d = 1.0 + z * z / n;
     let c = (p + z * z / (2.0 * n)) / d;
@@ -817,7 +821,12 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                     .with("h", 1.0)
                     .with("k", 0.0)
                     .with("p_ci95", Value::Array(vec![plo.into(), phi.into()]))
-                    .with("r_ci95", Value::Array(vec![rlo.into(), rhi.into()])),
+                    .with("r_ci95", Value::Array(vec![rlo.into(), rhi.into()]))
+                    // Counts behind p and r, so readers can compute intervals at any level.
+                    .with("good_n", ng as u64)
+                    .with("good_to_bad", gb as u64)
+                    .with("bad_n", nb as u64)
+                    .with("bad_to_good", bg as u64),
             )
             .with("samples", seqd.len())
             .with("events", format!("loss_events[{dir}]"))
@@ -1179,6 +1188,15 @@ mod tests {
     fn wilson_bounds() {
         let (lo, hi) = wilson(5.0, 100.0);
         assert!(lo < 0.05 && hi > 0.05 && lo > 0.0 && hi < 0.2);
+    }
+
+    #[test]
+    fn wilson_level() {
+        // A higher level widens the interval around the same point and matches the 95% default.
+        assert_eq!(wilson(5.0, 100.0), wilson_z(5.0, 100.0, 1.96));
+        let (lo95, hi95) = wilson(5.0, 100.0);
+        let (lo, hi) = wilson_z(5.0, 100.0, 2.498);
+        assert!(lo < lo95 && hi > hi95 && lo > 0.0);
     }
 
     #[test]
