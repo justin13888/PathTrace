@@ -696,11 +696,26 @@ mod tests {
             assert_eq!(m.len, 100);
             assert_eq!(m.tos, Some((34 << 2) | i as u8));
             assert!(m.ttl.is_some());
-            assert!(
-                m.rx_kernel.is_some(),
-                "kernel RX stamp expected on loopback"
-            );
         }
+        // The kernel enables RX timestamping lazily (deferred static-key work after the first
+        // socket asks for it), so the very first packets after bind may arrive unstamped; the
+        // probe records those with rx_src = user. Stamps must appear within a short warm-up.
+        let mut stamped = got.iter().any(|m| m.rx_kernel.is_some());
+        for _ in 0..50 {
+            if stamped {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            a.send_batch(&msgs[..1]).unwrap();
+            let mut more = Vec::new();
+            b.poll(50).unwrap();
+            b.recv_batch(&mut bufs, &mut more).unwrap();
+            stamped = more.iter().any(|m| m.rx_kernel.is_some());
+        }
+        assert!(
+            stamped,
+            "kernel RX stamps expected on loopback after warm-up"
+        );
         let mut errs = Vec::new();
         for _ in 0..50 {
             a.poll(10).unwrap();
