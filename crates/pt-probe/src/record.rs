@@ -121,6 +121,7 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("tos_rx", Enc::Rle, "tos").null(),
                 c("ttl_rx", Enc::Rle, "hops").null(),
                 c("src", Enc::Rle, "id"),
+                c("rxq_drops", Enc::Rle, "count").null(),
             ],
         ),
         "tcpinfo" => {

@@ -148,6 +148,26 @@ fn obslog_meta(
     m
 }
 
+/// Per-socket capabilities for META `endpoint.sockets` (ptf-format.md, PTF 1.1).
+fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
+    Value::Array(
+        socks
+            .iter()
+            .map(|(name, s)| {
+                let c = s.caps();
+                Value::map()
+                    .with("name", name.name())
+                    .with("kernel_rx", c.kernel_rx)
+                    .with("kernel_tx", c.kernel_tx)
+                    .with("recv_buf", c.recv_buf)
+                    .with("send_buf", c.send_buf)
+                    .with("rxq_ovfl", c.rxq_ovfl)
+                    .with("tx_ids", s.tx_id_mode().name())
+            })
+            .collect(),
+    )
+}
+
 fn bind_any(v6: bool, port: u16, opts: SockOpts) -> io::Result<UdpSock> {
     let addr: SocketAddr = if v6 {
         SocketAddr::new(IpAddr::from([0u16; 8]), port)
@@ -513,6 +533,22 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         _ => Vec::new(),
     };
 
+    let mut socks: Vec<(Sock, Arc<UdpSock>)> = vec![(Sock::Main, main.clone())];
+    socks.push((Sock::Udp443, Arc::new(bind_any(v6, 0, sopts)?)));
+    for k in 0..opts.profile.nat_timeouts_s.len() {
+        socks.push((
+            Sock::Spare(k as u8),
+            Arc::new(bind_any(
+                v6,
+                0,
+                SockOpts {
+                    pmtu_probe: false,
+                    ..sopts
+                },
+            )?),
+        ));
+    }
+
     // Observation log.
     std::fs::create_dir_all(&opts.out_dir)?;
     let log_a = opts.out_dir.join(format!("{trace_id}.a.ptflog"));
@@ -528,7 +564,8 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
                 .with("kernel_tx", main.caps().kernel_tx)
                 .with("recv_buf", main.caps().recv_buf)
                 .with("send_buf", main.caps().send_buf),
-        );
+        )
+        .with("sockets", sockets_value(&socks));
     let extra = Value::map()
         .with(
             "responder",
@@ -571,21 +608,6 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     *shared.ctrl_dst.write().expect("lock") = Some(dst);
     let (frames_tx, frames_rx) = channel::<CtrlIn>();
     *shared.ctrl_in.lock().expect("lock") = Some(frames_tx.clone());
-    let mut socks: Vec<(Sock, Arc<UdpSock>)> = vec![(Sock::Main, main.clone())];
-    socks.push((Sock::Udp443, Arc::new(bind_any(v6, 0, sopts)?)));
-    for k in 0..opts.profile.nat_timeouts_s.len() {
-        socks.push((
-            Sock::Spare(k as u8),
-            Arc::new(bind_any(
-                v6,
-                0,
-                SockOpts {
-                    pmtu_probe: false,
-                    ..sopts
-                },
-            )?),
-        ));
-    }
     let ep = Endpoint::start(shared.clone(), socks, rec.clone())?;
     let _ = ep.cmd.send(PacerCmd::SetTagger(Box::new(Tagger::new(
         &transport.handshake_hash,
@@ -1510,6 +1532,10 @@ fn responder_session(
         .join(format!("{session:08x}"));
     std::fs::create_dir_all(&dir)?;
     let log = dir.join("b.ptflog");
+    let mut socks: Vec<(Sock, Arc<UdpSock>)> = vec![(Sock::Main, main.clone())];
+    if let Some(u) = &u443 {
+        socks.push((Sock::Udp443, u.clone()));
+    }
     let local_ip = pt_sys::netif::local_addr_for(src).unwrap_or(src.ip());
     let iface = pt_sys::netif::iface_with_addr(local_ip)
         .ok()
@@ -1527,7 +1553,8 @@ fn responder_session(
                 .with("kernel_tx", main.caps().kernel_tx)
                 .with("recv_buf", main.caps().recv_buf)
                 .with("send_buf", main.caps().send_buf),
-        );
+        )
+        .with("sockets", sockets_value(&socks));
     let mut meta = obslog_meta(
         Role::B,
         &trace_id,
@@ -1554,10 +1581,6 @@ fn responder_session(
     shared.peer_by_sock.lock().expect("lock").insert(0, src);
     let (frames_tx, frames_rx) = channel::<CtrlIn>();
     *shared.ctrl_in.lock().expect("lock") = Some(frames_tx.clone());
-    let mut socks: Vec<(Sock, Arc<UdpSock>)> = vec![(Sock::Main, main.clone())];
-    if let Some(u) = &u443 {
-        socks.push((Sock::Udp443, u.clone()));
-    }
     let ep = Endpoint::start(shared.clone(), socks, rec.clone())?;
     let _ = ep.cmd.send(PacerCmd::SetTagger(Box::new(Tagger::new(
         &transport.handshake_hash,

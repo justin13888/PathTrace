@@ -298,7 +298,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
         g("tx_user_lag"),
     );
     let rg = |name: &str| rows_of(rx, name);
-    let (r_sock, r_rx, r_src_kind, r_tos, r_ttl, r_src, r_size) = (
+    let (r_sock, r_rx, r_src_kind, r_tos, r_ttl, r_src, r_size, r_drops) = (
         rg("sock"),
         rg("rx"),
         rg("rx_src"),
@@ -306,11 +306,12 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
         rg("ttl_rx"),
         rg("src"),
         rg("size"),
+        rg("rxq_drops"),
     );
 
-    let mut out: Vec<Vec<Option<i64>>> = (0..19).map(|_| Vec::with_capacity(order.len())).collect();
+    let mut out: Vec<Vec<Option<i64>>> = (0..20).map(|_| Vec::with_capacity(order.len())).collect();
     let mut used: HashMap<(i64, i64), usize> = HashMap::new();
-    let mut dup: Vec<Vec<Option<i64>>> = vec![Vec::new(); 7];
+    let mut dup: Vec<Vec<Option<i64>>> = vec![Vec::new(); 10];
     for &i in &order {
         let key = (tx_flow[i].unwrap_or(-1), tx_seq[i].unwrap_or(-1));
         let st = t_sock[i]
@@ -324,7 +325,16 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
             used.insert(key, v.len());
             for &j in v.iter().skip(1) {
                 for (k, val) in [
-                    rx_flow[j], rx_seq[j], r_rx[j], r_tos[j], r_ttl[j], r_src[j], r_sock[j],
+                    rx_flow[j],
+                    rx_seq[j],
+                    r_rx[j],
+                    r_tos[j],
+                    r_ttl[j],
+                    r_src[j],
+                    r_sock[j],
+                    r_src_kind[j],
+                    r_size[j],
+                    r_drops[j],
                 ]
                 .into_iter()
                 .enumerate()
@@ -354,6 +364,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
             at(&r_src),
             at(&r_sock),
             at(&r_size),
+            at(&r_drops),
         ];
         for (k, v) in vals.into_iter().enumerate() {
             out[k].push(v);
@@ -362,7 +373,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
     let sm = Some(format!("{s}.mono"));
     let sr = Some(format!("{s}.real"));
     let rr = Some(format!("{r}.real"));
-    let names: [(&str, bool, Enc, &str, Option<String>); 19] = [
+    let names: [(&str, bool, Enc, &str, Option<String>); 20] = [
         ("flow", false, Enc::Rle, "id", None),
         ("seq", false, Enc::Delta, "count", None),
         ("size", false, Enc::Rle, "B", None),
@@ -382,6 +393,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
         ("src", false, Enc::Rle, "id", None),
         ("rx_sock", false, Enc::Rle, "id", None),
         ("rx_size", false, Enc::Rle, "B", None),
+        ("rxq_drops", false, Enc::Rle, "count", None),
     ];
     let mut pkt: Vec<Col> = names
         .iter()
@@ -390,25 +402,41 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> (Vec<Col>, Vec<Col>, 
             col(n, *signed, *enc, unit, clock.clone(), rows)
         })
         .collect();
-    if let Some(c) = pkt.iter_mut().find(|c| c.name == "rx_src") {
-        c.meta.insert(
-            Key::from("enum"),
-            Value::Array(vec![Value::from("kernel"), Value::from("user")]),
-        );
-    }
-    let dupn = ["flow", "seq", "rx", "tos_rx", "ttl_rx", "src", "rx_sock"];
-    let dup_cols: Vec<Col> = dupn
+    let dupn = [
+        "flow",
+        "seq",
+        "rx",
+        "tos_rx",
+        "ttl_rx",
+        "src",
+        "rx_sock",
+        "rx_src",
+        "size",
+        "rxq_drops",
+    ];
+    let mut dup_cols: Vec<Col> = dupn
         .iter()
         .zip(dup)
         .map(|(n, rows)| {
             let (enc, unit, clock) = match *n {
                 "rx" => (Enc::Delta2, "ns", rr.clone()),
                 "seq" => (Enc::Delta, "count", None),
+                "size" => (Enc::Rle, "B", None),
+                "rxq_drops" => (Enc::Rle, "count", None),
+                "rx_src" => (Enc::Rle, "enum", None),
                 _ => (Enc::Rle, "id", None),
             };
             col(n, false, enc, unit, clock, rows)
         })
         .collect();
+    for c in pkt.iter_mut().chain(dup_cols.iter_mut()) {
+        if c.name == "rx_src" {
+            c.meta.insert(
+                Key::from("enum"),
+                Value::Array(vec![Value::from("kernel"), Value::from("user")]),
+            );
+        }
+    }
     // Arrivals with no matching transmission (sender log lost or truncated).
     let mut un: Vec<usize> = (0..rx.rows)
         .filter(|&j| {

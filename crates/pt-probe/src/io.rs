@@ -10,7 +10,9 @@ use std::time::Duration;
 
 use pt_format::Value;
 use pt_sys::clock::{mono_raw, sleep_until};
-use pt_sys::udp::{ErrEvent, InMsg, MAX_DATAGRAM, OutMsg, TxKind, UdpSock, poll_many};
+use pt_sys::udp::{
+    ErrEvent, InMsg, MAX_DATAGRAM, OutMsg, SendOutcome, TxIdMode, TxKind, UdpSock, poll_many,
+};
 use pt_wire::ctrl::{Envelope, Frame};
 use pt_wire::probe::{self, Header, PktType, Tagger};
 
@@ -238,6 +240,34 @@ type Delayed = (u64, usize, SocketAddr, Vec<u8>, Option<(u8, u64)>);
 /// A due raw datagram: socket, destination, bytes, optional observation (flow, seq).
 type RawItem = (usize, SocketAddr, Vec<u8>, Option<(u8, u64)>);
 
+/// Record a datagram the kernel did not accept (docs/design/probe.md §4.1). `item` is the
+/// (flow, seq, size) of the failed datagram when it is an observation.
+fn record_send_failure(
+    rec: &Recorder,
+    sock: usize,
+    s: &UdpSock,
+    o: &SendOutcome,
+    item: Option<(u8, u64, u32)>,
+) {
+    let mut d = Value::map()
+        .with("sock", sock)
+        .with("flow", item.map(|i| u64::from(i.0)))
+        .with("seq", item.map(|i| i.1))
+        .with("size", item.map(|i| u64::from(i.2)))
+        .with("burned_id", o.burned_id.map(u64::from))
+        .with("tx_ids", s.tx_id_mode().name());
+    let kind = match &o.error {
+        None => "send_partial",
+        Some(e) => {
+            d = d
+                .with("errno", e.raw_os_error().unwrap_or(0) as i64)
+                .with("error", e.to_string());
+            "send_error"
+        }
+    };
+    rec.event(kind, d);
+}
+
 fn pacer_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -250,6 +280,7 @@ fn pacer_loop(
     let mut delayed: Vec<Delayed> = Vec::new();
     let mut light_paused = false;
     let mut cap_logged = false;
+    let mut id_modes: Vec<TxIdMode> = socks.iter().map(|s| s.tx_id_mode()).collect();
     let handle = |c: PacerCmd,
                   gens: &mut Vec<Gen>,
                   tagger: &mut Option<Tagger>,
@@ -338,15 +369,43 @@ fn pacer_loop(
         let mut raw_rows = Vec::new();
         for (sock, dst, bytes, log) in &raw_due {
             if let Some(s) = socks.get(*sock) {
-                let id = s.next_tx_id();
                 let t = mono_raw();
-                let sent = s.send_batch(&[OutMsg {
+                let o = s.send_batch(&[OutMsg {
                     dst: *dst,
                     payload: bytes,
                     tos: 0,
                 }]);
-                if let (Ok(1), Some((flow, seq))) = (sent, log) {
-                    let ip = bytes.len() as i64 + i64::from(udp_overhead(s.is_v6()));
+                let id = o.first_id;
+                let ip = bytes.len() as i64 + i64::from(udp_overhead(s.is_v6()));
+                if o.failed {
+                    if o.would_block() {
+                        rec.event(
+                            "send_eagain",
+                            Value::map()
+                                .with("sock", *sock)
+                                .with("burned_id", o.burned_id.map(u64::from))
+                                .with("tx_ids", s.tx_id_mode().name())
+                                .with(
+                                    "skipped",
+                                    Value::Array(
+                                        log.iter()
+                                            .map(|(f, q)| {
+                                                Value::Array(vec![Value::from(*f), Value::from(*q)])
+                                            })
+                                            .collect(),
+                                    ),
+                                ),
+                        );
+                    } else {
+                        record_send_failure(
+                            &rec,
+                            *sock,
+                            s,
+                            &o,
+                            log.map(|(f, q)| (f, q, ip as u32)),
+                        );
+                    }
+                } else if let Some((flow, seq)) = log {
                     raw_rows.push(vec![
                         Some(*sock as i64),
                         Some(i64::from(*flow)),
@@ -501,38 +560,59 @@ fn pacer_loop(
                     tos: due.tos,
                 })
                 .collect();
-            let first_id = s.next_tx_id();
             let t_user = mono_raw();
-            // Send everything; a failing datagram (e.g. EMSGSIZE above a cached PMTU) is skipped
-            // and recorded, never the rest of the batch. OPT_IDs advance only on success.
+            // Send everything. A datagram the kernel rejects (e.g. EMSGSIZE above a cached PMTU)
+            // is recorded and skipped, never the rest of the batch; a full send buffer skips the
+            // rest of the batch, recorded too. Each sent datagram's OPT_ID comes from the send
+            // outcome (probe.md §4.1).
             let mut ok: Vec<Option<u32>> = vec![None; msgs.len()];
             let mut i = 0;
-            let mut id = first_id;
             while i < msgs.len() {
-                match s.send_batch(&msgs[i..]) {
-                    Ok(0) => break,
-                    Ok(k) => {
-                        for slot in ok.iter_mut().skip(i).take(k) {
-                            *slot = Some(id);
-                            id = id.wrapping_add(1);
-                        }
-                        i += k;
-                    }
-                    Err(e) => {
-                        let (flow, due, ..) = &items[i];
-                        rec.event(
-                            "send_error",
-                            Value::map()
-                                .with("sock", sock)
-                                .with("flow", *flow)
-                                .with("seq", due.seq)
-                                .with("size", due.size)
-                                .with("errno", e.raw_os_error().unwrap_or(0) as i64)
-                                .with("error", e.to_string()),
-                        );
-                        i += 1;
-                    }
+                let o = s.send_batch(&msgs[i..]);
+                for (k, slot) in ok.iter_mut().skip(i).take(o.sent).enumerate() {
+                    *slot = Some(o.first_id.wrapping_add(k as u32));
                 }
+                i += o.sent;
+                if !o.failed {
+                    break;
+                }
+                let (flow, due, ..) = &items[i];
+                if o.would_block() {
+                    rec.event(
+                        "send_eagain",
+                        Value::map()
+                            .with("sock", sock)
+                            .with("burned_id", o.burned_id.map(u64::from))
+                            .with("tx_ids", s.tx_id_mode().name())
+                            .with(
+                                "skipped",
+                                Value::Array(
+                                    items[i..]
+                                        .iter()
+                                        .map(|(f, d, ..)| {
+                                            Value::Array(vec![Value::from(*f), Value::from(d.seq)])
+                                        })
+                                        .collect(),
+                                ),
+                            ),
+                    );
+                    break;
+                }
+                record_send_failure(&rec, sock, s, &o, Some((*flow, due.seq, due.size)));
+                // After a partial send the failed datagram is retried alone, so its errno shows
+                // if it fails again; a reported error skips it.
+                if o.error.is_some() {
+                    i += 1;
+                }
+            }
+            if s.tx_id_mode() != id_modes[sock] {
+                id_modes[sock] = s.tx_id_mode();
+                rec.event(
+                    "tx_id_mode",
+                    Value::map()
+                        .with("sock", sock)
+                        .with("mode", id_modes[sock].name()),
+                );
             }
             let mut rows = Vec::with_capacity(items.len());
             let mut bytes = 0u64;
@@ -669,6 +749,7 @@ fn receiver_loop(
                             m.tos.map(i64::from),
                             m.ttl.map(i64::from),
                             Some(0),
+                            m.rxq_drops.map(i64::from),
                         ]);
                     }
                     if let Some(frame) = Frame::decode(data)
@@ -738,6 +819,7 @@ fn receiver_loop(
                     m.tos.map(i64::from),
                     m.ttl.map(i64::from),
                     Some(idx as i64),
+                    m.rxq_drops.map(i64::from),
                 ]);
                 // Echo class/NAT probes back to their source (optionally delayed).
                 if matches!(h.ptype, PktType::ClassProbe | PktType::NatProbe) {
