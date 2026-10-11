@@ -365,8 +365,8 @@ impl UdpSock {
             h.msg_iovlen = 1;
             h.msg_control = ctrl[i].as_mut_ptr().cast();
             // SAFETY: CMSG_SPACE is a pure size computation.
-            h.msg_controllen =
-                unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+            // `as _`: msg_controllen and cmsg_len are size_t on glibc, socklen_t on musl.
+            h.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
             let (level, ty) = if self.v6 {
                 (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
             } else {
@@ -378,7 +378,7 @@ impl UdpSock {
                 let c = libc::CMSG_FIRSTHDR(h);
                 (*c).cmsg_level = level;
                 (*c).cmsg_type = ty;
-                (*c).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as usize;
+                (*c).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
                 std::ptr::write_unaligned(
                     libc::CMSG_DATA(c).cast::<libc::c_int>(),
                     libc::c_int::from(msgs[i].tos),
@@ -449,7 +449,7 @@ impl UdpSock {
             h.msg_iov = &raw mut iovs[i];
             h.msg_iovlen = 1;
             h.msg_control = ctrl[i].as_mut_ptr().cast();
-            h.msg_controllen = CMSG_BUF;
+            h.msg_controllen = CMSG_BUF as _;
         }
         // SAFETY: all pointers reference live buffers of the stated sizes.
         let r = unsafe {
@@ -457,7 +457,8 @@ impl UdpSock {
                 self.fd.as_raw_fd(),
                 hdrs.as_mut_ptr(),
                 n as libc::c_uint,
-                libc::MSG_DONTWAIT,
+                // The flags argument is int on glibc, unsigned on musl.
+                libc::MSG_DONTWAIT as _,
                 std::ptr::null_mut(),
             )
         };
@@ -534,7 +535,7 @@ impl UdpSock {
             h.msg_iov = &raw mut iov;
             h.msg_iovlen = 1;
             h.msg_control = ctrl.as_mut_ptr().cast();
-            h.msg_controllen = ctrl.len();
+            h.msg_controllen = ctrl.len() as _;
             // SAFETY: all pointers reference live local buffers of the stated sizes.
             let r = unsafe {
                 libc::recvmsg(
