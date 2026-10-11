@@ -5,9 +5,9 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TrySendError, sync_channel};
+use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -248,13 +248,32 @@ pub enum Rec {
     Flush,
 }
 
-/// Cloneable handle for producers. Never blocks: a full channel increments `dropped`.
+/// Records and events lost to a full channel, per table (docs/design/probe.md §1).
+#[derive(Debug, Default)]
+pub struct Overflow {
+    pub rows: Mutex<BTreeMap<&'static str, u64>>,
+    pub events: AtomicU64,
+}
+
+/// Cloneable handle for producers. Rows and events never block: a full channel is counted in
+/// `dropped`/`overflow`, and the logger records the counts as `channel_overflow` events.
 #[derive(Debug, Clone)]
 pub struct Recorder {
     tx: SyncSender<Rec>,
     pub dropped: Arc<AtomicU64>,
+    overflow: Arc<Overflow>,
     t0: u64,
     role: Role,
+}
+
+/// An EVNT entry recorded by endpoint `role` at its MONO_RAW time `t`.
+fn event_value(role: Role, t: u64, kind: &str, detail: Value) -> Value {
+    Value::map()
+        .with("t", t)
+        .with("clock", format!("{}.mono", role.name()))
+        .with("endpoint", role.name())
+        .with("type", kind)
+        .with("detail", detail)
 }
 
 impl Recorder {
@@ -267,6 +286,13 @@ impl Recorder {
             self.tx.try_send(Rec::Rows { table, rows })
         {
             self.dropped.fetch_add(n, Ordering::Relaxed);
+            *self
+                .overflow
+                .rows
+                .lock()
+                .expect("lock")
+                .entry(table)
+                .or_default() += n;
         }
     }
 
@@ -280,14 +306,12 @@ impl Recorder {
     }
 
     pub fn event_at(&self, t: u64, kind: &str, detail: Value) {
-        let v = Value::map()
-            .with("t", t)
-            .with("clock", format!("{}.mono", self.role.name()))
-            .with("endpoint", self.role.name())
-            .with("type", kind)
-            .with("detail", detail);
-        // Events are rare and precious: block briefly rather than drop.
-        let _ = self.tx.send(Rec::Event(v));
+        let v = event_value(self.role, t, kind, detail);
+        // Events come from the pacer and receiver too, which must never block on the logger:
+        // a full channel is counted and reported as channel_overflow.
+        if self.tx.try_send(Rec::Event(v)).is_err() {
+            self.overflow.events.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     pub fn flow(&self, spec: Value) {
@@ -389,14 +413,25 @@ pub fn start(
     meta_head: Map,
     role: Role,
 ) -> std::io::Result<(Recorder, JoinHandle<std::io::Result<Summary>>)> {
+    start_with_capacity(path, meta_head, role, 1 << 16)
+}
+
+fn start_with_capacity(
+    path: &Path,
+    meta_head: Map,
+    role: Role,
+    capacity: usize,
+) -> std::io::Result<(Recorder, JoinHandle<std::io::Result<Summary>>)> {
     let meta = Section::new(b"META", flags::CRITICAL, meta_head);
     let mut w = AppendWriter::create(path, &meta, true)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    let (tx, rx): (SyncSender<Rec>, Receiver<Rec>) = sync_channel(1 << 16);
+    let (tx, rx): (SyncSender<Rec>, Receiver<Rec>) = sync_channel(capacity);
     let dropped = Arc::new(AtomicU64::new(0));
+    let overflow = Arc::new(Overflow::default());
     let rec = Recorder {
         tx,
         dropped: dropped.clone(),
+        overflow: overflow.clone(),
         t0: pt_sys::clock::mono_raw(),
         role,
     };
@@ -412,6 +447,33 @@ pub fn start(
                 ..Default::default()
             };
             let mut last = Instant::now();
+            // Overflow counts already reported, so each channel_overflow event carries the
+            // increase since the previous one.
+            let mut reported: (BTreeMap<&'static str, u64>, u64) = (BTreeMap::new(), 0);
+            let report_overflow =
+                |events: &mut Vec<Value>, reported: &mut (BTreeMap<&'static str, u64>, u64)| {
+                    let now_rows = overflow.rows.lock().expect("lock").clone();
+                    let now_events = overflow.events.load(Ordering::Relaxed);
+                    let mut rows = Value::map();
+                    let mut any = false;
+                    for (t, n) in &now_rows {
+                        let new = n - reported.0.get(t).copied().unwrap_or(0);
+                        if new > 0 {
+                            rows = rows.with(t, new);
+                            any = true;
+                        }
+                    }
+                    let new_events = now_events - reported.1;
+                    if any || new_events > 0 {
+                        events.push(event_value(
+                            role,
+                            pt_sys::clock::mono_raw(),
+                            "channel_overflow",
+                            Value::map().with("rows", rows).with("events", new_events),
+                        ));
+                        *reported = (now_rows, now_events);
+                    }
+                };
             let io = |e: pt_format::Error| std::io::Error::other(e.to_string());
             let flush = |bufs: &mut BTreeMap<&'static str, Buf>,
                          events: &mut Vec<Value>,
@@ -485,6 +547,7 @@ pub fn start(
                     Ok(Rec::Flush) => force = true,
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => {
+                        report_overflow(&mut events, &mut reported);
                         flush(&mut bufs, &mut events, &mut flows, &mut w)?;
                         summary.dropped = dropped.load(Ordering::Relaxed);
                         w.finish().map_err(io)?;
@@ -492,6 +555,7 @@ pub fn start(
                     }
                 }
                 if force || last.elapsed() >= Duration::from_secs(1) {
+                    report_overflow(&mut events, &mut reported);
                     flush(&mut bufs, &mut events, &mut flows, &mut w)?;
                     last = Instant::now();
                 }
@@ -564,6 +628,50 @@ mod tests {
         );
         let ev = f.sections.iter().find(|s| &s.kind == b"EVNT").unwrap();
         assert!(ev.get("pii").is_some());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn overflow_is_counted_and_recorded() {
+        let path = std::env::temp_dir().join(format!("pt-ovf-{}.ptflog", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut head = Map::new();
+        head.insert(Key::from("kind"), Value::from("obslog"));
+        // A channel of one message, filled before the logger can drain it: later rows and
+        // events are dropped, never blocking the caller.
+        let (rec, h) = start_with_capacity(&path, head, Role::A, 1).unwrap();
+        let row = vec![Some(0), Some(1), Some(2), Some(3)];
+        for _ in 0..2000 {
+            rec.row("bad", row.clone());
+            rec.event("phase_start", Value::map());
+        }
+        let dropped = rec.dropped.load(Ordering::Relaxed);
+        drop(rec);
+        let s = h.join().unwrap().unwrap();
+        assert!(dropped > 0 && s.dropped == dropped);
+        let bytes = std::fs::read(&path).unwrap();
+        let (f, _) = pt_format::read(
+            &bytes,
+            pt_format::ReadOptions {
+                recover: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut rows = 0;
+        for sec in f.sections.iter().filter(|s| &s.kind == b"EVNT") {
+            for e in sec.get("events").and_then(Value::as_array).unwrap() {
+                if e.get("type").and_then(Value::as_str) == Some("channel_overflow") {
+                    let d = e.get("detail").unwrap();
+                    rows += d
+                        .get("rows")
+                        .and_then(|r| r.get("bad"))
+                        .and_then(Value::as_u64)
+                        .unwrap_or(0);
+                }
+            }
+        }
+        assert_eq!(rows, dropped);
         let _ = std::fs::remove_file(&path);
     }
 }
