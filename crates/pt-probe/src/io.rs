@@ -401,7 +401,9 @@ fn pacer_loop(
             let dm = dead_man_kind(&g.spec.kind)
                 && now.saturating_sub(last_fb) > DEAD_MAN_NS
                 && now.saturating_sub(g.start) > DEAD_MAN_NS;
-            if dm || (over_cap && g.spec.kind != "light") {
+            // The data cap is hard: every probe flow stops, the light flow included. Only the
+            // control traffic needed to end the session continues (and is still counted).
+            if dm || over_cap {
                 stopped.push((g.spec.id, if dm { "dead_man" } else { "budget_cap" }));
                 g.done = true;
                 continue;

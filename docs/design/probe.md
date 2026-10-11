@@ -120,7 +120,7 @@ Standard profile (about 90 s of data phases):
 
 **TCP connections** (class probes and reference flows) start with a 48-byte authenticated header: session id, flow id, kind, direction, byte and time limits, and a keyed-BLAKE3 tag under the session key. The responder serves only connections whose header verifies for the active session, so it cannot be used as a traffic source by strangers (REQ-SEC-001).
 
-The data budget is planned once the P3 estimate is known: saturation phases shrink proportionally (minimum 2 s each) so that the projected total stays under the cap. If a hard limit is reached anyway, the pacer stops sending and records a `budget_cap` event.
+The data budget is planned once the P3 estimate is known: saturation phases shrink proportionally (minimum 2 s each) so that the projected total stays under the cap. If a hard limit is reached anyway, the pacer stops every probe flow, the light flow included, and records a `budget_cap` event. Only the control traffic needed to finish the session continues, and it is still counted (EXP-0002-r2).
 
 ## 7. Saturation controller
 
