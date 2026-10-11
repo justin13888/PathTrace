@@ -610,25 +610,27 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
             } else {
                 (0.02, 0.40)
             };
-            let ci = |k: &str| -> Option<(f64, f64)> {
-                let a = t
-                    .dir("a_to_b", &format!("/loss/ge/{k}_ci95"))?
-                    .as_array()?
-                    .to_vec();
-                Some((num(&a[0])?, num(&a[1])?))
+            // Four intervals (p and r, in two scenarios) are judged per run, so each is taken at
+            // the Bonferroni level 1 - 0.05/4 = 98.75% (z = 2.498) for a family-wise 95%
+            // (EXP-0002-r6). Computed from the transition counts the trace records.
+            const Z_FAMILY: f64 = 2.498;
+            let ci = |k: &str, n: &str| -> Option<(f64, f64)> {
+                let k = t.num("a_to_b", &format!("/loss/ge/{k}"))?;
+                let n = t.num("a_to_b", &format!("/loss/ge/{n}"))?;
+                Some(pt_derive::dir::wilson_z(k, n, Z_FAMILY))
             };
-            let pc = ci("p");
-            let rc = ci("r");
+            let pc = ci("good_to_bad", "good_n");
+            let rc = ci("bad_to_good", "bad_n");
             chk(
                 &mut c,
-                "GE p 95% CI covers truth",
+                "GE p 98.75% CI covers truth (family-wise 95% over 4)",
                 p,
                 format!("{pc:?}"),
                 pc.is_some_and(|(lo, hi)| lo <= p && p <= hi),
             );
             chk(
                 &mut c,
-                "GE r 95% CI covers truth",
+                "GE r 98.75% CI covers truth (family-wise 95% over 4)",
                 r,
                 format!("{rc:?}"),
                 rc.is_some_and(|(lo, hi)| lo <= r && r <= hi),
