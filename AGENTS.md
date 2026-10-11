@@ -42,7 +42,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - `mise run conformance`: Python reader over every conformance directory.
 - `cargo xtask groundtruth [all|<scenario>] [--jobs N]`: ground-truth experiments (~12 min for all); scratch in target/groundtruth.
 - `cargo xtask corpus`: regenerate conformance/v1.0 (only when intentionally extending; never change existing verdicts).
-- `mise run audit` = `cargo xtask audit`: requirement/evidence chain. `--release` also fails on stale/pending evidence.
+- `mise run audit` = `cargo xtask audit`: requirement/evidence chain. `--release` also fails on stale/pending evidence; release.yml runs it and publishes only if it passes.
 - `cargo xtask evidence new <slug>` / `cargo xtask evidence run EXP-NNNN`.
 - `hk install` once per clone: installs pre-commit + commit-msg hooks.
 
