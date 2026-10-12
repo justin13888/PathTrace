@@ -1240,7 +1240,11 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 );
                 // Seconds the bottleneck held a queue under the heavy flows (P4–P7). The
                 // budget-shortened saturations' overdrives alone give about 2 s; the slow
-                // ramp gave 1.9–2.7 s here, the lag-gated one 3.9–6.1 s.
+                // ramp gave 1.9–2.7 s here, the lag-gated one 3.9–6.1 s. b→a, whose
+                // saturations the budget shortens least, also needs hold to keep its queue
+                // (issue #40): hold on the RTT-old queue gave 5.8–6.1 s there, hold on the
+                // predicted queue 8.1 s. a→b stays at about 4.1 s either way.
+                let min_s = if dir == "b_to_a" { 7.0 } else { 3.0 };
                 let sat_s = t
                     .dir(dir, "/capacity/segments")
                     .and_then(Value::as_array)
@@ -1252,10 +1256,10 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                     });
                 chk(
                     &mut c,
-                    &format!("saturated time {dir} (s, ≥ 3)"),
-                    "≥ 3",
+                    &format!("saturated time {dir} (s, ≥ {min_s})"),
+                    format!("≥ {min_s}"),
                     fmt(sat_s),
-                    sat_s.is_some_and(|s| s >= 3.0),
+                    sat_s.is_some_and(|s| s >= min_s),
                 );
             }
         }
