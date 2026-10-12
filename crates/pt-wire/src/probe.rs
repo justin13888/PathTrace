@@ -183,6 +183,20 @@ pub mod quic {
             None
         }
     }
+
+    /// The probe payload of a received or ICMP-quoted datagram: `b` itself, or what follows
+    /// its QUIC header when its first byte has the fixed bit (0x40) set and a high nibble
+    /// other than the probe version. A QUIC header cut short is returned unchanged, so it
+    /// fails to verify or decode like any other foreign datagram.
+    pub fn strip(b: &[u8]) -> &[u8] {
+        if b.first()
+            .is_some_and(|f| f & 0x40 != 0 && f >> 4 != super::VERSION)
+        {
+            unwrap(b).unwrap_or(b)
+        } else {
+            b
+        }
+    }
 }
 
 #[cfg(test)]
@@ -231,6 +245,27 @@ mod tests {
         assert_eq!(quic::unwrap(&s), Some(&inner[..]));
     }
 
+    #[test]
+    fn strip_finds_the_probe_header_under_quic_framing() {
+        let mut t = Tagger::new(b"handshake-hash");
+        let mut inner = vec![0u8; 100];
+        t.build(&hdr(), &mut inner);
+        // A bare probe packet is left alone.
+        assert_eq!(quic::strip(&inner), &inner[..]);
+        for first in [true, false] {
+            let q = quic::wrap(first, [1; 8], [2; 8], &inner);
+            assert_eq!(Header::decode(&q), None);
+            assert_eq!(Header::decode(quic::strip(&q)), Some(hdr()));
+            assert_eq!(t.verify(quic::strip(&q)), Some(hdr()));
+        }
+        // A truncated ICMP quote still yields the header when it covers it.
+        let q = quic::wrap(true, [1; 8], [2; 8], &inner);
+        let cut = &q[..quic::LONG_OVERHEAD + HEADER_LEN];
+        assert_eq!(Header::decode(quic::strip(cut)), Some(hdr()));
+        // A QUIC header cut short is returned unchanged.
+        assert_eq!(quic::strip(&q[..4]), &q[..4]);
+    }
+
     proptest! {
         #[test]
         fn verify_never_panics(b in proptest::collection::vec(any::<u8>(), 0..200)) {
@@ -238,6 +273,7 @@ mod tests {
             let _ = t.verify(&b);
             let _ = Header::decode(&b);
             let _ = quic::unwrap(&b);
+            let _ = Header::decode(quic::strip(&b));
         }
     }
 }
