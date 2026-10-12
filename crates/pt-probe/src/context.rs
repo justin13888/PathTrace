@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use pt_format::Value;
+use pt_format::{Key, Value};
 use pt_sys::clock::ClockPair;
 use pt_sys::clock::{mono_raw, pair};
 use pt_sys::netif::{IfType, if_stats, iface_info, iface_with_addr, local_addr_for, stack_stats};
@@ -121,6 +121,29 @@ pub fn iface_facts(name: &str) -> Value {
         .with("driver", i.driver.clone())
         .with("mtu", i.mtu)
         .with("usb", i.usb)
+}
+
+/// The detail of an `iface_change` event (probe.md §4.4). Interface names are `pii: quasi`, as
+/// META's `/endpoint/iface/name`; only top-level detail values carry a `pii` wrapper, so the
+/// name is dropped from `iface` (`to` carries it).
+fn iface_change_detail(
+    from: Option<String>,
+    to: &str,
+    mut iface: Value,
+    qdisc: Value,
+    txqueuelen: Option<u32>,
+    local: IpAddr,
+) -> Value {
+    if let Value::Map(m) = &mut iface {
+        m.remove(&Key::from("name"));
+    }
+    Value::map()
+        .with("from", pii(from, "quasi"))
+        .with("to", pii(to, "quasi"))
+        .with("iface", iface)
+        .with("qdisc", qdisc)
+        .with("txqueuelen", txqueuelen)
+        .with("addr", pii(local.to_string(), "id"))
 }
 
 /// Egress queueing facts for META (`endpoint.qdisc`, `endpoint.txqueuelen`; PTF 1.1).
@@ -356,13 +379,14 @@ fn run(
                 let (qdisc, txqueuelen) = egress_facts(&name);
                 rec.event(
                     "iface_change",
-                    Value::map()
-                        .with("from", from.map(|f| f.0))
-                        .with("to", name.clone())
-                        .with("iface", iface_facts(&name))
-                        .with("qdisc", qdisc)
-                        .with("txqueuelen", txqueuelen)
-                        .with("addr", pii(local.to_string(), "id")),
+                    iface_change_detail(
+                        from.map(|f| f.0),
+                        &name,
+                        iface_facts(&name),
+                        qdisc,
+                        txqueuelen,
+                        local,
+                    ),
                 );
                 if wifi && to.kind == IfType::Wifi && nl.is_none() && !wifi_tried {
                     wifi_tried = true;
@@ -406,6 +430,31 @@ mod tests {
         // A session that started without a known interface picks the first one it resolves.
         let mut f = Follow::default();
         assert_eq!(f.update(at("eth0", 2)), Some(None));
+    }
+
+    #[test]
+    fn iface_change_tags_names_at_top_level() {
+        let iface = Value::map().with("name", "usb0").with("index", 7u32);
+        let d = iface_change_detail(
+            Some("wlan0".into()),
+            "usb0",
+            iface,
+            Value::Null,
+            Some(1000),
+            "10.0.0.2".parse().unwrap(),
+        );
+        for (k, v, class) in [
+            ("from", "wlan0", "quasi"),
+            ("to", "usb0", "quasi"),
+            ("addr", "10.0.0.2", "id"),
+        ] {
+            let w = d.get(k).unwrap();
+            assert_eq!(w.get("pii").and_then(Value::as_str), Some(class), "{k}");
+            assert_eq!(w.get("value").and_then(Value::as_str), Some(v), "{k}");
+        }
+        let iface = d.get("iface").unwrap();
+        assert!(iface.get("name").is_none());
+        assert_eq!(iface.get("index").and_then(Value::as_u64), Some(7));
     }
 
     #[test]
