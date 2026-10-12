@@ -1,0 +1,14 @@
+[pathtrace] handshake attempt 1 over UDP to 10.0.2.2:4433
+[pathtrace] handshake attempt 2 over UDP to 10.0.2.2:4433
+session: e499095f (trace 01a130e4-6d66-7047-9a5f-ab3fffd8f328; session file /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-aa87c57c9dd06258f/target/groundtruth/geo/01a130e4-6d66-7047-9a5f-ab3fffd8f328.session)
+[pathtrace] phase P0 background
+[pathtrace] phase P1 reachability
+[pathtrace] phase P2 quiet
+[pathtrace] phase P3 chirps
+[pathtrace] phase P4 saturate a_to_b
+[pathtrace] phase P5 saturate b_to_a
+[pathtrace] phase P6 saturate both
+[pathtrace] phase P7 class differential
+[pathtrace] phase P8 reference flows
+[pathtrace] phase P9 end
+[pathtrace] fetched the responder log over TLS on tcp/4433
