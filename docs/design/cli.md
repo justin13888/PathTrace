@@ -88,7 +88,7 @@ Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts th
 | per family: `tcp/<port> not intercepted` | responder port: yes; 443, 80: no | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass |
 | `responder reachable` | yes | on at least one family, the responder port took a TCP connection that nothing intercepted |
 
-Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power and timestamps matter as much.
+Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power and timestamps matter as much. NIC offload state (GRO, LRO, GSO, TSO) is not checked yet: it needs a `pt-sys` ethtool reader (issue #45).
 
 ### `doctor`'s timestamp self-test warms up
 - **Problem**: the kernel enables RX timestamping lazily (deferred static-key work after the first socket asks for it), so the first datagrams after bind can arrive unstamped. A single-packet self-test then falsely reports `kernel RX stamps false` (EXP-0008).
