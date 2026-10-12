@@ -339,6 +339,15 @@ pub fn scenarios() -> Vec<Scenario> {
             "robustness S4 S7",
         ),
         s(
+            "geo-100m",
+            "standard",
+            &netem("delay 300ms rate 100mbit limit 10000"),
+            &netem("delay 300ms rate 100mbit limit 10000"),
+            "",
+            "",
+            "S4",
+        ),
+        s(
             "bufferbloat",
             "standard",
             &netem("delay 1ms"),
@@ -1216,6 +1225,40 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 u == Some(true),
             );
         }
+        "geo-100m" => {
+            // 300 ms one way at 100 Mbit/s: slow start must not exit on lagged delivery
+            // feedback, or the ramp outlasts the saturation (issue #30).
+            chk(&mut c, "session complete", true, complete, complete);
+            for dir in ["a_to_b", "b_to_a"] {
+                let r = t.num(dir, "/capacity/median_rate_bps");
+                chk(
+                    &mut c,
+                    &format!("capacity {dir} at 300 ms one way, 100 Mbit/s (±10%)"),
+                    format!("{:.0}", ip_rate(100e6)),
+                    fmt(r),
+                    rel_ok(r, ip_rate(100e6), 0.10),
+                );
+                // Seconds the bottleneck held a queue under the heavy flows (P4–P7). The
+                // budget-shortened saturations' overdrives alone give about 2 s; the slow
+                // ramp gave 1.9–2.7 s here, the lag-gated one 3.9–6.1 s.
+                let sat_s = t
+                    .dir(dir, "/capacity/segments")
+                    .and_then(Value::as_array)
+                    .map(|s| {
+                        s.iter()
+                            .filter_map(|w| Some(num(w.get("t1")?)? - num(w.get("t0")?)?))
+                            .sum::<f64>()
+                            / 1e9
+                    });
+                chk(
+                    &mut c,
+                    &format!("saturated time {dir} (s, ≥ 3)"),
+                    "≥ 3",
+                    fmt(sat_s),
+                    sat_s.is_some_and(|s| s >= 3.0),
+                );
+            }
+        }
         "rate-100m" => {
             let r = t.num("a_to_b", "/capacity/median_rate_bps");
             chk(
@@ -1238,6 +1281,19 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
         }
         "geo" | "bufferbloat" => {
             chk(&mut c, "session complete", true, complete, complete);
+            if sc.name == "geo" {
+                // 300 ms one way: the saturations must still reach and hold capacity (issue #30).
+                for dir in ["a_to_b", "b_to_a"] {
+                    let r = t.num(dir, "/capacity/median_rate_bps");
+                    chk(
+                        &mut c,
+                        &format!("capacity {dir} at 300 ms one way (bit/s, ±10%)"),
+                        format!("{:.0}", ip_rate(20e6)),
+                        fmt(r),
+                        rel_ok(r, ip_rate(20e6), 0.10),
+                    );
+                }
+            }
             // Trains (3, 4) and PMTU ladders (9, 10) may pause but must never be stopped.
             let killed = t
                 .events
