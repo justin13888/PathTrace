@@ -41,7 +41,7 @@ Records and events flow to the logger over one bounded `std::sync::mpsc` channel
 ### 3.2 Messages (CBOR maps, deterministic profile)
 `hello {wire_major, wire_minor, tool_version, git_commit, capabilities, profile}` → `welcome {wire_major, wire_minor, session_id(u32), responder facts (os, kernel, ts support, cc), tls_cert_sha256}`; `phase {id, kind, params, start_at_offset_ns}`; `phase_done {id, status, reason?, counters}`; `feedback {flow, highest_seq, recv_count, recv_bytes, window_ns, qdelay_min_ns, qdelay_now_ns, delivery_rate_bps}`; `clock_req {t1}` → `clock_resp {t1, t2, t3}`; `nat_probe {...}`; `pmtu_ack {sizes}`; `bye {reason}`; `abort {reason, signal}` (wire minor 1, reliable, responder → initiator: the responder was stopped by a signal); `error {code, text}`.
 
-Version rule: a major mismatch fails with a clear error naming both versions. A higher minor is accepted, and unknown keys are ignored (REQ-PRB-021).
+Version rule: a major mismatch fails with a clear error naming both versions. A higher minor is accepted, and unknown keys are ignored (REQ-PRB-021). Each endpoint records the peer's minor in META (`extra.responder.wire_minor` on the initiator, `extra.initiator_wire_minor` on the responder). Mixed minors 1.0 and 1.1 run a session, with these gaps: a 1.0 responder sends no `sent` in its feedback and ignores `max_bytes`, so the initiator's byte allowances for responder-sent saturations see `spent = 0` and are not enforced at the responder (only its hard data cap applies); a 1.0 initiator ignores `abort` and finds a stopped responder gone.
 
 ### 3.3 Probe packets
 UDP payload = 32-byte header + random padding + 8-byte tag.
@@ -98,6 +98,8 @@ A packet the path delivered can still be lost inside a host. Each such place is 
 | Recorder channel | `channel_overflow` events |
 
 Receive buffers request 8 MiB with `SO_RCVBUFFORCE`/`SO_SNDBUFFORCE` (effective with CAP_NET_ADMIN), else `SO_RCVBUF`/`SO_SNDBUF`, which the kernel caps at `rmem_max`/`wmem_max`. The effective sizes of every socket are in META.
+
+Two environment variables exist for the ground-truth harness and change what is measured, so field sessions never set them: `PATHTRACE_RECV_BUF=<bytes>` requests that receive buffer size instead of 8 MiB (to provoke socket drops), and `PATHTRACE_TX_IDS=predicted` forces predicted transmit ids on a kernel that supports explicit ones (§4.1). Both `probe` and `serve` honour them, and an endpoint that ran with either records it in META `extra.test_hooks` (null otherwise).
 - Control-channel exchanges (`clock_req`/`clock_resp`) run five times at P0 and once per second afterwards: t1/t4 on the initiator and t2/t3 on the responder, all MONO_RAW user-space times. Each row also records the Noise nonces of the request and response datagrams, which identify them as flow 250/251 rows with kernel stamps, so derivation can use the kernel stamps instead.
 
 ## 5. What is logged (raw layer)

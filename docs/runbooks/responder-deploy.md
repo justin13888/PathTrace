@@ -88,11 +88,13 @@ pathtrace trace info <id>.ptf | head -30     # "complete": true
 | `initiator key not authorized` in `journalctl` | Re-run step 3 with the right laptop key |
 | `could not fetch responder log yet …` | The trace is partial (exit 3). Run `pathtrace fetch --resume <id>.session` later (the probe prints the exact command), then `pathtrace merge <id>.a.ptflog <id>.b.ptflog -o <id>.ptf` |
 | `warning: … TX stamp joins are implausible` | Transmit stamps could not be matched reliably (kernels before 6.13 predict them). The trace is usable; the raw logs keep every stamp for a later re-merge |
+| `warning: … TX stamp ids match no transmission and no burned id` | Transmit ids are likely shifted by one (predicted ids, kernels before 6.13). As above: usable, and the raw logs keep every stamp |
 | `wire protocol mismatch` | Laptop and VM run different major versions; install the same release on both |
+| Laptop on 1.1, VM still on 1.0 (or the reverse) | Sessions run (same wire major), but a 1.0 responder reports no bytes sent (`sent` feedback) and enforces no byte allowance (`max_bytes`), so a fast path can hit the VM's data cap and stop the light flow early; a 1.0 initiator ignores the responder's `abort` when the VM is stopped mid-session. The peer's wire minor is recorded in META (`extra.<ep>.responder.wire_minor`, `extra.<ep>.initiator_wire_minor`). Upgrade both |
 | `doctor` warns about `kernel timestamps` | Traces still work with user-space timestamps (recorded per packet); precision is lower |
 
 ## Maintenance
 
 - Session logs: `/var/lib/pathtrace/state/sessions/<id>/`, deleted after 14 days (`--retention-days`). A session's log is fetchable once the session has ended, also after a restart of the service (`systemctl stop` ends a running session cleanly).
-- Kernel ≥ 6.13 on both machines gives exact transmit-stamp matching (`tx_ids: explicit` in `trace info`); older kernels work with predicted ids.
+- Kernel ≥ 6.13 on both machines gives exact transmit-stamp matching (`tx_ids: explicit` per socket in META `endpoints.<ep>.sockets`, the second line of `pathtrace trace dump <id>.ptf`); older kernels work with predicted ids.
 - Upgrading: replace `/usr/local/bin/pathtrace` and run `systemctl restart pathtrace-responder`. Traces from every PTF ≥ 1.0 release stay readable.

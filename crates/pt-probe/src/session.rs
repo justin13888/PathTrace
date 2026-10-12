@@ -184,6 +184,24 @@ fn sock_opts() -> SockOpts {
     o
 }
 
+/// The test hooks in effect, for META `extra.test_hooks` (null when none is set): they
+/// change what is measured, so a trace says when it was captured with them.
+fn test_hooks_value(o: &SockOpts) -> Value {
+    let d = SockOpts::default();
+    if o.recv_buf == d.recv_buf && !o.force_predicted_ids {
+        return Value::Null;
+    }
+    Value::map()
+        .with(
+            "PATHTRACE_RECV_BUF",
+            (o.recv_buf != d.recv_buf).then_some(o.recv_buf as u64),
+        )
+        .with(
+            "PATHTRACE_TX_IDS",
+            o.force_predicted_ids.then_some("predicted"),
+        )
+}
+
 fn bind_any(v6: bool, port: u16, opts: SockOpts) -> io::Result<UdpSock> {
     let addr: SocketAddr = if v6 {
         SocketAddr::new(IpAddr::from([0u16; 8]), port)
@@ -802,13 +820,17 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
             "responder",
             Value::map()
                 .with("name", opts.responder.name.as_str())
-                .with("facts", wb.get("facts").cloned().unwrap_or(Value::Null)),
+                .with("facts", wb.get("facts").cloned().unwrap_or(Value::Null))
+                // A responder below wire minor 1 sends no `sent` feedback and enforces no
+                // `max_bytes` (probe.md §3.2).
+                .with("wire_minor", wb.u64_or("wire_minor", 0)),
         )
         .with(
             "all_addrs",
             Value::Array(all.iter().map(|a| Value::from(a.to_string())).collect()),
         )
-        .with("control", if tcp_ctrl.is_some() { "tcp" } else { "udp" });
+        .with("control", if tcp_ctrl.is_some() { "tcp" } else { "udp" })
+        .with("test_hooks", test_hooks_value(&sopts));
     let mut meta = obslog_meta(
         Role::A,
         &trace_id,
@@ -1950,7 +1972,9 @@ fn responder_session(
         None,
         Value::map()
             .with("udp443", u443.is_some())
-            .with("control", if tcp.is_some() { "tcp" } else { "udp" }),
+            .with("control", if tcp.is_some() { "tcp" } else { "udp" })
+            .with("initiator_wire_minor", hello.body.u64_or("wire_minor", 0))
+            .with("test_hooks", test_hooks_value(&sock_opts())),
     );
     if let Some(Value::Map(p)) = meta.get_mut(&Key::from("pii")) {
         p.insert(Key::from("/endpoint/initiator_label"), Value::from("id"));
@@ -2141,6 +2165,28 @@ mod tests {
         let bg = (1000.0 * b.time_left_s()) as u64;
         assert!(b.reserve(0) >= bg + 25_000_000 + crate::plan::REF_CBR_BYTES);
         assert!(b.reserve(1) <= bg + 1000);
+    }
+
+    #[test]
+    fn test_hooks_are_recorded_only_when_set() {
+        assert_eq!(test_hooks_value(&SockOpts::default()), Value::Null);
+        let v = test_hooks_value(&SockOpts {
+            recv_buf: 8192,
+            ..SockOpts::default()
+        });
+        assert_eq!(
+            v.get("PATHTRACE_RECV_BUF").and_then(Value::as_u64),
+            Some(8192)
+        );
+        assert_eq!(v.get("PATHTRACE_TX_IDS"), Some(&Value::Null));
+        let v = test_hooks_value(&SockOpts {
+            force_predicted_ids: true,
+            ..SockOpts::default()
+        });
+        assert_eq!(
+            v.get("PATHTRACE_TX_IDS").and_then(Value::as_str),
+            Some("predicted")
+        );
     }
 
     #[test]
