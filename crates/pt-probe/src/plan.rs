@@ -836,9 +836,9 @@ mod tests {
         // Issue #40: hold acted on a queue one feedback lag old. At 300 ms one way it held 0.7×
         // capacity for a whole RTT after the queue had drained, so the bottleneck idled about
         // half the hold time (2.3 of 5 s here at 100 Mbit/s, 2.6 s at 20 Mbit/s, 0.8 s even at
-        // 10 ms one way) and the rate swung 70–130 Mbit/s. Correcting for the bits sent since
-        // the reported queue leaves the slow-start overshoot's drain (under 0.25 s idle), then
-        // a steady queue at the 10 ms target.
+        // 10 ms one way) and the rate swung 70–130 Mbit/s. Corrected for the bits sent since
+        // the reported packet, the queue never empties in hold and settles at the 10 ms target
+        // (9.8–10.2 ms here).
         for (cap, owd) in [
             (100e6, 300),
             (20e6, 300),
@@ -849,9 +849,9 @@ mod tests {
             (100e6, 10),
         ] {
             let s = simulate(cap, owd, 10);
-            assert!(s.idle_s < 0.25, "{cap} bit/s, {owd} ms: {s:?}");
+            assert!(s.idle_s < 0.05, "{cap} bit/s, {owd} ms: {s:?}");
             let (lo, hi) = s.settled_ms;
-            assert!(lo > 7.0 && hi < 13.0, "{cap} bit/s, {owd} ms: {s:?}");
+            assert!(lo > 9.0 && hi < 11.0, "{cap} bit/s, {owd} ms: {s:?}");
         }
     }
 
