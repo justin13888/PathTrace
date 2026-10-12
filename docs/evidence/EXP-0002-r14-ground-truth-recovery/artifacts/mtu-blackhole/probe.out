@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a0490e565b6b8486f/target/groundtruth/mtu-blackhole/01a13241-412e-71c2-aa2f-b65f427dd938.ptf
+content_digest: 92526b916eb81fdb866fe3b8730fe12a9ac1bab69d9a4931c0a6b8e9157a40d6
+packets a_to_b: 5502
+packets b_to_a: 31827
+session: b7a0e7b9
