@@ -391,6 +391,93 @@ fn ipv6_without_a_route_falls_back_to_ipv4() {
     }
 }
 
+/// The one `family_fallback` event of a trace, as JSON text.
+fn family_fallback(trace: &Path) -> String {
+    let ev = events(trace);
+    let fb: Vec<_> = ev
+        .iter()
+        .filter(|e| e["type"] == "family_fallback")
+        .collect();
+    assert_eq!(fb.len(), 1, "{ev:?}");
+    fb[0].to_string()
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn ipv6_udp_timeout_falls_back_to_ipv4_udp() {
+    // probe.md §3.1: the preferred family is routable but gives no UDP handshake reply; a UDP
+    // session on the other family is preferred to a TCP-only one on the preferred family.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[
+            ("HOSTS", "10.0.2.2 resp\nfd00:2::2 resp"),
+            ("RESP_ADDR", "resp"),
+            (
+                "SETUP_PM",
+                "nft add table inet f && nft add chain inet f fw '{ type filter hook forward priority 0; }' && nft add rule inet f fw meta nfproto ipv6 meta l4proto udp drop",
+            ),
+            ("PROBE_ARGS", "--ipv6"),
+        ],
+        "0",
+        "v6udpdrop",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert_eq!(info["complete"], true, "{info}");
+    assert!(err.contains("ipv6 unusable"), "{err}");
+    assert!(!err.contains("TCP fallback"), "{err}");
+    let s = family_fallback(&trace);
+    assert!(
+        s.contains("\"ipv6\"")
+            && s.contains("\"ipv4\"")
+            && s.contains("no handshake reply over UDP")
+            && !s.contains("or TCP"),
+        "{s}"
+    );
+    for dir in ["pkt[a_to_b]", "pkt[b_to_a]"] {
+        assert!(
+            info["tables"][dir]["rows"].as_u64().unwrap_or(0) > 1000,
+            "{dir}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn tcp_fallback_tries_each_family() {
+    // probe.md §3.1: with UDP blocked on both families and TCP blocked over IPv6, the TCP
+    // fallback moves on from the preferred family to IPv4 and the trace says why.
+    let (trace, _) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[
+            ("HOSTS", "10.0.2.2 resp\nfd00:2::2 resp"),
+            ("RESP_ADDR", "resp"),
+            (
+                "SETUP_PM",
+                "nft add table inet f && nft add chain inet f fw '{ type filter hook forward priority 0; }' && nft add rule inet f fw meta l4proto udp drop && nft add rule inet f fw meta nfproto ipv6 meta l4proto tcp drop",
+            ),
+            ("PROBE_ARGS", "--ipv6"),
+        ],
+        "3",
+        "tcpv4",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert!(err.contains("TCP fallback"), "{err}");
+    assert!(err.contains("ipv6 unusable"), "{err}");
+    let s = family_fallback(&trace);
+    assert!(
+        s.contains("\"ipv6\"")
+            && s.contains("\"ipv4\"")
+            && s.contains("no handshake reply over UDP or TCP"),
+        "{s}"
+    );
+}
+
 #[test]
 #[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
 fn tcp_fallback_session_sends_no_udp() {
