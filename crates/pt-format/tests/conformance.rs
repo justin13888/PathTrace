@@ -51,16 +51,25 @@ fn corpus_verdicts_are_stable() {
 
 #[test]
 fn jsonl_twin_roundtrips_valid_corpus() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../conformance/v1.0");
-    for (name, valid, _) in cases(&root) {
-        if !valid {
-            continue;
+    // The synthetic corpora (conformance/v1.0-real holds captured traces, checked above).
+    for version in ["v1.0", "v1.1"] {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance")
+            .join(version);
+        for (name, valid, _) in cases(&root) {
+            if !valid {
+                continue;
+            }
+            let bytes = std::fs::read(root.join(&name)).unwrap();
+            let (f, rep) = pt_format::read(&bytes, pt_format::ReadOptions::default()).unwrap();
+            let back = pt_format::jsonl::load(&pt_format::jsonl::dump(&f)).unwrap();
+            let mut out = Vec::new();
+            let d =
+                pt_format::write(&back, &pt_format::WriteOptions::canonical(), &mut out).unwrap();
+            assert_eq!(
+                d, rep.content_digest,
+                "{version}/{name}: JSON twin changed content"
+            );
         }
-        let bytes = std::fs::read(root.join(&name)).unwrap();
-        let (f, rep) = pt_format::read(&bytes, pt_format::ReadOptions::default()).unwrap();
-        let back = pt_format::jsonl::load(&pt_format::jsonl::dump(&f)).unwrap();
-        let mut out = Vec::new();
-        let d = pt_format::write(&back, &pt_format::WriteOptions::canonical(), &mut out).unwrap();
-        assert_eq!(d, rep.content_digest, "{name}: JSON twin changed content");
     }
 }
