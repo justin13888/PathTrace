@@ -186,6 +186,8 @@ pub struct MergeReport {
     pub txts_unmatched: BTreeMap<String, usize>,
     /// Id-level join check per endpoint.
     pub ids: BTreeMap<String, IdCheck>,
+    /// Re-anchoring of predicted transmit ids per endpoint.
+    pub reanchor: BTreeMap<String, Reanchor>,
 }
 
 struct Log {
@@ -279,6 +281,252 @@ impl MonoToReal {
             .min_by_key(|(m, _)| (m - mono).abs())?;
         Some(mono + near.1)
     }
+
+    /// REALTIME of `mono`, interpolating the offset between the clock pairs around it (the
+    /// nearest pair's offset outside them): accurate to well under a microsecond, which
+    /// re-anchoring needs (probe.md §4.1).
+    fn interp(&self, mono: i64) -> Option<i64> {
+        let i = self.0.partition_point(|(m, _)| *m < mono);
+        match (i.checked_sub(1).and_then(|k| self.0.get(k)), self.0.get(i)) {
+            (Some(&(m0, o0)), Some(&(m1, o1))) if m1 > m0 => {
+                let f = (mono - m0) as i128 * (o1 - o0) as i128 / (m1 - m0) as i128;
+                Some(mono + o0 + f as i64)
+            }
+            (Some(&(_, o)), _) | (None, Some(&(_, o))) => Some(mono + o),
+            (None, None) => None,
+        }
+    }
+}
+
+/// Slack of the re-anchoring window (probe.md §4.1).
+const REANCHOR_SLACK_NS: i64 = 1_000;
+
+/// How `merge` re-anchored one endpoint's predicted transmit ids (probe.md §4.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Reanchor {
+    /// Recorded send failures at which the id offset changed.
+    pub anchors: usize,
+    /// `tx` rows whose id was corrected.
+    pub rows: usize,
+}
+
+/// One endpoint's transmit ids as `merge` joins them: the logged ids, re-anchored after send
+/// failures on `predicted` sockets (probe.md §4.1).
+#[derive(Debug, Clone, Default)]
+struct TxIds {
+    /// Per socket: (first logged id the offset applies to, offset), ascending.
+    steps: HashMap<i64, Vec<(i64, i64)>>,
+    /// Ids consumed by sends without a `tx` row (burns, `raw_sent`), corrected.
+    burned: HashSet<(i64, i64)>,
+    check: Reanchor,
+}
+
+impl TxIds {
+    /// The corrected id of a logged (sock, id).
+    fn id(&self, sock: i64, id: i64) -> i64 {
+        let Some(st) = self.steps.get(&sock) else {
+            return id;
+        };
+        match st.partition_point(|s| s.0 <= id) {
+            0 => id,
+            k => id + st[k - 1].1,
+        }
+    }
+}
+
+/// A recorded send failure (`send_error`, `send_partial`, `send_eagain`).
+struct Failure {
+    t: i64,
+    sock: i64,
+    burned: Option<i64>,
+    unburned: Option<i64>,
+    predicted: bool,
+}
+
+/// Re-anchor `log`'s transmit ids (probe.md §4.1): per `predicted` socket, at each recorded
+/// send failure, the id offset (−1, 0 or +1 relative to the current one) whose rows up to the
+/// next failure join the most SCHED stamps inside their call's window. A non-zero offset must
+/// score strictly higher than the current one.
+fn tx_ids(log: &Log) -> TxIds {
+    let empty = Tab::default();
+    let tx = log.tables.get("tx").unwrap_or(&empty);
+    let txts = log.tables.get("txts").unwrap_or(&empty);
+    let to_real = MonoToReal::new(log);
+    let (ts_sock, ts_id, ts_kind, ts_real) = (
+        rows_of(txts, "sock"),
+        rows_of(txts, "id"),
+        rows_of(txts, "kind"),
+        rows_of(txts, "real"),
+    );
+    let mut sched: HashMap<(i64, i64), i64> = HashMap::new();
+    for j in 0..txts.rows {
+        if let (Some(s), Some(i), Some(0), Some(r)) = (ts_sock[j], ts_id[j], ts_kind[j], ts_real[j])
+        {
+            sched.entry((s, i)).or_insert(r);
+        }
+    }
+    // Per socket: (logged id, user-space send time in MONO_RAW).
+    let (t_sock, t_id, t_int, t_lag) = (
+        rows_of(tx, "sock"),
+        rows_of(tx, "id"),
+        rows_of(tx, "tx_intended"),
+        rows_of(tx, "tx_user_lag"),
+    );
+    let mut rows: HashMap<i64, Vec<(i64, Option<i64>)>> = HashMap::new();
+    for i in 0..tx.rows {
+        if let (Some(s), Some(p)) = (t_sock[i], t_id[i]) {
+            rows.entry(s)
+                .or_default()
+                .push((p, t_int[i].zip(t_lag[i]).map(|(a, b)| a + b)));
+        }
+    }
+    let mut failures: Vec<Failure> = Vec::new();
+    let mut raw_sent: Vec<(i64, i64)> = Vec::new();
+    for e in &log.events {
+        let ty = e.get("type").and_then(Value::as_str);
+        let d = e.get("detail");
+        let get = |k: &str| {
+            d.and_then(|d| d.get(k))
+                .and_then(Value::as_u64)
+                .map(|v| v as i64)
+        };
+        let Some(sock) = get("sock") else { continue };
+        match ty {
+            Some("raw_sent") => {
+                if let Some(i) = get("id") {
+                    raw_sent.push((sock, i));
+                }
+            }
+            Some("send_error" | "send_partial" | "send_eagain") => failures.push(Failure {
+                t: e.get("t").and_then(Value::as_u64).map_or(0, |t| t as i64),
+                sock,
+                burned: get("burned_id"),
+                unburned: get("unburned_id"),
+                predicted: d.and_then(|d| d.get("tx_ids")).and_then(Value::as_str)
+                    == Some("predicted"),
+            }),
+            _ => {}
+        }
+    }
+    failures.sort_by_key(|f| f.t);
+
+    let mut out = TxIds::default();
+    for f in failures.iter().filter(|f| !f.predicted) {
+        // Ids not predicted are taken as logged.
+        if let Some(b) = f.burned {
+            out.burned.insert((f.sock, b));
+        }
+        if let Some(u) = f.unburned {
+            out.burned.remove(&(f.sock, u));
+        }
+    }
+    let mut socks: Vec<i64> = failures
+        .iter()
+        .filter(|f| f.predicted)
+        .map(|f| f.sock)
+        .collect();
+    socks.sort_unstable();
+    socks.dedup();
+    for s in socks {
+        let mut r = rows.remove(&s).unwrap_or_default();
+        r.sort_unstable_by_key(|x| x.0);
+        let n = r.len();
+        // Each row's window: its call's send time to the next call's (calls share a send time).
+        let lo: Vec<Option<i64>> = r
+            .iter()
+            .map(|x| x.1.and_then(|u| to_real.interp(u)))
+            .collect();
+        let mut hi: Vec<Option<i64>> = vec![None; n];
+        let mut next: Option<i64> = None;
+        for i in (0..n).rev() {
+            hi[i] = next.or_else(|| lo[i].map(|l| l + 1_000_000_000));
+            if i == 0 || r[i - 1].1 != r[i].1 {
+                next = lo[i];
+            }
+        }
+        let fits = |i: usize, id: i64| {
+            sched.get(&(s, id)).is_some_and(|&t| {
+                lo[i].is_some_and(|l| t >= l - REANCHOR_SLACK_NS)
+                    && hi[i].is_some_and(|h| t <= h + REANCHOR_SLACK_NS)
+            })
+        };
+        // Where each failure falls among the rows (rows are in send order): exact with a burned
+        // or unburned id, else anywhere in the last call that started before the event.
+        let fs: Vec<&Failure> = failures
+            .iter()
+            .filter(|f| f.predicted && f.sock == s)
+            .collect();
+        let region = |f: &Failure| -> (usize, usize) {
+            if let Some(b) = f.burned {
+                let k = r.partition_point(|x| x.0 <= b);
+                (k, k)
+            } else if let Some(u) = f.unburned {
+                let k = r.partition_point(|x| x.0 < u);
+                (k, k)
+            } else {
+                let end = r.partition_point(|x| x.1.is_none_or(|u| u <= f.t));
+                let start = end
+                    .checked_sub(1)
+                    .map_or(0, |l| r.partition_point(|x| x.1 < r[l].1));
+                (start, end)
+            }
+        };
+        let regions: Vec<(usize, usize)> = fs.iter().map(|f| region(f)).collect();
+        let mut off = 0i64;
+        let mut floor = 0usize;
+        let mut steps = Vec::new();
+        for (k, f) in fs.iter().enumerate() {
+            if let Some(b) = f.burned {
+                out.burned.insert((s, b + off));
+            }
+            if let Some(u) = f.unburned {
+                out.burned.remove(&(s, u + off));
+            }
+            let a = regions[k].0.max(floor);
+            let b = regions[k].1.max(a);
+            let e = regions.get(k + 1).map_or(n, |x| x.0).max(b);
+            // prefix[d][i]: rows a..a+i that fit with offset off+d.
+            let prefix = |d: i64| -> Vec<usize> {
+                let mut p = vec![0; e - a + 1];
+                for i in a..e {
+                    p[i - a + 1] = p[i - a] + usize::from(fits(i, r[i].0 + off + d));
+                }
+                p
+            };
+            let keep = prefix(0);
+            let mut best = (keep[e - a], 0i64, a);
+            for d in [-1, 1] {
+                let p = prefix(d);
+                for sp in a..=b {
+                    let score = keep[sp - a] + p[e - a] - p[sp - a];
+                    if score > best.0 {
+                        best = (score, d, sp);
+                    }
+                }
+            }
+            floor = a;
+            if best.1 != 0 {
+                off += best.1;
+                floor = best.2;
+                steps.push((r.get(best.2).map_or(i64::MAX, |x| x.0), off));
+                out.check.anchors += 1;
+            }
+        }
+        if !steps.is_empty() {
+            out.steps.insert(s, steps);
+        }
+    }
+    out.check.rows = t_sock
+        .iter()
+        .zip(&t_id)
+        .filter_map(|(s, i)| s.zip(*i))
+        .filter(|&(s, i)| out.id(s, i) != i)
+        .count();
+    for (s, i) in raw_sent {
+        let c = out.id(s, i);
+        out.burned.insert((s, c));
+    }
+    out
 }
 
 fn rows_of(t: &Tab, name: &str) -> Vec<Option<i64>> {
@@ -290,8 +538,9 @@ fn rows_of(t: &Tab, name: &str) -> Vec<Option<i64>> {
 /// The joined direction: `pkt`, `dup`, `unmatched` columns and the stamp check.
 type Joined = (Vec<Col>, Vec<Col>, Vec<Col>, StampCheck);
 
-/// Join sender `tx`/`txts` with receiver `rx` for one direction.
-fn join_direction(sender: &Log, receiver: Option<&Log>) -> Joined {
+/// Join sender `tx`/`txts` with receiver `rx` for one direction, by the sender's corrected
+/// transmit ids `ids`.
+fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
     let s = sender.role.as_str();
     let r = if s == "a" { "b" } else { "a" };
     let empty = Tab::default();
@@ -365,7 +614,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> Joined {
         let key = (tx_flow[i].unwrap_or(-1), tx_seq[i].unwrap_or(-1));
         let st = t_sock[i]
             .zip(t_id[i])
-            .and_then(|k| stamps.get(&k))
+            .and_then(|(s, id)| stamps.get(&(s, ids.id(s, id))))
             .copied()
             .unwrap_or((None, None));
         let arr = arrivals.get(&key);
@@ -515,7 +764,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>) -> Joined {
 /// `tx` row (echoes, failed sends, mispredicted ids), and every stamp after the first of its
 /// (sock, id, kind), which the join skips (probe.md §4.1). Kept as `txts_unmatched` so
 /// nothing is dropped (P1).
-fn unmatched_stamps(log: &Log) -> Vec<Col> {
+fn unmatched_stamps(log: &Log, ids: &TxIds) -> Vec<Col> {
     let empty = Tab::default();
     let tx = log.tables.get("tx").unwrap_or(&empty);
     let txts = log.tables.get("txts").unwrap_or(&empty);
@@ -523,6 +772,7 @@ fn unmatched_stamps(log: &Log) -> Vec<Col> {
         .into_iter()
         .zip(rows_of(tx, "id"))
         .filter_map(|(s, i)| s.zip(i))
+        .map(|(s, i)| (s, ids.id(s, i)))
         .collect();
     let (sock, id, kind) = (
         rows_of(txts, "sock"),
@@ -552,11 +802,11 @@ pub struct IdCheck {
     /// Distinct SCHED stamp ids that match no `tx` row, no burned id (`burned_id` in
     /// `send_error`, `send_partial`, `send_eagain`, less any `unburned_id`) and no unobserved
     /// send (`raw_sent`), counting ids from the socket's first `tx` id on (earlier ones are
-    /// the handshake's).
+    /// the handshake's). Ids are compared after re-anchoring.
     pub unexplained: usize,
 }
 
-fn id_check(log: &Log) -> IdCheck {
+fn id_check(log: &Log, ids: &TxIds) -> IdCheck {
     let empty = Tab::default();
     let tx = log.tables.get("tx").unwrap_or(&empty);
     let txts = log.tables.get("txts").unwrap_or(&empty);
@@ -564,6 +814,7 @@ fn id_check(log: &Log) -> IdCheck {
         .into_iter()
         .zip(rows_of(tx, "id"))
         .filter_map(|(s, i)| s.zip(i))
+        .map(|(s, i)| (s, ids.id(s, i)))
         .collect();
     let mut first: HashMap<i64, i64> = HashMap::new();
     for &(s, i) in &sent {
@@ -571,33 +822,7 @@ fn id_check(log: &Log) -> IdCheck {
         *f = (*f).min(i);
     }
     let sent_set: HashSet<(i64, i64)> = sent.iter().copied().collect();
-    let mut burned: HashSet<(i64, i64)> = HashSet::new();
-    for e in &log.events {
-        let ty = e.get("type").and_then(Value::as_str);
-        if !matches!(
-            ty,
-            Some("send_error" | "send_partial" | "send_eagain" | "raw_sent")
-        ) {
-            continue;
-        }
-        let d = e.get("detail");
-        let Some(s) = d.and_then(|d| d.get("sock")).and_then(Value::as_u64) else {
-            continue;
-        };
-        let id = |k: &str| d.and_then(|d| d.get(k)).and_then(Value::as_u64);
-        // Unobserved sends (echoes, handshake replies) used their id like a burn does.
-        if ty == Some("raw_sent")
-            && let Some(i) = id("id")
-        {
-            burned.insert((s as i64, i as i64));
-        }
-        if let Some(b) = id("burned_id") {
-            burned.insert((s as i64, b as i64));
-        }
-        if let Some(u) = id("unburned_id") {
-            burned.remove(&(s as i64, u as i64));
-        }
-    }
+    let burned = &ids.burned;
     let (sock, id, kind) = (
         rows_of(txts, "sock"),
         rows_of(txts, "id"),
@@ -762,7 +987,11 @@ pub fn merge_file(
         stamps: BTreeMap::new(),
         txts_unmatched: BTreeMap::new(),
         ids: BTreeMap::new(),
+        reanchor: BTreeMap::new(),
     };
+    let ids_a = tx_ids(&a);
+    let ids_b = b.as_ref().map(tx_ids).unwrap_or_default();
+    let ids_of = |l: &Log| if l.role == "a" { &ids_a } else { &ids_b };
     let mut obsv_tables = Vec::new();
     for (sender, receiver) in [(Some(&a), b.as_ref()), (b.as_ref(), Some(&a))] {
         let Some(sender) = sender else { continue };
@@ -771,7 +1000,7 @@ pub fn merge_file(
         } else {
             "b_to_a"
         };
-        let (pkt, dup, unmatched, check) = join_direction(sender, receiver);
+        let (pkt, dup, unmatched, check) = join_direction(sender, receiver, ids_of(sender));
         report.stamps.insert(dir.into(), check);
         let attrs = Value::map()
             .with("dir", dir)
@@ -824,10 +1053,12 @@ pub fn merge_file(
             };
             target.extend(chunks(name, &t.cols, &attrs));
         }
-        let orphans = unmatched_stamps(l);
+        let ids = ids_of(l);
+        let orphans = unmatched_stamps(l, ids);
         let n = orphans.first().map_or(0, |c| c.rows.len());
         report.txts_unmatched.insert(l.role.clone(), n);
-        report.ids.insert(l.role.clone(), id_check(l));
+        report.ids.insert(l.role.clone(), id_check(l, ids));
+        report.reanchor.insert(l.role.clone(), ids.check);
         obsv_tables.extend(chunks("txts_unmatched", &orphans, &attrs));
     }
     // One OBSV section per table chunk keeps sections bounded in memory.
@@ -883,6 +1114,11 @@ pub fn merge_file(
         checks = checks
             .with(&format!("tx_unstamped_{ep}"), c.unstamped)
             .with(&format!("txts_unexplained_{ep}"), c.unexplained);
+    }
+    for (ep, c) in &report.reanchor {
+        checks = checks
+            .with(&format!("tx_reanchors_{ep}"), c.anchors)
+            .with(&format!("tx_reanchored_{ep}"), c.rows);
     }
     if let Some(h) = sections[0].head_mut() {
         h.insert(Key::from("merge_checks"), checks);
@@ -1010,12 +1246,12 @@ mod tests {
                     .with("detail", Value::map().with("sock", 0u64).with("id", 9u64)),
             ],
         );
-        let (pkt, _, _, check) = join_direction(&log, None);
+        let (pkt, _, _, check) = join_direction(&log, None, &tx_ids(&log));
         let sched = &pkt.iter().find(|c| c.name == "tx_sched").unwrap().rows;
         assert_eq!(sched, &vec![Some(100), Some(110), None]);
         assert_eq!(check.joined, 2);
         // The duplicate and the three stamps of ids without a tx row are kept.
-        let orphans = unmatched_stamps(&log);
+        let orphans = unmatched_stamps(&log, &tx_ids(&log));
         let ids = &orphans.iter().find(|c| c.name == "id").unwrap().rows;
         let real = &orphans.iter().find(|c| c.name == "real").unwrap().rows;
         assert_eq!(ids, &vec![Some(0), Some(3), Some(5), Some(7), Some(9)]);
@@ -1025,7 +1261,7 @@ mod tests {
         );
         // tx id 2 has no stamp; ids 3 and 7 are unexplained (5 was burned, 9 an echo).
         assert_eq!(
-            id_check(&log),
+            id_check(&log, &tx_ids(&log)),
             IdCheck {
                 unstamped: 1,
                 unexplained: 2
@@ -1044,7 +1280,7 @@ mod tests {
             Vec::new(),
         );
         assert_eq!(
-            id_check(&log),
+            id_check(&log, &tx_ids(&log)),
             IdCheck {
                 unstamped: 1,
                 unexplained: 1
@@ -1055,6 +1291,211 @@ mod tests {
             &[(0, 0, 0, 100), (0, 1, 0, 101), (0, 2, 0, 102)],
             Vec::new(),
         );
-        assert_eq!(id_check(&aligned), IdCheck::default());
+        assert_eq!(id_check(&aligned, &tx_ids(&aligned)), IdCheck::default());
+    }
+
+    const MS: i64 = 1_000_000;
+    const US: i64 = 1_000;
+    /// REALTIME minus MONO_RAW in [`timed`] logs.
+    const R: i64 = 1_000_000_000;
+
+    /// A log with `tx` rows (logged id, user send time in MONO_RAW) on socket 0, SCHED stamps
+    /// (kernel id, REALTIME), and clock pairs mapping MONO_RAW + R to REALTIME.
+    fn timed(rows: &[(i64, i64)], stamps: &[(i64, i64)], events: Vec<Value>) -> Log {
+        let mut log = sender(
+            &rows.iter().map(|r| r.0).collect::<Vec<_>>(),
+            &stamps.iter().map(|s| (0, s.0, 0, s.1)).collect::<Vec<_>>(),
+            events,
+        );
+        let n = rows.len();
+        let tx = log.tables.get_mut("tx").unwrap();
+        let extra = tab(&[
+            ("tx_intended", rows.iter().map(|r| Some(r.1)).collect()),
+            ("tx_user_lag", vec![Some(0); n]),
+        ]);
+        tx.cols.extend(extra.cols);
+        log.tables.insert(
+            "pairs".into(),
+            tab(&[
+                ("mono", vec![Some(0), Some(10_000 * MS)]),
+                ("real", vec![Some(R), Some(10_000 * MS + R)]),
+            ]),
+        );
+        log
+    }
+
+    fn failure(ty: &str, t: i64, burned: Option<u64>, unburned: Option<u64>, mode: &str) -> Value {
+        Value::map().with("t", t as u64).with("type", ty).with(
+            "detail",
+            Value::map()
+                .with("sock", 0u64)
+                .with("burned_id", burned)
+                .with("unburned_id", unburned)
+                .with("tx_ids", mode),
+        )
+    }
+
+    /// The corrected ids of `log`'s `tx` rows, and how they were re-anchored.
+    fn corrected(log: &Log) -> (Vec<i64>, Reanchor) {
+        let ids = tx_ids(log);
+        let t = &log.tables["tx"];
+        let rows = rows_of(t, "id")
+            .into_iter()
+            .map(|i| ids.id(0, i.unwrap()))
+            .collect();
+        (rows, ids.check)
+    }
+
+    /// One datagram per call, 1 ms apart, stamped 5 µs after its call; the call at index 3
+    /// fails and is recorded with `burned_id` 3, but the kernel consumed no id.
+    fn assumed_burn(mode: &str) -> Log {
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows = [
+            (0, user(0)),
+            (1, user(1)),
+            (2, user(2)),
+            (4, user(4)),
+            (5, user(5)),
+            (6, user(6)),
+        ];
+        let stamps: Vec<(i64, i64)> = [0, 1, 2, 4, 5, 6]
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| (k as i64, user(c) + R + 5 * US))
+            .collect();
+        timed(
+            &rows,
+            &stamps,
+            vec![failure(
+                "send_partial",
+                user(3) + 10 * US,
+                Some(3),
+                None,
+                mode,
+            )],
+        )
+    }
+
+    #[test]
+    fn an_assumed_burn_that_consumed_nothing_is_undone() {
+        let log = assumed_burn("predicted");
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 3, 4, 5],
+                Reanchor {
+                    anchors: 1,
+                    rows: 3
+                }
+            )
+        );
+        // Every row now joins its own stamp, and every stamp is explained.
+        let ids = tx_ids(&log);
+        let (pkt, _, _, _) = join_direction(&log, None, &ids);
+        let sched = &pkt.iter().find(|c| c.name == "tx_sched").unwrap().rows;
+        let want: Vec<Option<i64>> = [0, 1, 2, 4, 5, 6]
+            .iter()
+            .map(|c| Some(10 * MS + c * MS + R + 5 * US))
+            .collect();
+        assert_eq!(sched, &want);
+        assert_eq!(id_check(&log, &ids), IdCheck::default());
+        let orphans = unmatched_stamps(&log, &ids);
+        assert_eq!(orphans.first().map_or(0, |c| c.rows.len()), 0);
+        // Without re-anchoring the same log shows the shift.
+        assert_eq!(
+            id_check(&log, &TxIds::default()),
+            IdCheck {
+                unstamped: 1,
+                unexplained: 1
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_ids_are_never_re_anchored() {
+        let log = assumed_burn("explicit");
+        assert_eq!(
+            corrected(&log),
+            (vec![0, 1, 2, 4, 5, 6], Reanchor::default())
+        );
+    }
+
+    #[test]
+    fn an_unrecorded_burn_is_located_inside_its_call() {
+        // Two datagrams per call, 1 ms apart, stamped 5 and 6 µs after their call. In call 1 the
+        // middle one of three fails with no burn recorded, but the kernel consumed id 3: the
+        // last one of the call and everything after are one id higher than logged.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows = [
+            (0, user(0)),
+            (1, user(0)),
+            (2, user(1)),
+            (3, user(1)),
+            (4, user(2)),
+            (5, user(2)),
+        ];
+        let stamps = [
+            (0, user(0) + R + 5 * US),
+            (1, user(0) + R + 6 * US),
+            (2, user(1) + R + 5 * US),
+            (4, user(1) + R + 7 * US),
+            (5, user(2) + R + 5 * US),
+            (6, user(2) + R + 6 * US),
+        ];
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![failure(
+                "send_error",
+                user(1) + 20 * US,
+                None,
+                None,
+                "predicted",
+            )],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 4, 5, 6],
+                Reanchor {
+                    anchors: 1,
+                    rows: 3
+                }
+            )
+        );
+        assert_eq!(id_check(&log, &tx_ids(&log)).unexplained, 0);
+    }
+
+    #[test]
+    fn a_correct_prediction_keeps_its_ids() {
+        // As `assumed_burn`, but the failure did consume id 3 (no stamp for it).
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows: Vec<(i64, i64)> = [0, 1, 2, 4, 5, 6].iter().map(|&c| (c, user(c))).collect();
+        let stamps: Vec<(i64, i64)> = rows.iter().map(|r| (r.0, r.1 + R + 5 * US)).collect();
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![failure(
+                "send_partial",
+                user(3) + 10 * US,
+                Some(3),
+                None,
+                "predicted",
+            )],
+        );
+        assert_eq!(
+            corrected(&log),
+            (vec![0, 1, 2, 4, 5, 6], Reanchor::default())
+        );
+        assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn clock_pairs_are_interpolated() {
+        let m = MonoToReal(vec![(0, 100), (1_000, 200)]);
+        assert_eq!(m.interp(500), Some(650));
+        assert_eq!(m.interp(-10), Some(90));
+        assert_eq!(m.interp(2_000), Some(2_200));
+        assert_eq!(MonoToReal(Vec::new()).interp(5), None);
     }
 }
