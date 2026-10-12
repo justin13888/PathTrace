@@ -81,12 +81,12 @@ Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts th
 | `power` | no | `/sys/class/power_supply`: warns on battery (power saving adds timing noise) |
 | `cpu governor` | no | `/sys/devices/system/cpu/cpu*/cpufreq`: warns on `powersave` under a driver where it pins the lowest frequency (not `intel_pstate` or `amd-pstate-epp`, whose `powersave` is a dynamic policy) |
 | `resolve responder` | yes | DNS: every address of the responder |
-| per family (IPv4, IPv6): `route` | no | a local route to the responder's first address of that family; a family the responder has no address for is reported and skipped |
+| `ipv4`, `ipv6` | no | a local route to the responder's first address of that family; a family the responder has no address for, or this host has no route for, is reported and skipped (the IPv6 check: `probe` falls back to the other family, probe.md §3.1) |
 | per family: `egress interface`, `metered`, `wifi link stats` | no | as `probe` records them |
-| per family: `tcp/<port> reachable` | see below | TCP connect (3 s) to the responder port, 443 and 80 |
+| per family: `tcp/<port> reachable` | no (`responder reachable` is the fatal summary) | TCP connect (3 s) to the responder port, 443 and 80 |
 | per family: `udp/<port> not refused` | no | the UDP test above, on the responder port and 443 |
-| per family: `tcp/<port> not intercepted` | responder port: yes; 80: no | an HTTP request (64 bytes or more, so the responder rejects it at once) on a connected port; the responder never speaks HTTP, so any `HTTP/` answer is a captive portal or transparent proxy, which also makes a TCP connect pass |
-| `responder reachable` | yes | the responder port answered a TCP connect on at least one family |
+| per family: `tcp/<port> not intercepted` | responder port: yes; 443, 80: no | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass |
+| `responder reachable` | yes | on at least one family, the responder port took a TCP connection that nothing intercepted |
 
 Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power and timestamps matter as much.
 
