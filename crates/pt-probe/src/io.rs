@@ -9,20 +9,23 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use pt_format::Value;
-use pt_sys::clock::{mono_raw, sleep_until};
+use pt_sys::clock::{boottime, mono_raw, sleep_until};
 use pt_sys::udp::{
     ErrEvent, InMsg, MAX_DATAGRAM, OutMsg, SendOutcome, TxIdMode, TxKind, UdpSock, poll_many,
 };
 use pt_wire::ctrl::{Envelope, Frame};
 use pt_wire::probe::{self, Header, PktType, Tagger};
 
-use crate::flows::{Due, FlowSpec, Gen, Pattern, Role, Sock};
+use crate::flows::{Catchup, Due, FlowSpec, Gen, Pattern, Role, Sock};
 use crate::record::{Recorder, pii};
 
 /// Feedback interval and dead-man limits (REQ-PRB-005).
 pub const FEEDBACK_INTERVAL_NS: u64 = 20_000_000;
 pub const DEAD_MAN_NS: u64 = 500_000_000;
 pub const LIGHT_DEAD_MAN_NS: u64 = 5_000_000_000;
+/// A flow whose next deadline is further behind than this skips ahead instead of catching
+/// up, and a suspend longer than this is recorded (docs/design/probe.md §4.3).
+pub const STALL_NS: u64 = 2_000_000;
 /// Flow ids under which control datagrams are observed (sender a / sender b).
 pub const CONTROL_FLOW_A: u8 = 250;
 pub const CONTROL_FLOW_B: u8 = 251;
@@ -317,6 +320,23 @@ fn record_send_failure(
     rec.event_nb(kind, d);
 }
 
+/// Detects a suspend of the host: MONO_RAW stops while the system is suspended and BOOTTIME
+/// does not, so BOOTTIME − MONO_RAW grows by the time spent suspended (probe.md §4.3).
+#[derive(Debug, Default)]
+struct SuspendWatch {
+    offset: Option<i64>,
+}
+
+impl SuspendWatch {
+    /// Feed one (BOOTTIME, MONO_RAW) reading; returns the suspended time (ns) when the offset
+    /// grew by more than [`STALL_NS`] since the previous reading.
+    fn observe(&mut self, boot: u64, mono: u64) -> Option<u64> {
+        let off = boot as i64 - mono as i64;
+        let grew = off - self.offset.replace(off)?;
+        (grew > STALL_NS as i64).then_some(grew as u64)
+    }
+}
+
 fn pacer_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -330,6 +350,7 @@ fn pacer_loop(
     let mut light_paused = false;
     let mut cap_logged = false;
     let mut id_modes: Vec<TxIdMode> = socks.iter().map(|s| s.tx_id_mode()).collect();
+    let mut suspend = SuspendWatch::default();
     let handle = |c: PacerCmd,
                   gens: &mut Vec<Gen>,
                   tagger: &mut Option<Tagger>,
@@ -363,7 +384,21 @@ fn pacer_loop(
     };
     loop {
         // Commands: block briefly when idle, otherwise poll.
+        // BOOTTIME is read between two MONO_RAW reads, and a reading the scheduler interrupted
+        // is not used, so a preemption is never taken for a suspend.
+        let m0 = mono_raw();
+        let boot = boottime();
         let now = mono_raw();
+        if now - m0 < 100_000
+            && let Some(ns) = suspend.observe(boot, m0 + (now - m0) / 2)
+        {
+            rec.event_nb(
+                "stall",
+                Value::map()
+                    .with("cause", "suspend")
+                    .with("suspended_ns", ns),
+            );
+        }
         let next_flow = gens.iter().map(|g| g.next_due).min();
         let next_raw = delayed.iter().map(|d| d.0).min();
         let next = next_flow
@@ -516,6 +551,7 @@ fn pacer_loop(
         // Collect due packets per socket.
         let mut per_sock: HashMap<usize, Vec<DueItem>> = HashMap::new();
         let mut stopped = Vec::new();
+        let mut stalls: Vec<(u8, Catchup)> = Vec::new();
         for g in gens.iter_mut() {
             let sock = ids.get(&g.spec.sock.name()).copied().unwrap_or(0);
             let fb_lost = now.saturating_sub(last_fb) > DEAD_MAN_NS
@@ -580,6 +616,11 @@ fn pacer_loop(
                 "pmtu" => PktType::PmtuProbe,
                 _ => PktType::Data,
             };
+            // After a stall the overdue packets are skipped (or the schedule shifted), never
+            // sent back to back (probe.md §4.3).
+            if let Some(c) = g.skip_overdue(now, STALL_NS) {
+                stalls.push((g.spec.id, c));
+            }
             while g.next_due <= now + 20_000 && n < 64 {
                 let Some(due) = g.take() else { break };
                 let skip = g.paused || (g.spec.kind == "light" && light_paused);
@@ -595,6 +636,29 @@ fn pacer_loop(
                 }
                 n += 1;
             }
+        }
+        if let Some(late) = stalls.iter().map(|(_, c)| c.late_ns).max() {
+            rec.event_nb(
+                "stall",
+                Value::map()
+                    .with("cause", "late")
+                    .with("late_ns", late)
+                    .with(
+                        "flows",
+                        Value::Array(
+                            stalls
+                                .iter()
+                                .map(|(id, c)| {
+                                    Value::map()
+                                        .with("flow", *id)
+                                        .with("late_ns", c.late_ns)
+                                        .with("skipped", c.skipped)
+                                        .with("shifted_ns", c.shifted_ns)
+                                })
+                                .collect(),
+                        ),
+                    ),
+            );
         }
         for (id, why) in stopped {
             rec.event_nb(
@@ -1070,5 +1134,20 @@ mod tests {
         for k in ["light", "nat", "class", "control"] {
             assert_eq!(dead_man(k, true, false), DeadMan::Run, "{k}");
         }
+    }
+
+    #[test]
+    fn suspend_watch_reports_growth_of_boottime_over_mono() {
+        let mut w = SuspendWatch::default();
+        let ms = 1_000_000;
+        // BOOTTIME 1 s ahead of MONO_RAW at boot already.
+        assert_eq!(w.observe(1_000 * ms, 0), None);
+        // Both advance together; a slow drift of the offset is no suspend.
+        assert_eq!(w.observe(1_100 * ms, 100 * ms), None);
+        assert_eq!(w.observe(1_201 * ms, 200 * ms), None);
+        // 30 s suspended: MONO_RAW advanced 1 ms, BOOTTIME 30.001 s.
+        assert_eq!(w.observe(31_202 * ms, 201 * ms), Some(30_000 * ms));
+        // The new offset is the baseline from then on.
+        assert_eq!(w.observe(31_302 * ms, 301 * ms), None);
     }
 }

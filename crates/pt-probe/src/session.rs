@@ -1116,7 +1116,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         Box::new(move |b| c2.on_feedback(b)),
         rec.clone(),
     );
-    let sampler = Sampler::start(Some(iface.clone()), rec.clone(), true);
+    let sampler = Sampler::start(Some(iface.clone()), Some(dst.ip()), rec.clone(), true);
     for c in crate::plan::control_specs(dst.port()) {
         rec.flow(c.to_value());
         shared.flows.write().expect("lock").insert(c.id, c);
@@ -2385,7 +2385,7 @@ fn responder_session(
         rec: rec.clone(),
         init: noise,
     });
-    let sampler = Sampler::start(Some(iface), rec.clone(), false);
+    let sampler = Sampler::start(Some(iface), Some(src.ip()), rec.clone(), false);
     for c in crate::plan::control_specs(opts.main_port) {
         rec.flow(c.to_value());
         shared.flows.write().expect("lock").insert(c.id, c);
