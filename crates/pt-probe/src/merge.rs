@@ -504,7 +504,9 @@ fn tx_ids(log: &Log) -> TxIds {
                     }
                 }
             }
-            floor = a;
+            // Only an anchor bounds later candidates (steps stay in id order). A failure that
+            // moved nothing does not: a burn's region lies after the row that reuses its id once
+            // the burn is undone, and that row belongs to the undo.
             if best.1 != 0 {
                 off += best.1;
                 floor = best.2;
@@ -1488,6 +1490,173 @@ mod tests {
             (vec![0, 1, 2, 4, 5, 6], Reanchor::default())
         );
         assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn offsets_accumulate_over_failures_and_correct_raw_sends() {
+        // One datagram per call, 1 ms apart, stamped 5 µs after its call. Calls 3 and 6 fail
+        // and are recorded with `burned_id` 3 and 6, but neither consumed an id: the rows after
+        // call 3 are one id too high, those after call 6 two. A `raw_sent` (no `tx` row) at
+        // call 10 was logged as id 10 and took id 8; its stamp falls in the last row's one-second
+        // window.
+        let user = |c: i64| 10 * MS + c * MS;
+        let calls = [0, 1, 2, 4, 5, 7, 8, 9];
+        let logged = [0, 1, 2, 4, 5, 7, 8, 9];
+        let rows: Vec<(i64, i64)> = logged
+            .iter()
+            .zip(calls)
+            .map(|(&i, c)| (i, user(c)))
+            .collect();
+        let mut stamps: Vec<(i64, i64)> = calls
+            .iter()
+            .enumerate()
+            .map(|(k, &c)| (k as i64, user(c) + R + 5 * US))
+            .collect();
+        stamps.push((8, user(10) + R + 5 * US));
+        let raw = Value::map()
+            .with("t", (user(10) + 10 * US) as u64)
+            .with("type", "raw_sent")
+            .with("detail", Value::map().with("sock", 0u64).with("id", 10u64));
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![
+                failure(
+                    "send_partial",
+                    user(3) + 10 * US,
+                    Some(3),
+                    None,
+                    "predicted",
+                ),
+                failure(
+                    "send_partial",
+                    user(6) + 10 * US,
+                    Some(6),
+                    None,
+                    "predicted",
+                ),
+                raw,
+            ],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 3, 4, 5, 6, 7],
+                Reanchor {
+                    anchors: 2,
+                    rows: 5
+                }
+            )
+        );
+        let ids = tx_ids(&log);
+        assert_eq!(ids.steps[&0], vec![(4, -1), (7, -2)]);
+        // Each burn is corrected with the offset before its failure; the raw send with both.
+        assert_eq!(ids.burned, HashSet::from([(0, 3), (0, 5), (0, 8)]));
+        assert_eq!(id_check(&log, &ids), IdCheck::default());
+    }
+
+    #[test]
+    fn an_undone_burn_that_did_consume_is_restored() {
+        // One datagram per call, 1 ms apart. Call 2's assumed burn (id 2) consumed nothing, so
+        // later rows are one too high. Call 5 sends partially (`burned_id` 5) and its retry
+        // fails at once (`unburned_id` 5), so call 6 reuses logged id 5; but the partial send did
+        // consume an id, which restores the logged ids from call 6 on.
+        let user = |c: i64| 10 * MS + c * MS;
+        let calls = [0, 1, 3, 4, 6, 7, 8];
+        let logged = [0, 1, 3, 4, 5, 6, 7];
+        let truth = [0, 1, 2, 3, 5, 6, 7];
+        let rows: Vec<(i64, i64)> = logged
+            .iter()
+            .zip(calls)
+            .map(|(&i, c)| (i, user(c)))
+            .collect();
+        let stamps: Vec<(i64, i64)> = truth
+            .iter()
+            .zip(calls)
+            .map(|(&i, c)| (i, user(c) + R + 5 * US))
+            .collect();
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![
+                failure(
+                    "send_partial",
+                    user(2) + 10 * US,
+                    Some(2),
+                    None,
+                    "predicted",
+                ),
+                failure(
+                    "send_partial",
+                    user(5) + 10 * US,
+                    Some(5),
+                    None,
+                    "predicted",
+                ),
+                failure("send_error", user(5) + 20 * US, None, Some(5), "predicted"),
+            ],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                truth.to_vec(),
+                Reanchor {
+                    anchors: 2,
+                    rows: 2
+                }
+            )
+        );
+        let ids = tx_ids(&log);
+        // The undo removes the burn it undoes (logged 5, corrected to 4), not logged id 5's.
+        assert_eq!(ids.burned, HashSet::from([(0, 2)]));
+        assert_eq!(id_check(&log, &ids), IdCheck::default());
+    }
+
+    #[test]
+    fn a_second_failure_in_the_same_call_starts_at_the_first_anchor() {
+        // Two datagrams in call 0, three in call 1, two in call 2. In call 1 a datagram after
+        // the first fails with no burn recorded and consumes id 3; its retry, still before call
+        // 2, fails again with nothing recorded and consumes none. Both events fall in call 1,
+        // so the second's candidates start at the first's anchor.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows = [
+            (0, user(0)),
+            (1, user(0)),
+            (2, user(1)),
+            (3, user(1)),
+            (4, user(1)),
+            (5, user(2)),
+            (6, user(2)),
+        ];
+        let stamps = [
+            (0, user(0) + R + 5 * US),
+            (1, user(0) + R + 6 * US),
+            (2, user(1) + R + 5 * US),
+            (4, user(1) + R + 7 * US),
+            (5, user(1) + R + 8 * US),
+            (6, user(2) + R + 5 * US),
+            (7, user(2) + R + 6 * US),
+        ];
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![
+                failure("send_error", user(1) + 20 * US, None, None, "predicted"),
+                failure("send_error", user(1) + 30 * US, None, None, "predicted"),
+            ],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 4, 5, 6, 7],
+                Reanchor {
+                    anchors: 1,
+                    rows: 4
+                }
+            )
+        );
+        assert_eq!(tx_ids(&log).steps[&0], vec![(3, 1)]);
+        assert_eq!(id_check(&log, &tx_ids(&log)).unexplained, 0);
     }
 
     #[test]
