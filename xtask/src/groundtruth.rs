@@ -259,6 +259,10 @@ pub fn scenarios() -> Vec<Scenario> {
             outage,
             "S14 safety",
         ),
+        // The hard cap must still be reached to test it. With byte allowances (probe.md §6)
+        // the smoke profile plans its saturations inside a 3 MB cap, so 1.1 uses 1 MB, about
+        // what a smoke session's background traffic alone sends. EXP-0002-r8 checked the 3 MB cap with 1.0;
+        // EXP-0002-r9 (#38) supersedes it for 1.1.
         Scenario {
             serve_args: "--data-cap 1000000",
             ..s(
