@@ -15,6 +15,8 @@ This document is the normative specification of PTF 1.x (currently 1.1). An inde
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
+Golden files: `conformance/v1.0` holds the 1.0 corpus. The `conformance/v1.1` corpus is generated with `cargo xtask corpus` and read by `tools/ptf-py` as part of the 1.1.0 release evidence (EXP-0003-r4, #38), before 1.1.0 is tagged; until then no golden file exercises the 1.1 additions.
+
 The header minor is the highest minor whose additions the file may contain, in any layer. Re-deriving (`derive`, `merge`, `trace redact`) a file of an older minor writes the derived layer with the current tool and raises the header minor to the tool's (a 1.0 file becomes 1.1), because the new derived sections may use 1.1 additions; its raw layer keeps what it had, so a 1.1 raw column or table can still be absent from such a file. The minor of the tool that captured the raw layer is not recorded separately: `META.tool` (or `captured_by`) names the capturing pathtrace version, which maps to the minor in the table above.
 
 Part I gives the design principles and the decision behind each. Part II is the byte-level specification. Part III defines the sections.
