@@ -105,6 +105,15 @@ fn smoke_session_through_netem() {
         assert!(c["txts_joined"].as_u64().unwrap_or(0) > 1000, "{dir}: {c}");
         assert_eq!(c["txts_implausible"], 0, "{dir}: {c}");
     }
+    // `trace info` shows the host-side losses per direction (field-session runbook).
+    for dir in ["a_to_b", "b_to_a"] {
+        let h = &info["host_drops"][dir];
+        assert!(h["packets"].as_u64() <= h["socket_drops"].as_u64(), "{h}");
+        assert!(
+            info["local_qdisc_drops"][dir]["status"].is_string(),
+            "{info}"
+        );
+    }
     // ... and at the id level: no stamp id is left unexplained.
     for ep in ["a", "b"] {
         let c = &info["merge_checks"];

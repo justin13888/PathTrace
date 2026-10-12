@@ -41,7 +41,7 @@ pathtrace trace info <id>.ptf | head -40
 pathtrace export netem <id>.ptf          # static summary as netem arguments
 ```
 
-`trace info` shows `merge_checks`: `txts_implausible` should be 0 in both directions (otherwise the probe also warned at the end of the session). Host-side drops are separated from path loss: `PATH.<dir>.host_drops` (the receiving socket overflowed) and `local_qdisc_drops` (the laptop's own queue). Non-zero values are not errors, but they mean the host, not the path, lost those packets: close other traffic and retry if they are large.
+`trace info` shows `merge_checks`: `txts_implausible` should be 0 in both directions, and `txts_unexplained_a`/`txts_unexplained_b` should be 0 (otherwise the probe also warned at the end of the session). Host-side drops are separated from path loss, and `trace info` shows them per direction: `host_drops` (the receiving socket overflowed; `packets` never exceeds `socket_drops`, and `ambiguous_losses` counts losses in a socket-drop gap that could be either) and `local_qdisc_drops` (the laptop's own queue). `pathtrace trace dump <id>.ptf` shows the whole PATH section. Non-zero values are not errors, but they mean the host, not the path, lost those packets: close other traffic and retry if they are large.
 
 ## Sampling plan (draft spec §12)
 

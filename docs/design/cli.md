@@ -33,7 +33,7 @@
 | `import mahimahi <up> [<down>] -o <out.ptf>` | any | Import Mahimahi traces |
 | `trace redact <file> --level shareable\|anonymous -o <out>` | any | Remove identifying data (REQ-FMT-016) |
 | `trace check <file> [--json]` | any | Strict validation (REQ-FMT-018) |
-| `trace info <file> [--json]` | any | Summary: kind, ids, profile, class, sections, tables and rows, digest |
+| `trace info <file> [--json]` | any | Summary: kind, ids, profile, class, sections, tables and rows, digest; `merge_checks`, and per direction `host_drops` and `local_qdisc_drops` from PATH |
 | `trace dump <file> [-o out.jsonl]` / `trace load <in.jsonl> -o <out.ptf>` | any | Lossless JSON Lines twin (REQ-FMT-014) |
 | `doctor [<responder>] [--json]` | initiator | Preflight checks (REQ-PRB-025) |
 
