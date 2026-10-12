@@ -797,6 +797,27 @@ fn pacer_loop(
     }
 }
 
+/// The `src` index of a received datagram's source tuple; the first datagram from a tuple
+/// records its `peer_addr` event (docs/design/probe.md §5).
+fn peer_idx(
+    src_idx: &mut HashMap<SocketAddr, u64>,
+    rec: &Recorder,
+    sock: usize,
+    src: SocketAddr,
+) -> u64 {
+    let next = src_idx.len() as u64;
+    *src_idx.entry(src).or_insert_with(|| {
+        rec.event_nb(
+            "peer_addr",
+            Value::map()
+                .with("idx", next)
+                .with("sock", sock)
+                .with("addr", pii(src.to_string(), "id")),
+        );
+        next
+    })
+}
+
 fn receiver_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -839,7 +860,7 @@ fn receiver_loop(
                             offender,
                             payload,
                         } => {
-                            let quoted = Header::decode(&payload);
+                            let quoted = Header::decode(probe::quic::strip(&payload));
                             rec.event_nb(
                                 "icmp",
                                 Value::map()
@@ -906,7 +927,7 @@ fn receiver_loop(
                             Some(rx_src),
                             m.tos.map(i64::from),
                             m.ttl.map(i64::from),
-                            Some(0),
+                            Some(peer_idx(&mut src_idx, &rec, si, m.src) as i64),
                             m.rxq_drops.map(i64::from),
                         ]);
                     }
@@ -923,15 +944,7 @@ fn receiver_loop(
                     continue;
                 }
                 let Some(tg) = tagger.as_ref() else { continue };
-                let inner = if data
-                    .first()
-                    .is_some_and(|b| b & 0x40 != 0 && b >> 4 != probe::VERSION)
-                {
-                    probe::quic::unwrap(data).unwrap_or(data)
-                } else {
-                    data
-                };
-                let Some(h) = tg.verify(inner) else {
+                let Some(h) = tg.verify(probe::quic::strip(data)) else {
                     bad_tag += 1;
                     continue;
                 };
@@ -939,17 +952,7 @@ fn receiver_loop(
                     unknown += 1;
                     continue;
                 }
-                let next = src_idx.len() as u64;
-                let idx = *src_idx.entry(m.src).or_insert_with(|| {
-                    rec.event_nb(
-                        "peer_addr",
-                        Value::map()
-                            .with("idx", next)
-                            .with("sock", si)
-                            .with("addr", pii(m.src.to_string(), "id")),
-                    );
-                    next
-                });
+                let idx = peer_idx(&mut src_idx, &rec, si, m.src);
                 // The responder replies on each socket to where the initiator's flows come from,
                 // except NAT probes, which deliberately come from spare source ports.
                 let from_spare = shared
@@ -1134,6 +1137,27 @@ mod tests {
         for k in ["light", "nat", "class", "control"] {
             assert_eq!(dead_man(k, true, false), DeadMan::Run, "{k}");
         }
+    }
+
+    #[test]
+    fn peer_idx_numbers_source_tuples_once() {
+        let path = std::env::temp_dir().join(format!("pt-peer-{}.ptflog", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut head = pt_format::Map::new();
+        head.insert(pt_format::Key::from("kind"), Value::from("obslog"));
+        let (rec, h) = crate::record::start(&path, head, Role::B).unwrap();
+        let a: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+        let b: SocketAddr = "192.0.2.1:4434".parse().unwrap();
+        let mut idx = HashMap::new();
+        // A control datagram and a probe from one tuple share its index.
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        assert_eq!(peer_idx(&mut idx, &rec, 1, b), 1);
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        drop(rec);
+        // One `peer_addr` event per new tuple.
+        assert_eq!(h.join().unwrap().unwrap().events, 2);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
