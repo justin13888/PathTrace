@@ -1,0 +1,30 @@
+PASS invalid-bad-magic.ptf {'valid': False, 'kind': 'bad_magic'}
+PASS invalid-cbor-key-order.ptf {'valid': False, 'kind': 'cbor'}
+PASS invalid-column-trailing-byte.ptf {'valid': False, 'kind': 'column'}
+PASS invalid-crc.ptf {'valid': False, 'kind': 'crc'}
+PASS invalid-decompression-bomb.ptf {'valid': False, 'kind': 'limit'}
+PASS invalid-file-flags.ptf {'valid': False, 'kind': 'reserved'}
+PASS invalid-index-hash.ptf {'valid': False, 'kind': 'schema'}
+PASS invalid-meta-not-first.ptf {'valid': False, 'kind': 'order'}
+PASS invalid-truncated.ptf {'valid': False, 'kind': 'truncated'}
+PASS invalid-unknown-critical.ptf {'valid': False, 'kind': 'unknown_critical'}
+PASS invalid-unknown-flag-on-critical.ptf {'valid': False, 'kind': 'reserved'}
+PASS invalid-unsupported-major.ptf {'valid': False, 'kind': 'unsupported_major'}
+PASS valid-all-encodings.ptf {'valid': True, 'content_digest': 'c3327c734777b2f989fe6a1293f9a3ed22399363c20cccc93947232d7708b6af'}
+PASS valid-compressed.ptf {'valid': True, 'content_digest': '3e4e0c48d08b9f2e926b1995f4b8492a5d5da5d8cbd100ac24144ecd67349f82'}
+PASS valid-future-minor.ptf {'valid': True, 'content_digest': 'd8676d01ec2bb0c296bcc852769b952eeed3e297a45e231df91419e76fef8cbf'}
+PASS valid-minimal.ptf {'valid': True, 'content_digest': '2cab6b922f1e1fd027339790ea0fea5f3eeebd04ddf42881b1db5cca6a30ec17'}
+PASS valid-uncompressed-no-index.ptf {'valid': True, 'content_digest': 'c3327c734777b2f989fe6a1293f9a3ed22399363c20cccc93947232d7708b6af'}
+PASS valid-unknown-noncritical.ptf {'valid': True, 'content_digest': '3fe7e78562324b313f94fc90323dbabf966348af3a62e3bc0d9ce7b2e8c229b7'}
+18/18 conformance cases pass
+PASS smoke-ipv6-netns-anonymous.ptf {'valid': True, 'content_digest': '07496f6b6c0fc668f97f907844f877f7e155601b02ef368b47aa38a33cc1d0b7'}
+1/1 conformance cases pass
+PASS valid-1-1-additions-uncompressed-no-index.ptf {'valid': True, 'content_digest': 'd1182c01bfcc418d472afaf99e4a31b944eb0a1d1216d52cc4365ac41b1f7810'}
+PASS valid-1-1-additions.ptf {'valid': True, 'content_digest': 'd1182c01bfcc418d472afaf99e4a31b944eb0a1d1216d52cc4365ac41b1f7810'}
+PASS valid-minimal.ptf {'valid': True, 'content_digest': '2cab6b922f1e1fd027339790ea0fea5f3eeebd04ddf42881b1db5cca6a30ec17'}
+3/3 conformance cases pass
+
+running 2 tests
+..
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.02s
+
