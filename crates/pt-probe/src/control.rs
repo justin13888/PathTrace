@@ -56,6 +56,10 @@ struct Rel {
 /// Responder: the handshake message that opened the session, our reply, and resends left.
 type Replay = (Vec<u8>, Vec<u8>, u32);
 
+/// Responder: the sealed `busy` reply to another initiator's handshake message, or `None` when
+/// it does not authenticate (docs/design/probe.md §8).
+pub type BusyHook = Box<dyn Fn(&[u8]) -> Option<Vec<u8>> + Send + Sync>;
+
 pub struct Control {
     pub transport: Arc<Transport>,
     wire: Wire,
@@ -65,6 +69,7 @@ pub struct Control {
     incoming: Mutex<Receiver<Envelope>>,
     thread: Mutex<Option<JoinHandle<()>>>,
     replay: Mutex<Option<Replay>>,
+    busy: Mutex<Option<(BusyHook, Sender<PacerCmd>)>>,
 }
 
 impl std::fmt::Debug for Control {
@@ -98,6 +103,7 @@ impl Control {
             incoming: Mutex::new(in_rx),
             thread: Mutex::new(None),
             replay: Mutex::new(None),
+            busy: Mutex::new(None),
         });
         let c2 = ctl.clone();
         let h = std::thread::Builder::new()
@@ -264,6 +270,55 @@ impl Control {
         queued
     }
 
+    /// Responder: answer other initiators' handshake messages during this session with the
+    /// reply `hook` gives, sent through the pacer `cmd` on the UDP socket each arrived on
+    /// (docs/design/probe.md §8). Works on a TCP wire too: the UDP sockets stay open.
+    pub fn set_busy(&self, hook: BusyHook, cmd: Sender<PacerCmd>) {
+        *self.busy.lock().expect("lock") = Some((hook, cmd));
+    }
+
+    /// A handshake message `noise` arrived during the session: a repeat of the one that opened
+    /// it gets its reply again, another initiator's gets the `busy` reply. Returns the event to
+    /// record, if any.
+    fn on_handshake(
+        &self,
+        noise: &[u8],
+        src: std::net::SocketAddr,
+        sock: Option<usize>,
+    ) -> Option<(&'static str, Value)> {
+        let own = self
+            .replay
+            .lock()
+            .expect("lock")
+            .as_ref()
+            .is_some_and(|r| r.0.as_slice() == noise);
+        if own {
+            return self
+                .replay_handshake(noise, src)
+                .then(|| ("handshake_resent", Value::map()));
+        }
+        // A handshake inside the TCP fallback stream is not another initiator's.
+        let sock = sock?;
+        let busy = self.busy.lock().expect("lock");
+        let (hook, cmd) = busy.as_ref()?;
+        let reply = hook(noise)?;
+        cmd.send(PacerCmd::Raw {
+            sock,
+            dst: src,
+            bytes: reply,
+            at: 0,
+            log: None,
+        })
+        .ok()?;
+        Some((
+            "handshake_refused",
+            Value::map()
+                .with("reason", "busy")
+                .with("via", "udp")
+                .with("addr", crate::record::pii(src.to_string(), "id")),
+        ))
+    }
+
     pub fn srtt(&self) -> Duration {
         Duration::from_nanos(self.rel.lock().expect("lock").srtt_ns)
     }
@@ -306,8 +361,8 @@ impl Control {
                 Err(RecvTimeoutError::Disconnected) => return,
             };
             if let Frame::Init { noise } = &msg.frame {
-                if self.replay_handshake(noise, msg.src) {
-                    rec.event("handshake_resent", Value::map());
+                if let Some((kind, body)) = self.on_handshake(noise, msg.src, msg.sock) {
+                    rec.event(kind, body);
                 }
                 continue;
             }
@@ -451,6 +506,7 @@ pub fn tcp_reader(mut s: std::net::TcpStream, tx: Sender<CtrlIn>, shared: Arc<Sh
                 frame,
                 src,
                 mono: mono_raw(),
+                sock: None,
             });
         }
     }
