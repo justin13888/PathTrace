@@ -818,6 +818,17 @@ fn peer_idx(
     })
 }
 
+/// The probe header an ICMP error quotes, under QUIC framing or not (docs/design/probe.md
+/// §3.3). A quoted control datagram yields none: its first byte (`0xC1`–`0xC3`) would pass
+/// for a QUIC long header, and stripping it would read ciphertext as a flow and seq.
+fn quoted_header(payload: &[u8]) -> Option<Header> {
+    if Frame::is_control(payload) {
+        None
+    } else {
+        Header::decode(probe::quic::strip(payload))
+    }
+}
+
 fn receiver_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -860,7 +871,7 @@ fn receiver_loop(
                             offender,
                             payload,
                         } => {
-                            let quoted = Header::decode(probe::quic::strip(&payload));
+                            let quoted = quoted_header(&payload);
                             rec.event_nb(
                                 "icmp",
                                 Value::map()
@@ -1158,6 +1169,39 @@ mod tests {
         // One `peer_addr` event per new tuple.
         assert_eq!(h.join().unwrap().unwrap().events, 2);
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn quoted_control_datagrams_decode_no_header() {
+        let h = Header {
+            ptype: PktType::Data,
+            flow: 3,
+            phase: 4,
+            session: 9,
+            seq: 77,
+            t_intended: 1,
+            train: 0,
+            train_idx: 0,
+            flags: 0,
+        };
+        let mut hb = [0u8; probe::HEADER_LEN];
+        h.encode(&mut hb);
+        // Ciphertext whose bytes land a valid probe header right after a QUIC long header.
+        let mut ciphertext = vec![0u8; probe::quic::LONG_OVERHEAD - 13];
+        ciphertext.extend_from_slice(&hb);
+        let ctrl = Frame::Data {
+            session: 9,
+            nonce: 5,
+            ciphertext,
+        }
+        .encode();
+        // Stripped as QUIC, the quote would yield a made-up flow and seq.
+        assert_eq!(Header::decode(probe::quic::strip(&ctrl)), Some(h));
+        assert_eq!(quoted_header(&ctrl), None);
+        // Probe datagrams, bare or QUIC-framed, still yield theirs.
+        assert_eq!(quoted_header(&hb), Some(h));
+        let q = probe::quic::wrap(false, [1; 8], [2; 8], &hb);
+        assert_eq!(quoted_header(&q), Some(h));
     }
 
     #[test]
