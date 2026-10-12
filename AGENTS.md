@@ -22,7 +22,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - pt-probe: session, phases, responder, obslog. No async runtime; threads only.
 - pt-derive: raw -> PATH/SERS/PLCY/VALD model; netem/Mahimahi export, Mahimahi import. Pure (no I/O); methods versioned `name/N`.
 - pathtrace: CLI.
-- xtask: `evidence new|run`, `audit`, `groundtruth [scenario]` (netns ground-truth experiments), `corpus` (regenerates conformance/v1.0). Only xtask and tools/ may exec ip/tc/nft/ethtool.
+- xtask: `evidence new|run`, `audit`, `groundtruth [scenario]` (netns ground-truth experiments), `corpus` (regenerates conformance/v1.0 and v1.1). Only xtask and tools/ may exec ip/tc/nft/ethtool.
 - bench/pt-bench: encoding bake-off (heavy comparison deps kept out of shipped crates).
 - fuzz/: cargo-fuzz targets (nightly, separate workspace).
 - tools/ptf-py: independent Python PTF reader written only from docs/design/ptf-format.md (conformance proof). Do not port Rust code into it.
@@ -41,7 +41,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - `mise run fuzz`: cargo-fuzz on all targets, `FUZZ_SECONDS` each (default 60; nightly).
 - `mise run conformance`: Python reader over every conformance directory.
 - `cargo xtask groundtruth [all|<scenario>] [--jobs N]`: ground-truth experiments (~12 min for all); scratch in target/groundtruth.
-- `cargo xtask corpus`: regenerate conformance/v1.0 (only when intentionally extending; never change existing verdicts).
+- `cargo xtask corpus`: regenerate conformance/v1.0 and v1.1 (only when intentionally extending; never change existing verdicts).
 - `mise run audit` = `cargo xtask audit`: requirement/evidence chain. `--release` also fails on stale/pending evidence; release.yml runs it and publishes only if it passes.
 - `cargo xtask evidence new <slug>` / `cargo xtask evidence run EXP-NNNN`.
 - `hk install` once per clone: installs pre-commit + commit-msg hooks.
