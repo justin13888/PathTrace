@@ -9,4 +9,4 @@ cargo-fuzz targets (nightly toolchain, not a workspace member). Run all for 60 s
 | `jsonl_load` | JSON Lines twin loader never panics |
 | `wire` | Control frames, envelopes, probe headers/tags, QUIC framing never panic |
 
-Seed corpus: `conformance/v1.0/*.ptf` is copied in by the fuzz task.
+Seed corpus: `conformance/v1.0/*.ptf` and `conformance/v1.1/*.ptf` are copied in by the fuzz task.

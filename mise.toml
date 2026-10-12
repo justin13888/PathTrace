@@ -44,7 +44,7 @@ set -e
 cd fuzz
 for t in ptf_read cbor_decode jsonl_load wire; do
   mkdir -p corpus/$t
-  [ "$t" = ptf_read ] && cp ../conformance/v1.0/*.ptf corpus/ptf_read/
+  [ "$t" = ptf_read ] && cp ../conformance/v1.0/*.ptf ../conformance/v1.1/*.ptf corpus/ptf_read/
   cargo +nightly fuzz run --target "$(rustc +nightly -vV | sed -n 's/host: //p')" $t corpus/$t -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=2048
 done
 """
