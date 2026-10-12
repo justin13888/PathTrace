@@ -31,7 +31,7 @@ Metadata is CBOR in a documented deterministic profile, with a published CDDL sc
 ### REQ-FMT-005: Self-describing columnar tables
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r4, EXP-0001-r2
+- evidence: EXP-0003-r4, EXP-0001-r3
 
 Bulk data is stored as tables whose column directory names each column's type, encoding, unit, clock domain, nullability and privacy class. Readers skip unknown columns.
 
@@ -101,7 +101,7 @@ An optional final INDX section records section offsets, the BLAKE3 of all preced
 ### REQ-FMT-015: Space budget
 - status: met
 - spec: new
-- evidence: EXP-0002-r8, EXP-0001-r2
+- evidence: EXP-0002-r8, EXP-0001-r3
 
 In `standard` and `deep` sessions, where the volume is, the raw per-packet layer costs at most 8 bytes per packet after compression, and a `standard` session at up to 100 Mbit/s produces a file of at most 10 MB. `smoke` and `light` sessions are small in absolute terms (about 100 kB). Their fixed overhead dominates, so they are exempt from the per-packet figure, though it is still measured and reported in the ground-truth evidence.
 
