@@ -1,4 +1,4 @@
-; PTF 1.0 section heads, CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
+; PTF 1.x section heads (1.0, with 1.1 additions marked), CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
 ; All maps are deterministic CBOR (ptf-format.md Part II §4). Every map is open: readers ignore
 ; unknown keys (`* tstr => any`), so minor versions can add keys (P6).
 
@@ -42,7 +42,7 @@ meta = {
   ? tool: tool,
   ? captured_by: { ? a: tool, ? b: tool },
   ? role: "a" / "b",                                 ; obslog only
-  ? session: { * tstr => any },                      ; per endpoint: id, profile, t0_mono, t0_real
+  ? session: { * tstr => any },                      ; per endpoint: id, profile, t0_mono, t0_real, t0_boot (1.1: CLOCK_BOOTTIME read in the same clock pair, ns)
   ? profile: tstr,
   ? endpoints: { ? a: endpoint, ? b: endpoint },
   ? endpoint: endpoint,                              ; obslog only
@@ -52,6 +52,7 @@ meta = {
   ? complete: bool,
   ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null }],
   ? imported: { * tstr => any },
+  ? merge_checks: { * tstr => any },                 ; 1.1: TX stamp join checks (probe.md §4.1)
   ? extra: any,
   ? pii: pii-map,
   * tstr => any
@@ -63,6 +64,14 @@ endpoint = {
   ? addr: tstr, ? peer_addr: tstr, ? metered: tstr,
   ? iface: { ? name: tstr, ? index: uint, ? type: tstr, ? driver: tstr / null, ? mtu: uint / null, ? usb: bool, * tstr => any },
   ? timestamping: { * tstr => any },
+  ? sockets: [* socket],                             ; 1.1: one entry per UDP socket, in sock-index order
+  ? qdisc: { ? kind: tstr, ? handle: uint, * tstr => any } / null,   ; 1.1: egress root qdisc (null: none reported)
+  ? txqueuelen: uint / null,                         ; 1.1 (null: unknown)
+  * tstr => any
+}
+socket = {
+  name: tstr, kernel_rx: bool, kernel_tx: bool, recv_buf: uint, send_buf: uint,
+  rxq_ovfl: bool, tx_ids: "explicit" / "predicted" / "none" / tstr,
   * tstr => any
 }
 
@@ -73,6 +82,7 @@ flow = {
   ? quic_shape: "header/1" / tstr / null, phase: uint, size: uint,
   pattern: { type: "iso" / "train" / "chirp" / "rate" / "ladder" / "burst" / tstr, * tstr => any },
   tos: uint / "cycle", duration_ns: uint, echo: bool, echo_delay_ns: uint,
+  ? max_bytes: uint,                                 ; 1.1: byte allowance (0 or absent = none)
   * tstr => any
 }
 

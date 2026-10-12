@@ -154,12 +154,10 @@ pub fn load_or_create_cert(state_dir: &Path) -> io::Result<(Vec<u8>, Vec<u8>)> {
         state_dir.join("tls-key.der"),
     );
     if cp.exists() && kp.exists() {
-        return Ok((
-            std::fs::read(cp)?,
-            crate::config::read_private(&kp)
-                .map(|_| ())
-                .and_then(|()| std::fs::read(&kp))?,
-        ));
+        // The key is binary DER: check its permissions, then read bytes (reading it as text
+        // failed every restart with an existing state directory).
+        crate::config::check_private(&kp)?;
+        return Ok((std::fs::read(cp)?, std::fs::read(&kp)?));
     }
     std::fs::create_dir_all(state_dir)?;
     let ck = rcgen::generate_simple_self_signed(vec!["pathtrace-responder".into()])
@@ -716,6 +714,11 @@ mod tests {
     fn tls_pinning() {
         let dir = std::env::temp_dir().join(format!("pt-tls-{}", std::process::id()));
         let (cert, key) = load_or_create_cert(&dir).unwrap();
+        // A restart loads the same certificate and key (binary DER) from the state directory.
+        assert_eq!(
+            load_or_create_cert(&dir).unwrap(),
+            (cert.clone(), key.clone())
+        );
         let scfg = server_config(&cert, &key).unwrap();
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let addr = l.local_addr().unwrap();

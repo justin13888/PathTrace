@@ -7,9 +7,10 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use pt_format::Value;
+use pt_sys::clock::ClockPair;
 use pt_sys::clock::{mono_raw, pair};
-use pt_sys::netif::{IfType, if_stats, iface_info};
-use pt_sys::netlink::{Nl80211, RtMonitor};
+use pt_sys::netif::{IfType, if_stats, iface_info, stack_stats};
+use pt_sys::netlink::{Nl80211, QdiscReader, RtMonitor};
 
 use crate::record::{Recorder, pii};
 
@@ -121,7 +122,32 @@ pub fn iface_facts(name: &str) -> Value {
         .with("usb", i.usb)
 }
 
-/// Background sampler: interface counters (10 Hz), Wi-Fi (1 Hz), clock pairs (1 Hz), routing events.
+/// Egress queueing facts for META (`endpoint.qdisc`, `endpoint.txqueuelen`; PTF 1.1).
+pub fn egress_facts(name: &str) -> (Value, Option<u32>) {
+    let i = iface_info(name);
+    let q = QdiscReader::open()
+        .ok()
+        .and_then(|mut r| r.root(i.index).ok().flatten());
+    let v = match q {
+        Some(q) => Value::map()
+            .with("kind", q.kind.as_str())
+            .with("handle", q.handle),
+        None => Value::Null,
+    };
+    (v, i.txqueuelen)
+}
+
+fn pair_row(p: &ClockPair) -> Vec<Option<i64>> {
+    vec![
+        Some(p.mono as i64),
+        Some(p.real as i64),
+        Some(p.width as i64),
+        Some(p.boot as i64),
+    ]
+}
+
+/// Background sampler: interface, stack and qdisc counters (10 Hz), Wi-Fi (1 Hz), clock pairs
+/// (1 Hz), routing events (docs/design/probe.md §1, §4.2).
 #[derive(Debug)]
 pub struct Sampler {
     stop: Arc<AtomicBool>,
@@ -164,12 +190,47 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
         None
     };
     let rt = RtMonitor::open().ok();
+    let mut qd = QdiscReader::open().ok();
     let mut tick = 0u64;
     let mut wifi_rows = Vec::new();
     let mut if_rows = Vec::new();
     let mut pair_rows = Vec::new();
+    let mut stack_rows = Vec::new();
+    let mut qdisc_rows = Vec::new();
+    let u = |v: Option<u64>| v.map(|x| x as i64);
     while !stop.load(Ordering::Relaxed) {
         let t = mono_raw();
+        let st = stack_stats();
+        stack_rows.push(vec![
+            Some(t as i64),
+            u(st.udp_in_errors),
+            u(st.udp_rcvbuf_errors),
+            u(st.udp_sndbuf_errors),
+            u(st.udp_in_csum_errors),
+            u(st.udp6_in_errors),
+            u(st.udp6_rcvbuf_errors),
+            u(st.udp6_sndbuf_errors),
+            u(st.udp6_in_csum_errors),
+            u(st.softnet_dropped),
+            u(st.softnet_squeezed),
+        ]);
+        if let (Some(r), Some(i)) = (qd.as_mut(), info.as_ref())
+            && let Ok(q) = r.root(i.index)
+        {
+            let q = q.unwrap_or_default();
+            let has = !q.kind.is_empty();
+            let v = |x: u64| has.then_some(x as i64);
+            qdisc_rows.push(vec![
+                Some(t as i64),
+                v(q.bytes),
+                v(q.packets),
+                v(u64::from(q.drops)),
+                v(u64::from(q.requeues)),
+                v(u64::from(q.overlimits)),
+                v(u64::from(q.qlen)),
+                v(u64::from(q.backlog)),
+            ]);
+        }
         if let Some(name) = iface.as_deref()
             && let Some(s) = if_stats(name)
         {
@@ -186,12 +247,7 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
             ]);
         }
         if tick.is_multiple_of(10) {
-            let p = pair(8);
-            pair_rows.push(vec![
-                Some(p.mono as i64),
-                Some(p.real as i64),
-                Some(p.width as i64),
-            ]);
+            pair_rows.push(pair_row(&pair(8)));
             if let (Some(n), Some(i)) = (nl.as_mut(), info.as_ref())
                 && let Ok(w) = n.sample(i.index)
             {
@@ -213,6 +269,8 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
                 ]);
             }
             rec.rows("ifstats", std::mem::take(&mut if_rows));
+            rec.rows("netstack", std::mem::take(&mut stack_rows));
+            rec.rows("qdisc", std::mem::take(&mut qdisc_rows));
             rec.rows("wifi", std::mem::take(&mut wifi_rows));
             rec.rows("pairs", std::mem::take(&mut pair_rows));
         }
@@ -238,13 +296,10 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
         tick += 1;
         std::thread::sleep(Duration::from_millis(100));
     }
-    let p = pair(8);
-    pair_rows.push(vec![
-        Some(p.mono as i64),
-        Some(p.real as i64),
-        Some(p.width as i64),
-    ]);
+    pair_rows.push(pair_row(&pair(8)));
     rec.rows("ifstats", if_rows);
+    rec.rows("netstack", stack_rows);
+    rec.rows("qdisc", qdisc_rows);
     rec.rows("wifi", wifi_rows);
     rec.rows("pairs", pair_rows);
 }

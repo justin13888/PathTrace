@@ -2,15 +2,15 @@
 //! (docs/design/probe.md §6–7, REQ-PRB-010/011/014/016, ADR 0010).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
 use std::sync::mpsc::Sender;
+use std::sync::{Arc, Mutex};
 
 use pt_format::Value;
 use pt_sys::clock::mono_raw;
 use pt_wire::ctrl::BodyExt;
 
 use crate::flows::{FlowSpec, Pattern, Role, Sock, Tos};
-use crate::io::PacerCmd;
+use crate::io::{FlowBytes, PacerCmd};
 
 /// Session profile (REQ-PRB-014).
 #[derive(Debug, Clone, PartialEq)]
@@ -89,6 +89,63 @@ impl Profile {
     }
 }
 
+impl Profile {
+    /// Tracking rounds (one short saturation per minute) for a tracking time of `track_s`.
+    pub fn track_rounds(track_s: u64) -> u64 {
+        track_s / 60
+    }
+
+    /// Saturation seconds `sender` runs over the whole session (P4–P7 and tracking rounds,
+    /// which alternate starting with the initiator).
+    pub fn saturation_s(&self, sender: Role, track_s: u64) -> f64 {
+        let r = Self::track_rounds(track_s);
+        match sender {
+            Role::A => {
+                self.sat_s + self.both_s + 3.0 * self.class_sat_s + r.div_ceil(2) as f64 * 3.0
+            }
+            Role::B => self.sat_s + self.both_s + (r / 2) as f64 * 3.0,
+        }
+    }
+
+    /// Planned seconds per phase, in session order (upper estimates, for the background
+    /// reserve; docs/design/probe.md §6).
+    pub fn phase_plan(&self, track_s: u64) -> Vec<(u16, f64)> {
+        vec![
+            (0, 2.0),
+            (1, 10.0),
+            (2, self.quiet_s),
+            (3, self.chirp_s + 0.5),
+            (4, self.sat_s + 1.0),
+            (5, self.sat_s + 1.0),
+            (6, self.both_s + 1.0),
+            (7, 3.0 * (self.class_sat_s + 0.5)),
+            (8, if self.refs { 35.0 } else { 0.0 }),
+            (10, track_s as f64),
+        ]
+    }
+
+    /// Seconds the session lasts at least, because of the NAT binding probes.
+    pub fn nat_s(&self) -> f64 {
+        self.nat_timeouts_s.iter().max().copied().unwrap_or(0) as f64 + 2.0
+    }
+
+    /// Planned session length in seconds (an upper estimate, for the background reserve).
+    pub fn planned_s(&self, track_s: u64) -> f64 {
+        let phases: f64 = self.phase_plan(track_s).iter().map(|p| p.1).sum();
+        phases.max(self.nat_s()) + 5.0
+    }
+}
+
+/// Bytes the P8 TCP bulk transfer of a sender with data cap `cap` may send: reserved from the
+/// start of the session, so the saturations before it leave room for it (docs/design/probe.md
+/// §6).
+pub fn ref_tcp_bytes(cap: u64) -> u64 {
+    (cap / 8).min(100_000_000)
+}
+
+/// UDP CBR reference flow bytes per sender in P8 (2 Mbit/s for 5 s).
+pub const REF_CBR_BYTES: u64 = 2_000_000 / 8 * 5;
+
 /// Fixed flow ids (docs/design/probe.md §6). Deep-tracking saturations use 100+.
 pub mod ids {
     pub const LIGHT_A: u8 = 1;
@@ -161,6 +218,7 @@ pub fn spec(
         duration_ns,
         echo: false,
         echo_delay_ns: 0,
+        max_bytes: 0,
     }
 }
 
@@ -227,6 +285,8 @@ struct CtlState {
     last_double: u64,
     /// MONO_RAW time from which to overdrive (fill the bottleneck buffer), or u64::MAX.
     overdrive_at: u64,
+    /// Byte allowance of the flow (0 = none).
+    max_bytes: u64,
 }
 
 /// Saturation controller (docs/design/probe.md §7): slow start doubling every 50 ms until the
@@ -238,6 +298,7 @@ pub struct Controller {
     flows: Mutex<HashMap<u8, CtlState>>,
     pub q_target_ns: Mutex<u64>,
     pub rate_cap: f64,
+    bytes: Arc<FlowBytes>,
 }
 
 pub const START_BPS: f64 = 2_000_000.0;
@@ -245,20 +306,55 @@ pub const START_BPS: f64 = 2_000_000.0;
 pub const OVERDRIVE_NS: u64 = 1_500_000_000;
 pub const FLOOR_BPS: f64 = 100_000.0;
 
+/// Bytes the overdrive step sends at 1.5× delivery rate `d` (bit/s).
+fn overdrive_bytes(d: f64) -> f64 {
+    1.5 * d / 8.0 * OVERDRIVE_NS as f64 / 1e9
+}
+
+/// Smallest byte allowance worth starting a saturation for (docs/design/probe.md §6).
+pub const MIN_ALLOWANCE: u64 = 1_000_000;
+
+/// Byte allowance for one saturation phase of a sender: what the sender may still send, minus
+/// the reserve for background traffic, shared by this phase in proportion to its share of the
+/// sender's remaining saturation time.
+pub fn allowance(cap: u64, spent: u64, reserve: u64, this_s: f64, left_s: f64) -> u64 {
+    if this_s <= 0.0 || left_s <= 0.0 {
+        return 0;
+    }
+    let avail = cap.saturating_sub(spent).saturating_sub(reserve) as f64;
+    (avail * (this_s / left_s).min(1.0)) as u64
+}
+
+/// Background bytes per second one endpoint sends during a session (light flow, trains,
+/// control datagrams) for profile `p` at path MTU `mtu` (docs/design/probe.md §6).
+pub fn background_bps(p: &Profile, mtu: u32) -> f64 {
+    let light = 50.0 * 128.0;
+    let trains = f64::from(p.train_count) * f64::from(mtu) * 1000.0 / p.train_period_ms as f64;
+    let control = 6000.0;
+    light + trains + control
+}
+
 impl Controller {
-    pub fn new(role: Role, pacer: Sender<PacerCmd>, rate_cap: u64) -> Controller {
+    pub fn new(
+        role: Role,
+        pacer: Sender<PacerCmd>,
+        rate_cap: u64,
+        bytes: Arc<FlowBytes>,
+    ) -> Controller {
         Controller {
             role,
             pacer,
             flows: Mutex::new(HashMap::new()),
             q_target_ns: Mutex::new(10_000_000),
             rate_cap: rate_cap as f64,
+            bytes,
         }
     }
 
     /// Register a controlled flow owned by this endpoint. `duration_ns` > 3 s enables the
-    /// overdrive step in its last 1.5 s (docs/design/probe.md §7).
-    pub fn add(&self, id: u8, start: u64, duration_ns: u64) {
+    /// overdrive step in its last 1.5 s, or earlier when `max_bytes` (0 = none) would run out
+    /// first (docs/design/probe.md §7).
+    pub fn add(&self, id: u8, start: u64, duration_ns: u64, max_bytes: u64) {
         let overdrive_at = if duration_ns > 3_000_000_000 {
             start + duration_ns - OVERDRIVE_NS
         } else {
@@ -271,6 +367,7 @@ impl Controller {
                 mode: Mode::SlowStart,
                 last_double: mono_raw(),
                 overdrive_at,
+                max_bytes,
             },
         );
     }
@@ -315,6 +412,18 @@ impl Controller {
                         st.last_double = now;
                     }
                 }
+                Mode::Hold
+                    if st.overdrive_at != u64::MAX
+                        && st.max_bytes > 0
+                        && now < st.overdrive_at
+                        && (st.max_bytes.saturating_sub(self.bytes.get(id as u8)) as f64)
+                            <= overdrive_bytes(d) =>
+                {
+                    // The allowance only covers the overdrive now: start it, so the buffer is
+                    // still revealed before the flow stops.
+                    st.overdrive_at = now;
+                    st.rate = (d * 1.5).max(st.rate);
+                }
                 Mode::Hold if now >= st.overdrive_at => {
                     // Overdrive: exceed the delivery rate so a tail-drop buffer fills and its
                     // depth becomes observable at loss onset.
@@ -357,6 +466,66 @@ mod tests {
     }
 
     #[test]
+    fn allowances_share_what_is_left() {
+        // 200 MB cap, 10 MB spent, 10 MB reserve: 180 MB over 30 s of saturation; a 10 s
+        // phase gets a third.
+        assert_eq!(
+            allowance(200_000_000, 10_000_000, 10_000_000, 10.0, 30.0),
+            60_000_000
+        );
+        // The last phase gets everything left; nothing left gives nothing.
+        assert_eq!(allowance(100, 0, 0, 5.0, 5.0), 100);
+        assert_eq!(allowance(100, 120, 0, 5.0, 5.0), 0);
+        assert_eq!(allowance(100, 0, 0, 0.0, 5.0), 0);
+        let std = Profile::by_name("standard").unwrap();
+        assert_eq!(std.saturation_s(Role::A, 0), 10.0 + 5.0 + 9.0);
+        assert_eq!(std.saturation_s(Role::B, 0), 15.0);
+        let deep = Profile::by_name("deep").unwrap();
+        assert_eq!(deep.saturation_s(Role::A, 600), 24.0 + 15.0);
+        assert_eq!(deep.saturation_s(Role::B, 600), 15.0 + 15.0);
+        assert!(std.planned_s(0) > 70.0 && std.planned_s(0) < 200.0);
+        // Background: light 6.4 kB/s + trains 8 × 1500 B / 0.5 s + control.
+        assert_eq!(background_bps(&std, 1500), 6400.0 + 24_000.0 + 6000.0);
+    }
+
+    #[test]
+    fn overdrive_starts_early_when_the_allowance_runs_low() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let bytes: Arc<FlowBytes> = Arc::default();
+        let c = Controller::new(Role::A, tx, 500_000_000, bytes.clone());
+        // 10 s flow with a 10 MB allowance at 10 Mbit/s delivery: overdrive needs 2.8 MB.
+        c.add(7, mono_raw(), 10_000_000_000, 10_000_000);
+        let fb = |q: u64| {
+            Value::map().with(
+                "flows",
+                Value::Array(vec![
+                    Value::map()
+                        .with("flow", 7u64)
+                        .with("qdelay_ns", q)
+                        .with("rate_bps", 10_000_000u64),
+                ]),
+            )
+        };
+        c.on_feedback(&fb(50_000_000)); // queue builds: hold at the delivery rate
+        assert!(matches!(
+            rx.recv().unwrap(),
+            PacerCmd::SetRate(7, 10_000_000)
+        ));
+        bytes.add(7, 5_000_000); // 5 MB left: still holding
+        c.on_feedback(&fb(10_000_000));
+        let PacerCmd::SetRate(7, r) = rx.recv().unwrap() else {
+            panic!()
+        };
+        assert!(r < 15_000_000, "{r}");
+        bytes.add(7, 3_000_000); // 2 MB left < 2.8 MB: overdrive now at 1.5x
+        c.on_feedback(&fb(10_000_000));
+        assert!(matches!(
+            rx.recv().unwrap(),
+            PacerCmd::SetRate(7, 15_000_000)
+        ));
+    }
+
+    #[test]
     fn ladder_respects_mtu() {
         assert_eq!(*pmtu_ladder(false, 1500).last().unwrap(), 1500);
         let l = pmtu_ladder(false, 1400);
@@ -366,8 +535,8 @@ mod tests {
     #[test]
     fn controller_slow_start_then_hold() {
         let (tx, rx) = std::sync::mpsc::channel();
-        let c = Controller::new(Role::A, tx, 500_000_000);
-        c.add(7, mono_raw(), 0);
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        c.add(7, mono_raw(), 0, 0);
         // Low queue: rate should double (after 50 ms).
         std::thread::sleep(std::time::Duration::from_millis(60));
         c.on_feedback(&Value::map().with(

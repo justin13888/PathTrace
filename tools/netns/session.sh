@@ -11,11 +11,22 @@
 #   QDISC_AB   tc qdisc spec for a->b on the middlebox, e.g. "netem delay 10ms rate 20mbit limit 100"
 #   QDISC_BA   tc qdisc spec for b->a
 #   SETUP_PM   extra shell commands run in the middlebox namespace after setup (e.g. nft rules)
+#   SETUP_PA   extra shell commands run in the initiator namespace after setup (e.g. a qdisc on va)
+#   SERVE_ENV  environment assignments for `pathtrace serve` (e.g. PATHTRACE_RECV_BUF=8192)
+#   PROBE_ENV  environment assignments for `pathtrace probe`
 #   PROBE_ARGS extra arguments for `pathtrace probe`
 #   SERVE_ARGS extra arguments for `pathtrace serve`
 #   RESP_ADDR  responder address the initiator uses (default 10.0.2.2; fd00:2::2 for IPv6)
 #   SCRIPT_PM  shell commands run in the middlebox namespace in the background during the probe
 #              (e.g. scripted `tc qdisc change` for time-varying capacity)
+#   PROBE_SIGNAL_AFTER  send SIGINT to the probe after this many seconds (interruption tests)
+#   SERVE_SIGNAL_AFTER  send SERVE_SIGNAL (default TERM) to the responder after this many
+#              seconds; independent of PROBE_SIGNAL_AFTER, both count from the probe's start
+#   SERVE_RESTART  if non-empty, start the responder again after the probe exits (when the
+#              first one has exited), keep it running during POST_PA, then stop it with SIGTERM;
+#              its output goes to serve2.log
+#   POST_PA    shell commands run in the initiator namespace after the probe exits, with
+#              BIN, OUT and CFG (the initiator config dir) set; output in post_pa.log
 set -eu
 : "${BIN:?BIN must point at the pathtrace binary}"
 : "${OUT:?OUT must be an output directory}"
@@ -23,9 +34,17 @@ PROFILE=${PROFILE:-smoke}
 QDISC_AB=${QDISC_AB:-netem delay 10ms rate 20mbit limit 100}
 QDISC_BA=${QDISC_BA:-netem delay 10ms rate 20mbit limit 100}
 SETUP_PM=${SETUP_PM:-}
+SETUP_PA=${SETUP_PA:-}
+SERVE_ENV=${SERVE_ENV:-}
+PROBE_ENV=${PROBE_ENV:-}
 SCRIPT_PM=${SCRIPT_PM:-}
 PROBE_ARGS=${PROBE_ARGS:-}
 SERVE_ARGS=${SERVE_ARGS:-}
+PROBE_SIGNAL_AFTER=${PROBE_SIGNAL_AFTER:-}
+SERVE_SIGNAL_AFTER=${SERVE_SIGNAL_AFTER:-}
+SERVE_SIGNAL=${SERVE_SIGNAL:-TERM}
+SERVE_RESTART=${SERVE_RESTART:-}
+POST_PA=${POST_PA:-}
 RESP_ADDR=${RESP_ADDR:-10.0.2.2}
 IP=ip
 
@@ -68,6 +87,7 @@ $IP netns exec pm tc qdisc add dev mb0 root $QDISC_AB
 # shellcheck disable=SC2086
 $IP netns exec pm tc qdisc add dev ma0 root $QDISC_BA
 if [ -n "$SETUP_PM" ]; then $IP netns exec pm sh -c "$SETUP_PM"; fi
+if [ -n "$SETUP_PA" ]; then $IP netns exec pa sh -c "$SETUP_PA"; fi
 $IP netns exec pa sysctl -qw net.ipv4.ip_unprivileged_port_start=0
 $IP netns exec pb sysctl -qw net.ipv4.ip_unprivileged_port_start=0
 
@@ -77,7 +97,7 @@ IPUB=$($IP netns exec pa "$BIN" --config-dir "$OUT/i" keygen)
 PAIR=$($IP netns exec pb "$BIN" --config-dir "$OUT/r" authorize "$IPUB" --name harness 2>/dev/null)
 $IP netns exec pa "$BIN" --config-dir "$OUT/i" responder add vm "$RESP_ADDR" "$PAIR" 2>/dev/null
 # shellcheck disable=SC2086
-$IP netns exec pb "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" --max-sessions 1 $SERVE_ARGS >"$OUT/serve.log" 2>&1 &
+$IP netns exec pb env $SERVE_ENV "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" --max-sessions 1 $SERVE_ARGS >"$OUT/serve.log" 2>&1 &
 SERVE=$!
 sleep 1
 PM_PID=
@@ -87,10 +107,37 @@ if [ -n "$SCRIPT_PM" ]; then
 fi
 set +e
 # shellcheck disable=SC2086
-$IP netns exec pa "$BIN" --config-dir "$OUT/i" probe vm --class lab --profile "$PROFILE" --out "$OUT" $PROBE_ARGS >"$OUT/probe.out" 2>"$OUT/probe.err"
+$IP netns exec pa env $PROBE_ENV "$BIN" --config-dir "$OUT/i" probe vm --class lab --profile "$PROFILE" --out "$OUT" $PROBE_ARGS >"$OUT/probe.out" 2>"$OUT/probe.err" &
+PROBE=$!
+if [ -n "$SERVE_SIGNAL_AFTER" ]; then
+  (sleep "$SERVE_SIGNAL_AFTER" && kill -"$SERVE_SIGNAL" "$SERVE" 2>/dev/null) &
+fi
+if [ -n "$PROBE_SIGNAL_AFTER" ]; then
+  (sleep "$PROBE_SIGNAL_AFTER" && kill -INT "$PROBE" 2>/dev/null) &
+fi
+wait "$PROBE"
 echo "$?" >"$OUT/probe.exit"
-wait "$SERVE"
-echo "$?" >"$OUT/serve.exit"
+SERVE2=
+if [ -n "$SERVE_RESTART" ]; then
+  wait "$SERVE"
+  echo "$?" >"$OUT/serve.exit"
+  # shellcheck disable=SC2086
+  $IP netns exec pb env $SERVE_ENV "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" $SERVE_ARGS >"$OUT/serve2.log" 2>&1 &
+  SERVE2=$!
+  sleep 1
+fi
+if [ -n "$POST_PA" ]; then
+  $IP netns exec pa env BIN="$BIN" OUT="$OUT" CFG="$OUT/i" sh -c "$POST_PA" >"$OUT/post_pa.log" 2>&1
+  echo "$?" >"$OUT/post_pa.exit"
+fi
+if [ -n "$SERVE2" ]; then
+  kill -TERM "$SERVE2" 2>/dev/null
+  wait "$SERVE2"
+  echo "$?" >"$OUT/serve2.exit"
+else
+  wait "$SERVE"
+  echo "$?" >"$OUT/serve.exit"
+fi
 if [ -n "$PM_PID" ]; then kill "$PM_PID" 2>/dev/null; fi
 $IP netns exec pm tc -s qdisc show >"$OUT/qdisc_stats.txt" 2>&1
 exit 0

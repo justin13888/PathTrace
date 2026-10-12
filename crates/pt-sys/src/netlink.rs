@@ -1,4 +1,5 @@
-//! Minimal netlink: rtnetlink change events and nl80211 Wi-Fi link state (R-0013).
+//! Minimal netlink: rtnetlink change events, qdisc statistics (R-0015) and nl80211 Wi-Fi link
+//! state (R-0013).
 //!
 //! Hand-rolled over libc to stay free of async netlink stacks (R-0014). Only the attributes
 //! PathTrace records are parsed; everything else is skipped.
@@ -291,6 +292,109 @@ fn parse_rt(ty: u16, body: &[u8]) -> Option<RtEvent> {
     }
 }
 
+// ---------------------------------------------------------------- qdisc statistics (R-0015)
+
+const RTM_NEWQDISC: u16 = 36;
+const RTM_GETQDISC: u16 = 38;
+const TCA_KIND: u16 = 1;
+const TCA_STATS2: u16 = 7;
+const TCA_STATS_BASIC: u16 = 1;
+const TCA_STATS_QUEUE: u16 = 3;
+/// Full 64-bit packet count, sent after `TCA_STATS_BASIC` (whose u32 count then wraps) once
+/// the count exceeds 2^32 - 1 (R-0015).
+const TCA_STATS_PKT64: u16 = 8;
+const TC_H_ROOT: u32 = 0xFFFF_FFFF;
+const TCMSG_LEN: usize = 20;
+
+/// Counters of one qdisc (`tc -s qdisc`): basic and queue statistics.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct QdiscStats {
+    pub kind: String,
+    pub handle: u32,
+    pub bytes: u64,
+    pub packets: u64,
+    pub qlen: u32,
+    pub backlog: u32,
+    pub drops: u32,
+    pub requeues: u32,
+    pub overlimits: u32,
+}
+
+/// Reads qdisc statistics with an unprivileged `RTM_GETQDISC` dump.
+#[derive(Debug)]
+pub struct QdiscReader {
+    sock: NlSocket,
+}
+
+impl QdiscReader {
+    pub fn open() -> io::Result<QdiscReader> {
+        Ok(QdiscReader {
+            sock: NlSocket::open(libc::NETLINK_ROUTE, 0, false)?,
+        })
+    }
+
+    /// Statistics of the root qdisc of interface `ifindex`, if it has one.
+    pub fn root(&mut self, ifindex: u32) -> io::Result<Option<QdiscStats>> {
+        let mut req = [0u8; TCMSG_LEN];
+        req[4..8].copy_from_slice(&(ifindex as i32).to_ne_bytes());
+        let msgs = self.sock.request(RTM_GETQDISC, NLM_F_DUMP, &req)?;
+        Ok(msgs
+            .iter()
+            .filter(|(ty, _)| *ty == RTM_NEWQDISC)
+            .filter_map(|(_, body)| parse_qdisc(body))
+            .find(|(ifi, parent, _)| *ifi == ifindex && *parent == TC_H_ROOT)
+            .map(|(_, _, q)| q))
+    }
+}
+
+/// Parse an `RTM_NEWQDISC` body into (ifindex, parent, stats).
+fn parse_qdisc(body: &[u8]) -> Option<(u32, u32, QdiscStats)> {
+    let ifindex = u32_of(body.get(4..8)?)?;
+    let handle = u32_of(body.get(8..12)?)?;
+    let parent = u32_of(body.get(12..16)?)?;
+    let mut q = QdiscStats {
+        handle,
+        ..Default::default()
+    };
+    for (t, d) in attrs(body.get(TCMSG_LEN..)?) {
+        match t {
+            TCA_KIND => {
+                q.kind = String::from_utf8_lossy(d.split(|b| *b == 0).next().unwrap_or(&[]))
+                    .into_owned();
+            }
+            TCA_STATS2 => {
+                let mut pkt64 = None;
+                for (st, sd) in attrs(d) {
+                    match st {
+                        // struct gnet_stats_basic { u64 bytes; u32 packets; }
+                        TCA_STATS_BASIC => {
+                            q.bytes = u64::from_ne_bytes(sd.get(..8)?.try_into().ok()?);
+                            q.packets = u64::from(u32_of(sd.get(8..12)?)?);
+                        }
+                        TCA_STATS_PKT64 => {
+                            pkt64 = Some(u64::from_ne_bytes(sd.get(..8)?.try_into().ok()?));
+                        }
+                        // struct gnet_stats_queue { qlen, backlog, drops, requeues, overlimits }
+                        TCA_STATS_QUEUE => {
+                            q.qlen = u32_of(sd.get(0..4)?)?;
+                            q.backlog = u32_of(sd.get(4..8)?)?;
+                            q.drops = u32_of(sd.get(8..12)?)?;
+                            q.requeues = u32_of(sd.get(12..16)?)?;
+                            q.overlimits = u32_of(sd.get(16..20)?)?;
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some(p) = pkt64 {
+                    q.packets = p;
+                }
+            }
+            _ => {}
+        }
+    }
+    Some((ifindex, parent, q))
+}
+
 fn ip_of(family: u8, d: &[u8]) -> Option<IpAddr> {
     match i32::from(family) {
         libc::AF_INET => Some(IpAddr::from(<[u8; 4]>::try_from(d.get(..4)?).ok()?)),
@@ -452,6 +556,51 @@ mod tests {
         let m = RtMonitor::open().unwrap();
         let mut ev = Vec::new();
         m.poll_events(&mut ev).unwrap();
+    }
+
+    #[test]
+    fn parse_qdisc_stats() {
+        let mut body = vec![0u8; TCMSG_LEN];
+        body[4..8].copy_from_slice(&3u32.to_ne_bytes());
+        body[8..12].copy_from_slice(&0x8001_0000u32.to_ne_bytes());
+        body[12..16].copy_from_slice(&TC_H_ROOT.to_ne_bytes());
+        body.extend(attr(TCA_KIND, b"fq_codel\0"));
+        let mut basic = 1_000_000u64.to_ne_bytes().to_vec();
+        basic.extend(700u32.to_ne_bytes());
+        basic.extend(0u32.to_ne_bytes()); // padding
+        let mut queue = Vec::new();
+        for v in [2u32, 3000, 5, 1, 9] {
+            queue.extend(v.to_ne_bytes());
+        }
+        let mut st = attr(TCA_STATS_BASIC, &basic);
+        st.extend(attr(TCA_STATS_QUEUE, &queue));
+        body.extend(attr(TCA_STATS2, &st));
+        let (ifi, parent, q) = parse_qdisc(&body).unwrap();
+        assert_eq!((ifi, parent), (3, TC_H_ROOT));
+        assert_eq!(q.kind, "fq_codel");
+        assert_eq!((q.bytes, q.packets), (1_000_000, 700));
+        assert_eq!(
+            (q.qlen, q.backlog, q.drops, q.requeues, q.overlimits),
+            (2, 3000, 5, 1, 9)
+        );
+        // Past 2^32 - 1 packets the basic count wraps and TCA_STATS_PKT64 has the full count.
+        let full = (5u64 << 32) + 7;
+        let mut basic = 1_000_000u64.to_ne_bytes().to_vec();
+        basic.extend((full as u32).to_ne_bytes());
+        basic.extend(0u32.to_ne_bytes());
+        let mut st = attr(TCA_STATS_BASIC, &basic);
+        st.extend(attr(TCA_STATS_PKT64, &full.to_ne_bytes()));
+        let mut body = body[..TCMSG_LEN].to_vec();
+        body.extend(attr(TCA_STATS2, &st));
+        assert_eq!(parse_qdisc(&body).unwrap().2.packets, full);
+    }
+
+    #[test]
+    fn qdisc_reader_reads_loopback() {
+        // Loopback has a root qdisc (noqueue) on every kernel PathTrace supports.
+        let mut r = QdiscReader::open().unwrap();
+        let q = r.root(1).unwrap().expect("lo root qdisc");
+        assert!(!q.kind.is_empty());
     }
 
     #[test]

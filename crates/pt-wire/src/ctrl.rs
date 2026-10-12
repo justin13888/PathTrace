@@ -12,7 +12,7 @@
 use pt_format::{Value, cbor};
 
 pub const WIRE_MAJOR: u64 = 1;
-pub const WIRE_MINOR: u64 = 0;
+pub const WIRE_MINOR: u64 = 1;
 
 pub const T_INIT: u8 = 0xC1;
 pub const T_RESP: u8 = 0xC2;

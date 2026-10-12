@@ -149,6 +149,9 @@ pub struct FlowSpec {
     pub echo: bool,
     /// Echo delay at the receiver (NAT binding probes), ns.
     pub echo_delay_ns: u64,
+    /// Byte allowance: the sender stops the flow once it has sent this many IP bytes
+    /// (0 = none; docs/design/probe.md §6).
+    pub max_bytes: u64,
 }
 
 impl FlowSpec {
@@ -197,7 +200,7 @@ impl FlowSpec {
             Tos::Fixed(t) => Value::from(u64::from(t)),
             Tos::Cycle => Value::from("cycle"),
         };
-        Value::map()
+        let v = Value::map()
             .with("id", self.id)
             .with("kind", self.kind.as_str())
             .with("sender", self.sender.name())
@@ -218,7 +221,12 @@ impl FlowSpec {
             .with("tos", tos)
             .with("duration_ns", self.duration_ns)
             .with("echo", self.echo)
-            .with("echo_delay_ns", self.echo_delay_ns)
+            .with("echo_delay_ns", self.echo_delay_ns);
+        if self.max_bytes > 0 {
+            v.with("max_bytes", self.max_bytes)
+        } else {
+            v
+        }
     }
 
     pub fn from_value(v: &Value) -> Option<FlowSpec> {
@@ -276,6 +284,7 @@ impl FlowSpec {
             duration_ns: v.u64_or("duration_ns", 0),
             echo: v.get("echo").and_then(Value::as_bool).unwrap_or(false),
             echo_delay_ns: v.u64_or("echo_delay_ns", 0),
+            max_bytes: v.u64_or("max_bytes", 0),
         })
     }
 }
@@ -292,6 +301,8 @@ pub struct Gen {
     /// Current rate for `Rate` patterns (bit/s).
     pub bps: u64,
     pub done: bool,
+    /// Paused by the dead-man switch (session-long observers only).
+    pub paused: bool,
 }
 
 /// One packet the pacer should send now.
@@ -321,6 +332,7 @@ impl Gen {
             idx: 0,
             bps,
             done: false,
+            paused: false,
         }
     }
 
@@ -428,6 +440,7 @@ mod tests {
             duration_ns: 1_000_000_000,
             echo: false,
             echo_delay_ns: 0,
+            max_bytes: 0,
         }
     }
 

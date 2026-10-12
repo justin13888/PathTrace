@@ -1,11 +1,11 @@
-//! UDP probe sockets: batched send/receive with per-packet TOS, kernel timestamps, TTL, and
-//! error-queue TX stamps / ICMP (R-0010, R-0011).
+//! UDP probe sockets: batched send/receive with per-packet TOS, kernel timestamps, TTL, socket
+//! drop counts, and error-queue TX stamps / ICMP (R-0010, R-0011, R-0015).
 
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 
 use crate::{cvt, cvt_ssize, getsockopt_int, setsockopt};
 
@@ -22,6 +22,139 @@ const SO_EE_ORIGIN_ICMP6: u8 = 3;
 const SO_EE_ORIGIN_TIMESTAMPING: u8 = 4;
 const IP_PMTUDISC_PROBE: libc::c_int = 3;
 const IPV6_PMTUDISC_PROBE: libc::c_int = 3;
+// asm-generic/socket.h (x86_64 and aarch64 use the generic values; R-0015).
+const SO_RXQ_OVFL: libc::c_int = 40;
+const SO_RCVBUFFORCE: libc::c_int = 33;
+const SO_SNDBUFFORCE: libc::c_int = 32;
+const SCM_TS_OPT_ID: libc::c_int = 81;
+
+/// How the OPT_IDs of sent datagrams are known (docs/design/probe.md §4.1, R-0015).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TxIdMode {
+    /// No kernel TX stamps: ids are only a local counter.
+    None,
+    /// Every datagram carries its id in `SCM_TS_OPT_ID` (kernel ≥ 6.13): exact.
+    Explicit,
+    /// The kernel assigns ids; they are predicted, and failures are assumed to consume one.
+    Predicted,
+}
+
+impl TxIdMode {
+    pub fn name(self) -> &'static str {
+        match self {
+            TxIdMode::None => "none",
+            TxIdMode::Explicit => "explicit",
+            TxIdMode::Predicted => "predicted",
+        }
+    }
+    fn code(self) -> u8 {
+        match self {
+            TxIdMode::None => 0,
+            TxIdMode::Explicit => 1,
+            TxIdMode::Predicted => 2,
+        }
+    }
+    fn from_code(c: u8) -> TxIdMode {
+        match c {
+            1 => TxIdMode::Explicit,
+            2 => TxIdMode::Predicted,
+            _ => TxIdMode::None,
+        }
+    }
+}
+
+/// Whether the running kernel accepts `SCM_TS_OPT_ID` (added in 6.13, R-0015).
+pub fn kernel_has_ts_opt_id() -> bool {
+    let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
+    let mut it = rel
+        .trim()
+        .split(|c: char| !c.is_ascii_digit())
+        .map(|p| p.parse::<u32>().unwrap_or(0));
+    let (major, minor) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
+    (major, minor) >= (6, 13)
+}
+
+/// Errors a kernel raises before the append stage, which therefore never consume an OPT_ID
+/// (R-0015).
+fn error_before_append(errno: i32) -> bool {
+    matches!(
+        errno,
+        libc::ENETUNREACH | libc::EINVAL | libc::EAFNOSUPPORT | libc::EACCES | libc::EDESTADDRREQ
+    )
+}
+
+/// Errors raised after the append stage (a qdisc drop with `IP_RECVERR`, a netfilter drop),
+/// which consume an OPT_ID on every kernel (R-0015).
+fn error_after_append(errno: i32) -> bool {
+    matches!(errno, libc::ENOBUFS | libc::EPERM)
+}
+
+/// Whether a failed datagram consumed an OPT_ID in `Predicted` mode (R-0015). `error` is
+/// `None` after a partial `sendmmsg`, whose errno is unknown: assumed consumed.
+/// `restores_append_ids`: the kernel (≥ 6.13) returns the id on append-stage errors (EAGAIN,
+/// EMSGSIZE, a pending ICMP error such as ECONNREFUSED), so only errors after the append
+/// stage consume one; older kernels consume one on every error except those before append.
+fn predicted_consumes(error: Option<&io::Error>, restores_append_ids: bool) -> bool {
+    let Some(errno) = error.and_then(io::Error::raw_os_error) else {
+        return true;
+    };
+    if error_before_append(errno) {
+        return false;
+    }
+    !restores_append_ids || error_after_append(errno)
+}
+
+/// Whether the running kernel returns the OPT_ID of a datagram that fails in the append stage
+/// (6.13 and later, R-0015).
+fn kernel_restores_append_ids() -> bool {
+    kernel_has_ts_opt_id()
+}
+
+/// Id accounting after one `sendmmsg` call (docs/design/probe.md §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdAccount {
+    /// Id of the batch's first datagram.
+    first_id: u32,
+    /// Id the next datagram gets.
+    next_id: u32,
+    burned_id: Option<u32>,
+    unburned_id: Option<u32>,
+    /// A burn was assumed for a datagram whose errno is unknown (partial send).
+    provisional: bool,
+}
+
+/// Settle ids for a call that started at `first_id` and had `sent` datagrams accepted.
+/// `provisional`: the previous call on this socket assumed a burn after a partial send. The
+/// pacer retries the failed datagram alone right away, so if this call fails at once with an
+/// error that consumes no id, that datagram did not consume one either: the burn is undone.
+fn settle_ids(
+    mode: TxIdMode,
+    first_id: u32,
+    sent: usize,
+    failed: bool,
+    error: Option<&io::Error>,
+    restores_append_ids: bool,
+    provisional: bool,
+) -> IdAccount {
+    let consumed = failed
+        && match mode {
+            TxIdMode::Explicit => true,
+            TxIdMode::Predicted | TxIdMode::None => predicted_consumes(error, restores_append_ids),
+        };
+    let undo = provisional && mode != TxIdMode::Explicit && failed && sent == 0 && !consumed;
+    let first_id = if undo {
+        first_id.wrapping_sub(1)
+    } else {
+        first_id
+    };
+    IdAccount {
+        first_id,
+        next_id: first_id.wrapping_add(sent as u32 + u32::from(consumed)),
+        burned_id: consumed.then(|| first_id.wrapping_add(sent as u32)),
+        unburned_id: undo.then_some(first_id),
+        provisional: consumed && mode != TxIdMode::Explicit && error.is_none(),
+    }
+}
 
 /// Socket configuration.
 #[derive(Debug, Clone, Copy)]
@@ -32,6 +165,9 @@ pub struct SockOpts {
     pub pmtu_probe: bool,
     pub recv_buf: usize,
     pub send_buf: usize,
+    /// Force `Predicted` transmit ids even where `Explicit` is available (ground-truth tests
+    /// of the prediction rules, R-0015).
+    pub force_predicted_ids: bool,
 }
 
 impl Default for SockOpts {
@@ -41,17 +177,52 @@ impl Default for SockOpts {
             pmtu_probe: true,
             recv_buf: 8 << 20,
             send_buf: 8 << 20,
+            force_predicted_ids: false,
         }
     }
 }
 
-/// Which timestamping the socket actually got.
+/// Which timestamping and drop accounting the socket actually got.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TsCaps {
     pub kernel_rx: bool,
     pub kernel_tx: bool,
+    /// Effective buffer sizes (after the kernel's `rmem_max`/`wmem_max` caps).
     pub recv_buf: usize,
     pub send_buf: usize,
+    /// `SO_RXQ_OVFL` is enabled: every received datagram reports the socket's drop count.
+    pub rxq_ovfl: bool,
+}
+
+/// Result of [`UdpSock::send_batch`].
+#[derive(Debug)]
+pub struct SendOutcome {
+    /// Datagrams the kernel accepted, from the start of the batch.
+    pub sent: usize,
+    /// OPT_ID of the first datagram of the batch; accepted datagram `i` has `first_id + i`.
+    pub first_id: u32,
+    /// The datagram at index `sent` failed (fewer than all were accepted).
+    pub failed: bool,
+    /// The failed datagram's error, when the kernel reported it. `sendmmsg` reports an errno
+    /// only when the first datagram fails, so after a partial send it is unknown (`None`).
+    pub error: Option<io::Error>,
+    /// The id the failed attempt consumed: exact in `Explicit` mode, assumed in `Predicted`
+    /// mode, `None` when no id was consumed.
+    pub burned_id: Option<u32>,
+    /// `Predicted` mode: the id the previous call reported as `burned_id` after a partial
+    /// send (errno unknown) was not consumed after all, because this call, the retry of that
+    /// datagram, failed at once with an error that consumes no id. Ids are back to before
+    /// that burn.
+    pub unburned_id: Option<u32>,
+}
+
+impl SendOutcome {
+    /// The failed datagram hit a full send buffer.
+    pub fn would_block(&self) -> bool {
+        self.error
+            .as_ref()
+            .is_some_and(|e| e.kind() == io::ErrorKind::WouldBlock)
+    }
 }
 
 /// An outgoing datagram.
@@ -70,6 +241,9 @@ pub struct InMsg {
     pub src: SocketAddr,
     /// Kernel software RX timestamp, CLOCK_REALTIME ns.
     pub rx_kernel: Option<u64>,
+    /// The socket's cumulative drop count when this datagram was queued (`SO_RXQ_OVFL`);
+    /// `None` if the option is off.
+    pub rxq_drops: Option<u32>,
     /// User-space CLOCK_REALTIME right after `recvmmsg` returned (fallback).
     pub rx_user: u64,
     pub tos: Option<u8>,
@@ -116,9 +290,21 @@ pub struct UdpSock {
     fd: OwnedFd,
     v6: bool,
     caps: TsCaps,
-    /// Next OPT_ID the kernel will assign (one per datagram sent). Only meaningful if a single
-    /// thread sends on this socket (the pacer), which is how pt-probe uses it.
+    /// Next OPT_ID to use (explicit) or that the kernel will assign (predicted). Only
+    /// meaningful if a single thread sends on this socket (the pacer), which is how pt-probe
+    /// uses it.
     next_id: AtomicU32,
+    /// [`TxIdMode`] code; may fall back from explicit to predicted on the first send.
+    id_mode: AtomicU8,
+    /// Whether a send has confirmed the id mode yet.
+    mode_confirmed: AtomicBool,
+    /// The kernel returns ids on append-stage errors (≥ 6.13), for `Predicted` mode.
+    restores_append_ids: bool,
+    /// `Predicted` mode: the last call assumed a burn after a partial send (errno unknown).
+    provisional_burn: AtomicBool,
+    /// Control message type that carries an explicit id (`SCM_TS_OPT_ID`; tests replace it
+    /// with an unknown type to get the EINVAL of a kernel without it).
+    opt_id_cmsg: libc::c_int,
 }
 
 pub(crate) fn sockaddr_from(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
@@ -231,18 +417,16 @@ impl UdpSock {
             setsockopt(f, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, 1 as libc::c_int)?;
         }
         setsockopt(f, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1 as libc::c_int)?;
-        let _ = setsockopt(
-            f,
-            libc::SOL_SOCKET,
-            libc::SO_RCVBUF,
-            opts.recv_buf as libc::c_int,
-        );
-        let _ = setsockopt(
-            f,
-            libc::SOL_SOCKET,
-            libc::SO_SNDBUF,
-            opts.send_buf as libc::c_int,
-        );
+        // The FORCE variants bypass rmem_max/wmem_max with CAP_NET_ADMIN; otherwise the kernel
+        // caps the plain request. The effective sizes are read back below and recorded.
+        for (force, plain, size) in [
+            (SO_RCVBUFFORCE, libc::SO_RCVBUF, opts.recv_buf),
+            (SO_SNDBUFFORCE, libc::SO_SNDBUF, opts.send_buf),
+        ] {
+            if setsockopt(f, libc::SOL_SOCKET, force, size as libc::c_int).is_err() {
+                let _ = setsockopt(f, libc::SOL_SOCKET, plain, size as libc::c_int);
+            }
+        }
         if v6 {
             setsockopt(
                 f,
@@ -303,16 +487,29 @@ impl UdpSock {
                 caps.kernel_rx = true;
             }
         }
+        caps.rxq_ovfl = setsockopt(f, libc::SOL_SOCKET, SO_RXQ_OVFL, 1 as libc::c_int).is_ok();
         caps.recv_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_RCVBUF).unwrap_or(0) as usize;
         caps.send_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_SNDBUF).unwrap_or(0) as usize;
         let (ss, len) = sockaddr_from(&addr);
         // SAFETY: `ss`/`len` describe a valid sockaddr for this socket's family.
         cvt(unsafe { libc::bind(f, (&raw const ss).cast(), len) })?;
+        let mode = if !caps.kernel_tx {
+            TxIdMode::None
+        } else if kernel_has_ts_opt_id() && !opts.force_predicted_ids {
+            TxIdMode::Explicit
+        } else {
+            TxIdMode::Predicted
+        };
         Ok(UdpSock {
             fd,
             v6,
             caps,
             next_id: AtomicU32::new(0),
+            id_mode: AtomicU8::new(mode.code()),
+            mode_confirmed: AtomicBool::new(false),
+            restores_append_ids: kernel_restores_append_ids(),
+            provisional_burn: AtomicBool::new(false),
+            opt_id_cmsg: SCM_TS_OPT_ID,
         })
     }
 
@@ -338,12 +535,69 @@ impl UdpSock {
         self.next_id.load(Ordering::Relaxed)
     }
 
-    /// Send a batch with `sendmmsg`, one datagram per message, each with its own TOS.
-    /// Returns how many were sent (the rest should be retried or counted as send failures).
-    pub fn send_batch(&self, msgs: &[OutMsg<'_>]) -> io::Result<usize> {
+    /// How this socket's transmit ids are known.
+    pub fn tx_id_mode(&self) -> TxIdMode {
+        TxIdMode::from_code(self.id_mode.load(Ordering::Relaxed))
+    }
+
+    /// Send a batch with `sendmmsg`, one datagram per message, each with its own TOS (and, in
+    /// `Explicit` mode, its own OPT_ID). Stops at the first datagram the kernel rejects; the
+    /// caller decides whether to retry it or the rest (docs/design/probe.md §4.1).
+    pub fn send_batch(&self, msgs: &[OutMsg<'_>]) -> SendOutcome {
+        let first_id = self.next_id.load(Ordering::Relaxed);
         if msgs.is_empty() {
-            return Ok(0);
+            return SendOutcome {
+                sent: 0,
+                first_id,
+                failed: false,
+                error: None,
+                burned_id: None,
+                unburned_id: None,
+            };
         }
+        let mode = self.tx_id_mode();
+        let r = self.sendmmsg(msgs, (mode == TxIdMode::Explicit).then_some(first_id));
+        if mode == TxIdMode::Explicit && !self.mode_confirmed.swap(true, Ordering::Relaxed) {
+            // A kernel without SCM_TS_OPT_ID rejects the cmsg with EINVAL before taking an
+            // id (R-0015): fall back to predicted ids and resend.
+            if let Err(e) = &r
+                && e.raw_os_error() == Some(libc::EINVAL)
+            {
+                self.id_mode
+                    .store(TxIdMode::Predicted.code(), Ordering::Relaxed);
+                return self.send_batch(msgs);
+            }
+        }
+        let n = msgs.len();
+        let (sent, error) = match r {
+            Ok(k) => (k, None),
+            Err(e) => (0, Some(e)),
+        };
+        let failed = sent < n;
+        let acct = settle_ids(
+            mode,
+            first_id,
+            sent,
+            failed,
+            error.as_ref(),
+            self.restores_append_ids,
+            self.provisional_burn.load(Ordering::Relaxed),
+        );
+        self.provisional_burn
+            .store(acct.provisional, Ordering::Relaxed);
+        self.next_id.store(acct.next_id, Ordering::Relaxed);
+        SendOutcome {
+            sent,
+            first_id: acct.first_id,
+            failed,
+            error,
+            burned_id: acct.burned_id,
+            unburned_id: acct.unburned_id,
+        }
+    }
+
+    /// One `sendmmsg` call. `first_id`: set each datagram's OPT_ID explicitly from it.
+    fn sendmmsg(&self, msgs: &[OutMsg<'_>], first_id: Option<u32>) -> io::Result<usize> {
         let n = msgs.len();
         let mut addrs = Vec::with_capacity(n);
         let mut iovs = Vec::with_capacity(n);
@@ -365,15 +619,24 @@ impl UdpSock {
             h.msg_iovlen = 1;
             h.msg_control = ctrl[i].as_mut_ptr().cast();
             // SAFETY: CMSG_SPACE is a pure size computation.
+            let int_space = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as usize;
+            let id_space = if first_id.is_some() {
+                // SAFETY: as above.
+                unsafe { libc::CMSG_SPACE(size_of::<u32>() as u32) as usize }
+            } else {
+                0
+            };
             // `as _`: msg_controllen and cmsg_len are size_t on glibc, socklen_t on musl.
-            h.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
+            h.msg_controllen = (int_space + id_space) as _;
             let (level, ty) = if self.v6 {
                 (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
             } else {
                 (libc::IPPROTO_IP, libc::IP_TOS)
             };
-            // SAFETY: msg_control points at a CMSG_BUF-byte buffer, larger than
-            // CMSG_SPACE(int); CMSG_FIRSTHDR is non-null for a non-zero msg_controllen.
+            // SAFETY: msg_control points at a CMSG_BUF-byte buffer, larger than both cmsgs
+            // together (2 × CMSG_SPACE(4) = 32 bytes); CMSG_FIRSTHDR is non-null for a non-zero
+            // msg_controllen, and CMSG_NXTHDR stays within msg_controllen, which covers the
+            // second cmsg exactly.
             unsafe {
                 let c = libc::CMSG_FIRSTHDR(h);
                 (*c).cmsg_level = level;
@@ -383,6 +646,16 @@ impl UdpSock {
                     libc::CMSG_DATA(c).cast::<libc::c_int>(),
                     libc::c_int::from(msgs[i].tos),
                 );
+                if let Some(id0) = first_id {
+                    let c2 = libc::CMSG_NXTHDR(h, c);
+                    (*c2).cmsg_level = libc::SOL_SOCKET;
+                    (*c2).cmsg_type = self.opt_id_cmsg;
+                    (*c2).cmsg_len = libc::CMSG_LEN(size_of::<u32>() as u32) as _;
+                    std::ptr::write_unaligned(
+                        libc::CMSG_DATA(c2).cast::<u32>(),
+                        id0.wrapping_add(i as u32),
+                    );
+                }
             }
         }
         // SAFETY: every mmsghdr points at live buffers (addrs, iovs, ctrl, payloads) that outlive
@@ -390,13 +663,8 @@ impl UdpSock {
         let r =
             unsafe { libc::sendmmsg(self.fd.as_raw_fd(), hdrs.as_mut_ptr(), n as libc::c_uint, 0) };
         if r < 0 {
-            let e = io::Error::last_os_error();
-            if e.kind() == io::ErrorKind::WouldBlock {
-                return Ok(0);
-            }
-            return Err(e);
+            return Err(io::Error::last_os_error());
         }
-        self.next_id.fetch_add(r as u32, Ordering::Relaxed);
         Ok(r as usize)
     }
 
@@ -477,6 +745,7 @@ impl UdpSock {
                 len: hdrs[i].msg_len as usize,
                 src: sockaddr_to(&addrs[i]).unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0))),
                 rx_kernel: None,
+                rxq_drops: self.caps.rxq_ovfl.then_some(0),
                 rx_user,
                 tos: None,
                 ttl: None,
@@ -503,6 +772,12 @@ impl UdpSock {
                     m.rx_kernel = Some(ts_ns(&ts));
                 }
                 // R-0011: received IP_TOS is one byte; the others are ints.
+                // R-0015: present only when the count is non-zero (0 otherwise).
+                (libc::SOL_SOCKET, SO_RXQ_OVFL) => {
+                    if let Some(v) = read_int(data) {
+                        m.rxq_drops = Some(v as u32);
+                    }
+                }
                 (libc::IPPROTO_IP, libc::IP_TOS) => m.tos = data.first().copied(),
                 (libc::IPPROTO_IP, libc::IP_TTL) => m.ttl = read_int(data).map(|v| v as u8),
                 (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => m.tos = read_int(data).map(|v| v as u8),
@@ -681,7 +956,8 @@ mod tests {
                 tos: (34 << 2) | i,
             })
             .collect();
-        assert_eq!(a.send_batch(&msgs).unwrap(), 4);
+        let o = a.send_batch(&msgs);
+        assert_eq!((o.sent, o.failed, o.first_id), (4, false, 0));
         assert_eq!(a.next_tx_id(), 4);
         let mut bufs = vec![[0u8; MAX_DATAGRAM]; 8];
         let mut got = Vec::new();
@@ -707,7 +983,7 @@ mod tests {
                 break;
             }
             std::thread::sleep(std::time::Duration::from_millis(10));
-            a.send_batch(&msgs[..1]).unwrap();
+            assert_eq!(a.send_batch(&msgs[..1]).sent, 1);
             let mut more = Vec::new();
             b.poll(50).unwrap();
             b.recv_batch(&mut bufs, &mut more).unwrap();
@@ -733,5 +1009,266 @@ mod tests {
             })
             .collect();
         assert!(ids.contains(&0) && ids.contains(&3), "{errs:?}");
+    }
+
+    fn drain_stamp_ids(s: &UdpSock, want: usize) -> Vec<u32> {
+        let mut errs = Vec::new();
+        for _ in 0..50 {
+            s.poll(10).unwrap();
+            s.drain_errqueue(&mut errs).unwrap();
+            if errs.len() >= want {
+                break;
+            }
+        }
+        errs.iter()
+            .filter_map(|e| match e {
+                ErrEvent::TxStamp { id, .. } => Some(*id),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn failed_sends_burn_ids_and_stamps_stay_aligned() {
+        let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let ok = [1u8; 100];
+        let big = vec![2u8; 70_000]; // > 65535: EMSGSIZE
+        let m = |p: &'static [u8]| OutMsg {
+            dst,
+            payload: p,
+            tos: 0,
+        };
+        let big: &'static [u8] = Box::leak(big.into_boxed_slice());
+        let ok: &'static [u8] = Box::leak(Box::new(ok));
+        let batch = [m(ok), m(big), m(ok)];
+        // sendmmsg stops at the oversized datagram without reporting its errno.
+        let o = a.send_batch(&batch);
+        assert_eq!((o.sent, o.failed, o.first_id), (1, true, 0));
+        assert!(o.error.is_none());
+        // Retried alone, the failure and its errno become visible.
+        let o = a.send_batch(&batch[1..]);
+        assert_eq!(o.sent, 0);
+        assert_eq!(
+            o.error.as_ref().and_then(io::Error::raw_os_error),
+            Some(libc::EMSGSIZE)
+        );
+        let o = a.send_batch(&batch[2..]);
+        assert_eq!(o.sent, 1);
+        if a.tx_id_mode() != TxIdMode::Explicit {
+            return; // predicted ids on old kernels are checked by the merge (probe.md §4.1)
+        }
+        // Explicit ids: each failed attempt burned its own id; stamps carry the ids we set.
+        let ids = drain_stamp_ids(&a, 4);
+        let last = o.first_id;
+        assert!(
+            ids.contains(&0) && ids.contains(&last),
+            "{ids:?} last {last}"
+        );
+        assert!(ids.iter().all(|i| *i == 0 || *i == last), "{ids:?}");
+    }
+
+    #[test]
+    fn predicted_consumption_rules() {
+        let e = io::Error::from_raw_os_error;
+        for restores in [false, true] {
+            // A partial send's errno is unknown: assumed consumed.
+            assert!(predicted_consumes(None, restores));
+            for n in [
+                libc::ENETUNREACH,
+                libc::EINVAL,
+                libc::EAFNOSUPPORT,
+                libc::EACCES,
+                libc::EDESTADDRREQ,
+            ] {
+                assert!(!predicted_consumes(Some(&e(n)), restores), "{n} {restores}");
+            }
+            for n in [libc::ENOBUFS, libc::EPERM] {
+                assert!(predicted_consumes(Some(&e(n)), restores), "{n} {restores}");
+            }
+        }
+        // Append-stage errors consume an id before 6.13 only.
+        for n in [libc::EAGAIN, libc::EMSGSIZE, libc::ECONNREFUSED] {
+            assert!(predicted_consumes(Some(&e(n)), false), "{n}");
+            assert!(!predicted_consumes(Some(&e(n)), true), "{n}");
+        }
+    }
+
+    #[test]
+    fn partial_send_burn_is_undone_by_a_retry_that_consumes_nothing() {
+        use TxIdMode::{Explicit, Predicted};
+        let e = io::Error::from_raw_os_error;
+        let acct = |first_id, next_id, burned_id, unburned_id, provisional| IdAccount {
+            first_id,
+            next_id,
+            burned_id,
+            unburned_id,
+            provisional,
+        };
+        // 3 of 5 accepted, errno unknown: id 13 assumed burned, provisionally.
+        assert_eq!(
+            settle_ids(Predicted, 10, 3, true, None, false, false),
+            acct(10, 14, Some(13), None, true)
+        );
+        // The retry fails at once before the append stage: the burn is undone.
+        let enet = e(libc::ENETUNREACH);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&enet), false, true),
+            acct(13, 13, None, Some(13), false)
+        );
+        // The retry fails with an error that consumes an id: both burns stand.
+        let nobufs = e(libc::ENOBUFS);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&nobufs), false, true),
+            acct(14, 15, Some(14), None, false)
+        );
+        // The retry succeeds: the burn stands.
+        assert_eq!(
+            settle_ids(Predicted, 14, 1, false, None, false, true),
+            acct(14, 15, None, None, false)
+        );
+        // EAGAIN consumes nothing from 6.13 on, so it undoes the burn there only.
+        let eagain = e(libc::EAGAIN);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&eagain), true, true).unburned_id,
+            Some(13)
+        );
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&eagain), false, true),
+            acct(14, 15, Some(14), None, false)
+        );
+        // Explicit ids: every failed attempt burns its own id, nothing is provisional.
+        assert_eq!(
+            settle_ids(Explicit, 10, 3, true, None, true, false),
+            acct(10, 14, Some(13), None, false)
+        );
+    }
+
+    #[test]
+    fn forced_predicted_ids_match_the_kernel_after_partial_send_and_retry() {
+        let a = UdpSock::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            SockOpts {
+                force_predicted_ids: true,
+                ..SockOpts::default()
+            },
+        )
+        .unwrap();
+        if a.tx_id_mode() != TxIdMode::Predicted || !a.restores_append_ids {
+            // Below 6.13 the oversized datagram's EMSGSIZE (an early length check that
+            // consumes no id) cannot be told from an append-stage EMSGSIZE (which does); the
+            // rules are covered by `predicted_consumption_rules`.
+            return;
+        }
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let ok: &'static [u8] = Box::leak(Box::new([1u8; 100]));
+        let big: &'static [u8] = Box::leak(vec![2u8; 70_000].into_boxed_slice());
+        let m = |p: &'static [u8]| OutMsg {
+            dst,
+            payload: p,
+            tos: 0,
+        };
+        let batch = [m(ok), m(big), m(ok)];
+        let o = a.send_batch(&batch);
+        assert_eq!((o.sent, o.burned_id), (1, Some(1)));
+        // The retry reveals EMSGSIZE, which consumes no id on 6.13+: the burn is undone.
+        let o = a.send_batch(&batch[1..]);
+        assert_eq!(o.sent, 0);
+        assert_eq!((o.burned_id, o.unburned_id), (None, Some(1)));
+        let o = a.send_batch(&batch[2..]);
+        assert_eq!((o.sent, o.first_id), (1, 1));
+        let mut ids = drain_stamp_ids(&a, 4);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1], "kernel ids must match the predicted ones");
+    }
+
+    #[test]
+    fn explicit_ids_fall_back_to_predicted_on_einval() {
+        let mut a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        if !a.caps().kernel_tx {
+            return;
+        }
+        // An unknown SOL_SOCKET cmsg gets the EINVAL a kernel without SCM_TS_OPT_ID returns.
+        a.opt_id_cmsg = 0x7fff;
+        a.id_mode
+            .store(TxIdMode::Explicit.code(), Ordering::Relaxed);
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let p = [5u8; 100];
+        let msgs = [
+            OutMsg {
+                dst,
+                payload: &p,
+                tos: 0,
+            },
+            OutMsg {
+                dst,
+                payload: &p,
+                tos: 0,
+            },
+        ];
+        let o = a.send_batch(&msgs);
+        assert_eq!((o.sent, o.failed, o.first_id), (2, false, 0));
+        assert_eq!(a.tx_id_mode(), TxIdMode::Predicted);
+        let mut ids = drain_stamp_ids(&a, 4);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1]);
+    }
+
+    #[test]
+    fn socket_drops_are_reported_per_datagram() {
+        let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let b = UdpSock::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            SockOpts {
+                recv_buf: 1,
+                ..SockOpts::default()
+            },
+        )
+        .unwrap();
+        assert!(b.caps().rxq_ovfl);
+        let dst = b.local_addr().unwrap();
+        let payload = [3u8; 1000];
+        let msgs = vec![
+            OutMsg {
+                dst,
+                payload: &payload,
+                tos: 0,
+            };
+            32
+        ];
+        let mut sent = 0;
+        for _ in 0..8 {
+            sent += a.send_batch(&msgs).sent;
+        }
+        let mut bufs = vec![[0u8; MAX_DATAGRAM]; 32];
+        let mut got = Vec::new();
+        while b.recv_batch(&mut bufs, &mut got).unwrap() > 0 {}
+        assert!(
+            !got.is_empty() && got.len() < sent,
+            "{} of {sent}",
+            got.len()
+        );
+        // The count is read when a datagram is queued, so the next datagram queued after the
+        // burst reports every drop of the burst (loopback loses nothing else).
+        assert_eq!(a.send_batch(&msgs[..1]).sent, 1);
+        let mut late = Vec::new();
+        for _ in 0..50 {
+            b.poll(10).unwrap();
+            if b.recv_batch(&mut bufs, &mut late).unwrap() > 0 {
+                break;
+            }
+        }
+        assert_eq!(late.len(), 1);
+        assert_eq!(late[0].rxq_drops, Some((sent - got.len()) as u32));
+        let drops: Vec<u32> = got.iter().map(|m| m.rxq_drops.unwrap()).collect();
+        assert!(
+            drops.windows(2).all(|w| w[0] <= w[1]),
+            "cumulative: {drops:?}"
+        );
     }
 }

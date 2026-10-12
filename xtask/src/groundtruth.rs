@@ -27,6 +27,11 @@ pub struct Scenario {
     pub serve_args: &'static str,
     pub resp_addr: &'static str,
     pub probe_args: &'static str,
+    /// Shell commands in the initiator namespace (e.g. a qdisc on its egress).
+    pub setup_pa: String,
+    /// Environment for `serve` / `probe` (test hooks, session.sh SERVE_ENV / PROBE_ENV).
+    pub serve_env: &'static str,
+    pub probe_env: &'static str,
 }
 
 fn netem(spec: &str) -> String {
@@ -55,6 +60,9 @@ pub fn scenarios() -> Vec<Scenario> {
         serve_args: "",
         resp_addr: "10.0.2.2",
         probe_args: "",
+        setup_pa: String::new(),
+        serve_env: "",
+        probe_env: "",
     };
     let throttle443 = "tc qdisc del dev mb0 root; \
         tc qdisc add dev mb0 root handle 1: prio bands 3; \
@@ -96,6 +104,15 @@ pub fn scenarios() -> Vec<Scenario> {
         chain("mb0", 10, 20, 100),
         chain("ma0", 15, 10, 50)
     );
+    // 1.5 s buffers at 20 Mbit/s in both directions (bufferbloat): feedback crossing the
+    // saturated direction arrives late, which must pause, not kill, the session-long observers.
+    let bloat = format!(
+        "{}; {}",
+        chain("mb0", 10, 20, 2500),
+        chain("ma0", 10, 20, 2500)
+    );
+    // The initiator's own egress is the bottleneck: a 10-packet tbf returns ENOBUFS.
+    let local_qdisc = "tc qdisc add dev va root tbf rate 20mbit burst 3028 limit 15140";
     let rebind = "sleep 30; ip -n pa addr add 10.0.1.3/24 dev va; ip -n pa route replace default via 10.0.1.1 src 10.0.1.3; echo \"$(date +%s%N) rebind\"";
     vec![
         s(
@@ -242,8 +259,12 @@ pub fn scenarios() -> Vec<Scenario> {
             outage,
             "S14 safety",
         ),
+        // The hard cap must still be reached to test it. With byte allowances (probe.md §6)
+        // the smoke profile plans its saturations inside a 3 MB cap, so 1.1 uses 1 MB, about
+        // what a smoke session's background traffic alone sends. EXP-0002-r8 checked the 3 MB cap with 1.0;
+        // EXP-0002-r9 (#38) supersedes it for 1.1.
         Scenario {
-            serve_args: "--data-cap 3000000",
+            serve_args: "--data-cap 1000000",
             ..s(
                 "data-cap",
                 "smoke",
@@ -308,6 +329,70 @@ pub fn scenarios() -> Vec<Scenario> {
             "",
             "S6 size",
         ),
+        s(
+            "geo",
+            "standard",
+            &netem("delay 300ms rate 20mbit limit 2000"),
+            &netem("delay 300ms rate 20mbit limit 2000"),
+            "",
+            "",
+            "robustness S4 S7",
+        ),
+        s(
+            "bufferbloat",
+            "standard",
+            &netem("delay 1ms"),
+            &netem("delay 1ms"),
+            &bloat,
+            "",
+            "robustness S4 S7",
+        ),
+        s(
+            "fast",
+            "standard",
+            &netem("delay 5ms rate 300mbit limit 5000"),
+            &netem("delay 5ms rate 300mbit limit 5000"),
+            "",
+            "",
+            "safety budget",
+        ),
+        Scenario {
+            serve_env: "PATHTRACE_RECV_BUF=8192",
+            ..s(
+                "rcvbuf",
+                "smoke",
+                &netem("delay 10ms rate 100mbit limit 1000"),
+                &netem("delay 10ms rate 100mbit limit 1000"),
+                "",
+                "",
+                "host drops S5 S9",
+            )
+        },
+        Scenario {
+            setup_pa: local_qdisc.to_string(),
+            ..s(
+                "local-qdisc",
+                "smoke",
+                &netem("delay 10ms"),
+                &netem("delay 10ms"),
+                "",
+                "",
+                "host drops tx ids",
+            )
+        },
+        Scenario {
+            setup_pa: local_qdisc.to_string(),
+            probe_env: "PATHTRACE_TX_IDS=predicted",
+            ..s(
+                "local-qdisc-predicted",
+                "smoke",
+                &netem("delay 10ms"),
+                &netem("delay 10ms"),
+                "",
+                "",
+                "host drops tx ids",
+            )
+        },
         s(
             "reorder-dup",
             "smoke",
@@ -444,6 +529,9 @@ pub fn run(
         .env("SERVE_ARGS", sc.serve_args)
         .env("RESP_ADDR", sc.resp_addr)
         .env("PROBE_ARGS", sc.probe_args)
+        .env("SETUP_PA", &sc.setup_pa)
+        .env("SERVE_ENV", sc.serve_env)
+        .env("PROBE_ENV", sc.probe_env)
         .status()
         .context("running unshare")?;
     if !status.success() {
@@ -964,10 +1052,18 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 .and_then(|e| e.get("detail")?.get("bytes_sent")?.as_u64());
             chk(
                 &mut c,
-                "responder UDP bytes sent ≤ cap + one batch (3 MB + 100 kB)",
-                3_000_000,
+                "responder UDP bytes sent ≤ cap + one batch (1 MB + 100 kB)",
+                1_000_000,
                 format!("{sent:?}"),
-                sent.is_some_and(|b| b <= 3_100_000),
+                sent.is_some_and(|b| b <= 1_100_000),
+            );
+            let skipped = event_count(t, "phase_skipped", "a");
+            chk(
+                &mut c,
+                "responder saturation skipped for lack of budget (phase_skipped)",
+                ">= 1",
+                skipped,
+                skipped >= 1,
             );
             let cap = t.events.iter().any(|e| {
                 e.get("type").and_then(Value::as_str) == Some("budget_cap")
@@ -1140,9 +1236,255 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 size <= 10_000_000,
             );
         }
+        "geo" | "bufferbloat" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            // Trains (3, 4) and PMTU ladders (9, 10) may pause but must never be stopped.
+            let killed = t
+                .events
+                .iter()
+                .filter(|e| e.get("type").and_then(Value::as_str) == Some("flow_stopped"))
+                .filter(|e| {
+                    e.get("detail")
+                        .and_then(|d| d.get("flow"))
+                        .and_then(Value::as_u64)
+                        .is_some_and(|f| matches!(f, 3 | 4 | 9 | 10))
+                })
+                .count();
+            chk(
+                &mut c,
+                "train and PMTU flows never stopped by the dead-man",
+                0,
+                killed,
+                killed == 0,
+            );
+            let raw = pt_derive::raw::Raw::load(&t.file);
+            let tb = pt_derive::clock::TimeBase::from_raw(&raw);
+            // Start of P8 (reference flows), after every saturation phase.
+            let p8 = t
+                .events
+                .iter()
+                .find(|e| {
+                    e.get("type").and_then(Value::as_str) == Some("phase_start")
+                        && e.get("endpoint").and_then(Value::as_str) == Some("a")
+                        && e.get("detail")
+                            .and_then(|d| d.get("phase"))
+                            .and_then(Value::as_u64)
+                            == Some(8)
+                })
+                .and_then(|e| e.get("t")?.as_u64())
+                .and_then(|m| tb.mono("a", m as i64));
+            for (dir, flow) in [("a_to_b", 3), ("b_to_a", 4)] {
+                let (pk, _) = pt_derive::dir::packets(&raw, &tb, dir);
+                let late = p8.map(|t0| {
+                    pk.iter()
+                        .filter(|p| {
+                            p.flow == flow && p.rx.is_some() && p.tx.is_some_and(|x| x > t0)
+                        })
+                        .count()
+                });
+                chk(
+                    &mut c,
+                    &format!("light trains {dir} still delivered after the saturations"),
+                    "> 0",
+                    format!("{late:?}"),
+                    late.is_some_and(|n| n > 0),
+                );
+                let m = t.num(dir, "/mtu/path_mtu");
+                chk(
+                    &mut c,
+                    &format!("PMTU ladder {dir} completed (path MTU 1500)"),
+                    1500,
+                    fmt(m),
+                    m == Some(1500.0),
+                );
+            }
+        }
+        "fast" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            for ep in ["a", "b"] {
+                let cap = event_count(t, "budget_cap", ep);
+                chk(
+                    &mut c,
+                    &format!("hard data cap not reached by {ep} (allowances planned the budget)"),
+                    0,
+                    cap,
+                    cap == 0,
+                );
+                let sent = t
+                    .events
+                    .iter()
+                    .find(|e| {
+                        e.get("type").and_then(Value::as_str) == Some("session_end")
+                            && e.get("endpoint").and_then(Value::as_str) == Some(ep)
+                    })
+                    .and_then(|e| e.get("detail")?.get("bytes_sent")?.as_u64());
+                chk(
+                    &mut c,
+                    &format!("{ep} UDP bytes sent within the standard cap (200 MB)"),
+                    200_000_000,
+                    format!("{sent:?}"),
+                    sent.is_some_and(|b| b <= 200_000_000),
+                );
+            }
+            let phases: Vec<u64> = t
+                .events
+                .iter()
+                .filter(|e| {
+                    e.get("type").and_then(Value::as_str) == Some("phase_start")
+                        && e.get("endpoint").and_then(Value::as_str) == Some("a")
+                })
+                .filter_map(|e| e.get("detail")?.get("phase")?.as_u64())
+                .collect();
+            let all = [4, 5, 6, 7, 8].iter().all(|p| phases.contains(p));
+            chk(
+                &mut c,
+                "every phase P4-P8 ran",
+                "4 5 6 7 8",
+                format!("{phases:?}"),
+                all,
+            );
+            let allow = t
+                .events
+                .iter()
+                .filter(|e| {
+                    e.get("type").and_then(Value::as_str) == Some("flow_stopped")
+                        && e.get("detail")
+                            .and_then(|d| d.get("reason"))
+                            .and_then(Value::as_str)
+                            == Some("allowance")
+                })
+                .count();
+            chk(
+                &mut c,
+                "saturations ended by their allowances (flow_stopped)",
+                ">= 2",
+                allow,
+                allow >= 2,
+            );
+        }
+        "rcvbuf" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            let hd = t.num("a_to_b", "/host_drops/socket_drops");
+            chk(
+                &mut c,
+                "responder socket drops recorded (rxq_drops)",
+                "> 0",
+                fmt(hd),
+                hd.is_some_and(|v| v > 0.0),
+            );
+            let hp = t.num("a_to_b", "/host_drops/packets");
+            chk(
+                &mut c,
+                "lost packets attributed to the receiving host",
+                "> 0",
+                fmt(hp),
+                hp.is_some_and(|v| v > 0.0),
+            );
+            let errs = counter_increase(t, "netstack", "b", "udp_rcvbuf_errors");
+            chk(
+                &mut c,
+                "responder UDP RcvbufErrors increased (netstack)",
+                "> 0",
+                format!("{errs:?}"),
+                errs.is_some_and(|v| v > 0),
+            );
+            let d = t.s("a_to_b", "/queue/discipline");
+            chk(
+                &mut c,
+                "host drops not mistaken for a policer",
+                "not policer",
+                &d,
+                d != "policer",
+            );
+        }
+        "local-qdisc" | "local-qdisc-predicted" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            let mode = if sc.name == "local-qdisc" {
+                "explicit"
+            } else {
+                "predicted"
+            };
+            let got = t
+                .meta
+                .pointer("/endpoints/a/sockets/0/tx_ids")
+                .and_then(Value::as_str)
+                .unwrap_or("?")
+                .to_string();
+            chk(
+                &mut c,
+                "initiator transmit id mode",
+                mode,
+                &got,
+                got == mode,
+            );
+            let enobufs = t
+                .events
+                .iter()
+                .filter(|e| {
+                    matches!(
+                        e.get("type").and_then(Value::as_str),
+                        Some("send_error" | "send_partial")
+                    ) && e.get("endpoint").and_then(Value::as_str) == Some("a")
+                })
+                .count();
+            chk(
+                &mut c,
+                "initiator send failures recorded (local qdisc full)",
+                "> 0",
+                enobufs,
+                enobufs > 0,
+            );
+            let q = t.num("a_to_b", "/local_qdisc_drops/drops");
+            chk(
+                &mut c,
+                "local qdisc drops a_to_b recorded",
+                "> 0",
+                fmt(q),
+                q.is_some_and(|v| v > 0.0),
+            );
+            let bad = t
+                .meta
+                .pointer("/merge_checks/a_to_b/txts_implausible")
+                .and_then(Value::as_u64);
+            let joined = t
+                .meta
+                .pointer("/merge_checks/a_to_b/txts_joined")
+                .and_then(Value::as_u64);
+            chk(
+                &mut c,
+                "TX stamps aligned after send failures (implausible joins)",
+                0,
+                format!("{bad:?} of {joined:?}"),
+                bad == Some(0) && joined.is_some_and(|j| j > 1000),
+            );
+        }
         _ => {}
     }
     c
+}
+
+/// Events of `kind` recorded by endpoint `ep`.
+fn event_count(t: &Trace, kind: &str, ep: &str) -> usize {
+    t.events
+        .iter()
+        .filter(|e| {
+            e.get("type").and_then(Value::as_str) == Some(kind)
+                && e.get("endpoint").and_then(Value::as_str) == Some(ep)
+        })
+        .count()
+}
+
+/// Last minus first value of a cumulative counter column of a raw table of endpoint `ep`.
+fn counter_increase(t: &Trace, table: &str, ep: &str, col: &str) -> Option<i64> {
+    let raw = pt_derive::raw::Raw::load(&t.file);
+    let v: Vec<i64> = raw
+        .table(&format!("{table}[{ep}]"))?
+        .col(col)
+        .iter()
+        .flatten()
+        .copied()
+        .collect();
+    Some(v.last()? - v.first()?)
 }
 
 /// NRMSE of 100 ms capacity bins vs the scripted rate schedule (excluding 500 ms after changes).

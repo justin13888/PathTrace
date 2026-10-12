@@ -59,11 +59,13 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "delay.light-window-min/1",
         "jitter.light-residual/1",
         "delay.size-slope/1",
-        "capacity.saturated-arrivals/1",
+        "capacity.saturated-arrivals/2",
         "capacity.train-dispersion/1",
-        "queue.loss-onset/1",
-        "policer.lossy-flat/1",
-        "loss.gilbert-runs/1",
+        "queue.loss-onset/2",
+        "policer.lossy-flat/2",
+        "hostdrop.rxq-gap/1",
+        "qdisc.drop-count/1",
+        "loss.gilbert-runs/2",
         "reorder.late-arrivals/1",
         "duplicate.count/1",
         "mtu.ladder/1",
@@ -217,7 +219,8 @@ pub fn apply(f: &PtfFile, tool: &Tool) -> PtfFile {
     sections.extend(rest);
     let mut out = PtfFile {
         major: f.major,
-        minor: f.minor,
+        // Derived sections written by this tool may use this minor's additions.
+        minor: f.minor.max(pt_format::container::MINOR),
         sections,
     };
     pt_format::canonicalize(&mut out);

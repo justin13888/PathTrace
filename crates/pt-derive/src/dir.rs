@@ -23,6 +23,12 @@ pub struct Pkt {
     pub tx: Option<i64>,
     pub rx: Option<i64>,
     pub kind: String,
+    /// Receiving socket and its cumulative drop count at arrival (PTF 1.1 `rxq_drops`).
+    pub rx_sock: Option<i64>,
+    pub rxq_drops: Option<i64>,
+    /// Lost inside the receiving host, not on the path (`hostdrop.rxq-gap/1`): excluded from
+    /// every loss statistic.
+    pub host_drop: bool,
 }
 
 impl Pkt {
@@ -70,6 +76,16 @@ fn field(status: &str, method: &str, confidence: f64) -> Value {
 
 /// Build the packet list of one direction.
 pub fn packets(raw: &Raw, tb: &TimeBase, dir: &str) -> (Vec<Pkt>, BTreeMap<String, u64>) {
+    let (pkts, ts_src, _) = packets_marked(raw, tb, dir);
+    (pkts, ts_src)
+}
+
+/// [`packets`], with how ambiguous the host-drop marking was.
+fn packets_marked(
+    raw: &Raw,
+    tb: &TimeBase,
+    dir: &str,
+) -> (Vec<Pkt>, BTreeMap<String, u64>, HostDropMarks) {
     let (snd, rcv) = if dir == "a_to_b" {
         ("a", "b")
     } else {
@@ -78,7 +94,7 @@ pub fn packets(raw: &Raw, tb: &TimeBase, dir: &str) -> (Vec<Pkt>, BTreeMap<Strin
     let mut out = Vec::new();
     let mut ts_src: BTreeMap<String, u64> = BTreeMap::new();
     let Some(t) = raw.table(&format!("pkt[{dir}]")) else {
-        return (out, ts_src);
+        return (out, ts_src, HostDropMarks::default());
     };
     for i in 0..t.n {
         let flow = t.get("flow", i).unwrap_or(-1);
@@ -112,9 +128,110 @@ pub fn packets(raw: &Raw, tb: &TimeBase, dir: &str) -> (Vec<Pkt>, BTreeMap<Strin
             tx,
             rx,
             kind: raw.flow_kind(flow).to_string(),
+            rx_sock: t.get("rx_sock", i),
+            rxq_drops: t.get("rxq_drops", i),
+            host_drop: false,
         });
     }
-    (out, ts_src)
+    let marks = mark_host_drops(&mut out);
+    (out, ts_src, marks)
+}
+
+/// Gaps whose host-drop candidates outnumber the socket's drops in them, and those excess
+/// candidates, which stay losses (`hostdrop.rxq-gap/1`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostDropMarks {
+    pub ambiguous_gaps: usize,
+    pub ambiguous_losses: usize,
+}
+
+/// A gap between two consecutive arrivals on one receiving socket across which the socket
+/// dropped datagrams (`rxq_drops` increased; docs/design/derivation.md, Host drops).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HostDropGap {
+    pub sock: i64,
+    /// Transmit times (trace ns) of the two arrivals bounding the gap.
+    pub tx_lo: i64,
+    pub tx_hi: i64,
+    /// Datagrams the socket dropped in the gap.
+    pub drops: i64,
+}
+
+/// Gaps with socket drops, per receiving socket, in arrival order (`hostdrop.rxq-gap/1`).
+pub fn host_drop_gaps(pkts: &[Pkt]) -> Vec<HostDropGap> {
+    let mut by_sock: BTreeMap<i64, Vec<(i64, i64, i64)>> = BTreeMap::new();
+    for p in pkts {
+        if let (Some(s), Some(rx), Some(tx), Some(d)) = (p.rx_sock, p.rx, p.tx, p.rxq_drops) {
+            by_sock.entry(s).or_default().push((rx, tx, d));
+        }
+    }
+    let mut gaps = Vec::new();
+    for (sock, mut v) in by_sock {
+        v.sort_unstable();
+        for w in v.windows(2) {
+            let ((_, t0, d0), (_, t1, d1)) = (w[0], w[1]);
+            if d1 > d0 {
+                gaps.push(HostDropGap {
+                    sock,
+                    tx_lo: t0.min(t1),
+                    tx_hi: t0.max(t1),
+                    drops: d1 - d0,
+                });
+            }
+        }
+    }
+    gaps
+}
+
+/// Mark lost packets that fall in a host-drop gap of the socket their flow arrives on, at
+/// most as many per gap as the socket dropped in it (earliest transmit time first).
+fn mark_host_drops(pkts: &mut [Pkt]) -> HostDropMarks {
+    let mut marks = HostDropMarks::default();
+    let gaps = host_drop_gaps(pkts);
+    if gaps.is_empty() {
+        return marks;
+    }
+    // Receiving socket of each flow: the one most of its arrivals used.
+    let mut votes: BTreeMap<(i64, i64), usize> = BTreeMap::new();
+    for p in pkts.iter() {
+        if let Some(s) = p.rx_sock {
+            *votes.entry((p.flow, s)).or_default() += 1;
+        }
+    }
+    let mut flow_sock: BTreeMap<i64, (i64, usize)> = BTreeMap::new();
+    for ((f, s), n) in votes {
+        let e = flow_sock.entry(f).or_insert((s, n));
+        if n > e.1 {
+            *e = (s, n);
+        }
+    }
+    // Lost packets with their transmit time and receiving socket, in transmit order. A flow
+    // with no arrival at all is assumed to use the main socket (index 0).
+    let mut lost: Vec<(i64, i64, usize)> = pkts
+        .iter()
+        .enumerate()
+        .filter(|(_, p)| p.rx.is_none())
+        .filter_map(|(i, p)| Some((p.tx?, flow_sock.get(&p.flow).map_or(0, |x| x.0), i)))
+        .collect();
+    lost.sort_unstable();
+    for g in &gaps {
+        let lo = lost.partition_point(|x| x.0 < g.tx_lo);
+        let hi = lost.partition_point(|x| x.0 <= g.tx_hi);
+        let cands: Vec<usize> = lost[lo..hi.max(lo)]
+            .iter()
+            .filter(|(_, s, i)| *s == g.sock && !pkts[*i].host_drop)
+            .map(|x| x.2)
+            .collect();
+        let n = usize::try_from(g.drops).unwrap_or(0).min(cands.len());
+        for &i in &cands[..n] {
+            pkts[i].host_drop = true;
+        }
+        if cands.len() > n {
+            marks.ambiguous_gaps += 1;
+            marks.ambiguous_losses += cands.len() - n;
+        }
+    }
+    marks
 }
 
 /// Saturating flow kinds.
@@ -201,7 +318,7 @@ pub fn quiet_intervals(raw: &Raw, tb: &TimeBase) -> Vec<(i64, i64)> {
 }
 
 pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i64)]) -> DirOut {
-    let (pkts, ts_src) = packets(raw, tb, dir);
+    let (pkts, ts_src, marks) = packets_marked(raw, tb, dir);
     let mut out = DirOut::default();
     // Which transmit timestamp source each packet's send time came from (SND > SCHED > user).
     let mut f = Value::map().with(
@@ -215,6 +332,41 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                     .collect(),
             ),
         ),
+    );
+    // Host drops at the receiver (excluded from every loss statistic) and drops in the
+    // sender's own egress qdisc (docs/design/derivation.md, Host drops).
+    let rxq_known = pkts.iter().any(|p| p.rxq_drops.is_some());
+    let gaps = host_drop_gaps(&pkts);
+    f = f.with(
+        "host_drops",
+        if rxq_known {
+            field("known", "hostdrop.rxq-gap/1", 0.9)
+                .with("packets", pkts.iter().filter(|p| p.host_drop).count())
+                .with("gaps", gaps.len())
+                .with("socket_drops", gaps.iter().map(|g| g.drops).sum::<i64>())
+                .with("ambiguous_gaps", marks.ambiguous_gaps)
+                .with("ambiguous_losses", marks.ambiguous_losses)
+                .with("source", Value::Array(vec![Value::from("pkt")]))
+        } else {
+            field("unknown", "hostdrop.rxq-gap/1", 0.0)
+                .with("reason", "no rxq_drops in this trace (PTF 1.0)")
+        },
+    );
+    let sender = if dir == "a_to_b" { "a" } else { "b" };
+    f = f.with(
+        "local_qdisc_drops",
+        match raw.table(&format!("qdisc[{sender}]")) {
+            Some(q) => {
+                let d: Vec<i64> = q.col("drops").iter().flatten().copied().collect();
+                match (d.first(), d.last()) {
+                    (Some(a), Some(b)) => field("known", "qdisc.drop-count/1", 1.0)
+                        .with("drops", b - a)
+                        .with("source", Value::Array(vec![Value::from("qdisc")])),
+                    _ => field("unknown", "qdisc.drop-count/1", 0.0),
+                }
+            }
+            None => field("unknown", "qdisc.drop-count/1", 0.0),
+        },
     );
     let loaded = loaded_intervals(&pkts);
     let quiet_phases = quiet_intervals(raw, tb);
@@ -408,7 +560,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
         for ps in by_flow.values_mut() {
             ps.sort_by_key(|p| p.seq);
             let mut pending = false;
-            for p in ps.iter() {
+            for p in ps.iter().filter(|p| !p.host_drop) {
                 if p.rx.is_none() {
                     pending = true;
                 } else if pending {
@@ -486,12 +638,12 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     f = f.with(
         "capacity",
         if opps.is_empty() {
-            field("unknown", "capacity.saturated-arrivals/1", 0.0).with(
+            field("unknown", "capacity.saturated-arrivals/2", 0.0).with(
                 "reason",
                 "no saturated windows (no saturation phase, or queue never built)",
             )
         } else {
-            field("known", "capacity.saturated-arrivals/1", 0.85)
+            field("known", "capacity.saturated-arrivals/2", 0.85)
                 .with("representation", "opportunities")
                 .with("quantum_bytes", "per-row")
                 .with("opportunities", format!("capacity_opps[{dir}]"))
@@ -652,7 +804,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             .count();
         let lost: Vec<i64> = ps
             .iter()
-            .filter(|p| p.rx.is_none())
+            .filter(|p| p.rx.is_none() && !p.host_drop)
             .filter_map(|p| p.tx)
             .collect();
         losses_total += lost.len();
@@ -722,7 +874,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 } else {
                     "estimated"
                 },
-                "queue.loss-onset/1",
+                "queue.loss-onset/2",
                 if losses_total > 0 { 0.8 } else { 0.4 },
             )
             .with("depth_time_ns", d)
@@ -739,18 +891,18 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 },
             )
             .with("source", src(&["pkt"])),
-            _ => field("unknown", "queue.loss-onset/1", 0.0).with("discipline", "unknown"),
+            _ => field("unknown", "queue.loss-onset/2", 0.0).with("discipline", "unknown"),
         },
     );
     // --- policer ---
     f = f.with(
         "policer",
         if discipline == "policer" {
-            field("estimated", "policer.lossy-flat/1", 0.6)
+            field("estimated", "policer.lossy-flat/2", 0.6)
                 .with("rate_bps", rate_med)
                 .with("burst_bytes", Value::Null)
         } else {
-            field("unknown", "policer.lossy-flat/1", 0.0).with("detected", false)
+            field("unknown", "policer.lossy-flat/2", 0.0).with("detected", false)
         },
     );
 
@@ -760,7 +912,9 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     let mut seqd: Vec<(&Pkt, bool)> = pkts
         .iter()
         .filter(|p| {
-            matches!(p.kind.as_str(), "light" | "train" | "control") && p.tx.is_some_and(quiet)
+            matches!(p.kind.as_str(), "light" | "train" | "control")
+                && p.tx.is_some_and(quiet)
+                && !p.host_drop
         })
         .map(|p| (p, p.rx.is_some()))
         .collect();
@@ -809,7 +963,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             "loss",
             field(
                 "known",
-                "loss.gilbert-runs/1",
+                "loss.gilbert-runs/2",
                 (seqd.len() as f64 / 1000.0).min(0.9),
             )
             .with("rate", rate)
@@ -849,7 +1003,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     } else {
         f = f.with(
             "loss",
-            field("unknown", "loss.gilbert-runs/1", 0.0)
+            field("unknown", "loss.gilbert-runs/2", 0.0)
                 .with("reason", "too few quiet light-flow packets"),
         );
     }
@@ -1183,6 +1337,83 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pk(flow: i64, seq: i64, tx: i64, rx: Option<i64>, drops: Option<i64>) -> Pkt {
+        Pkt {
+            flow,
+            seq,
+            size: 1500,
+            phase: 4,
+            train: 0,
+            train_idx: 0,
+            tos_tx: 0,
+            tos_rx: None,
+            tx: Some(tx),
+            rx,
+            kind: "heavy".into(),
+            rx_sock: rx.map(|_| 0),
+            rxq_drops: rx.and(drops),
+            host_drop: false,
+        }
+    }
+
+    #[test]
+    fn losses_inside_a_socket_drop_gap_are_host_drops() {
+        // Arrivals at tx 0, 10, 40, 50 with drop counts 0, 0, 2, 2: the socket dropped two
+        // datagrams between tx 10 and 40. Packets lost at tx 20 and 30 are host drops; the
+        // one lost at 60 (no later count increase) is path loss.
+        let mut v = vec![
+            pk(7, 0, 0, Some(100), Some(0)),
+            pk(7, 1, 10, Some(110), Some(0)),
+            pk(7, 2, 20, None, None),
+            pk(7, 3, 30, None, None),
+            pk(7, 4, 40, Some(140), Some(2)),
+            pk(7, 5, 50, Some(150), Some(2)),
+            pk(7, 6, 60, None, None),
+        ];
+        let gaps = host_drop_gaps(&v);
+        assert_eq!(
+            gaps,
+            vec![HostDropGap {
+                sock: 0,
+                tx_lo: 10,
+                tx_hi: 40,
+                drops: 2
+            }]
+        );
+        assert_eq!(mark_host_drops(&mut v), HostDropMarks::default());
+        let marked: Vec<i64> = v.iter().filter(|p| p.host_drop).map(|p| p.seq).collect();
+        assert_eq!(marked, vec![2, 3]);
+        // A gap with more losses than socket drops marks only as many as were dropped; the
+        // rest stay losses and the gap is ambiguous.
+        let mut tail = vec![
+            pk(7, 0, 0, Some(100), Some(0)),
+            pk(7, 1, 10, None, None),
+            pk(7, 2, 20, None, None),
+            pk(7, 3, 30, None, None),
+            pk(7, 4, 40, Some(140), Some(1)),
+        ];
+        assert_eq!(
+            mark_host_drops(&mut tail),
+            HostDropMarks {
+                ambiguous_gaps: 1,
+                ambiguous_losses: 2
+            }
+        );
+        let marked: Vec<i64> = tail.iter().filter(|p| p.host_drop).map(|p| p.seq).collect();
+        assert_eq!(marked, vec![1]);
+        // Without rxq_drops (PTF 1.0) nothing is a host drop.
+        let mut old: Vec<Pkt> = v
+            .iter()
+            .map(|p| Pkt {
+                rxq_drops: None,
+                host_drop: false,
+                ..p.clone()
+            })
+            .collect();
+        mark_host_drops(&mut old);
+        assert!(old.iter().all(|p| !p.host_drop));
+    }
 
     #[test]
     fn wilson_bounds() {

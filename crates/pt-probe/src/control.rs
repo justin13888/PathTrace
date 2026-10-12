@@ -53,6 +53,9 @@ struct Rel {
     srtt_ns: u64,
 }
 
+/// Responder: the handshake message that opened the session, our reply, and resends left.
+type Replay = (Vec<u8>, Vec<u8>, u32);
+
 pub struct Control {
     pub transport: Arc<Transport>,
     wire: Wire,
@@ -61,6 +64,7 @@ pub struct Control {
     acked: Condvar,
     incoming: Mutex<Receiver<Envelope>>,
     thread: Mutex<Option<JoinHandle<()>>>,
+    replay: Mutex<Option<Replay>>,
 }
 
 impl std::fmt::Debug for Control {
@@ -93,6 +97,7 @@ impl Control {
             acked: Condvar::new(),
             incoming: Mutex::new(in_rx),
             thread: Mutex::new(None),
+            replay: Mutex::new(None),
         });
         let c2 = ctl.clone();
         let h = std::thread::Builder::new()
@@ -103,13 +108,20 @@ impl Control {
         let c3 = ctl.clone();
         let _ = shared
             .send_ctrl
-            .set(crate::io::CtrlSender(Box::new(move |e| c3.send(&e))));
+            .set(crate::io::CtrlSender(Box::new(move |e| {
+                c3.send(&e);
+            })));
         ctl
     }
 
-    fn emit(&self, env: &Envelope) {
+    /// Seal and send one envelope; returns the Noise nonce of the sealed datagram.
+    fn emit(&self, env: &Envelope) -> Option<u64> {
         let Ok(bytes) = self.transport.seal(env) else {
-            return;
+            return None;
+        };
+        let nonce = match Frame::decode(&bytes) {
+            Some(Frame::Data { nonce, .. }) => Some(nonce),
+            _ => None,
         };
         match &self.wire {
             Wire::Udp { cmd, sock } => {
@@ -125,13 +137,9 @@ impl Control {
                         env.kind,
                         bytes.len()
                     );
-                    return;
+                    return None;
                 }
                 if let Some(dst) = *self.shared.ctrl_dst.read().expect("lock") {
-                    let nonce = match Frame::decode(&bytes) {
-                        Some(Frame::Data { nonce, .. }) => Some(nonce),
-                        _ => None,
-                    };
                     let flow = if self.shared.role == Role::A {
                         crate::io::CONTROL_FLOW_A
                     } else {
@@ -154,14 +162,15 @@ impl Control {
                 let _ = s.write_all(&buf);
             }
         }
+        nonce
     }
 
-    /// Send an unreliable message.
-    pub fn send(&self, env: &Envelope) {
+    /// Send an unreliable message; returns its datagram's Noise nonce.
+    pub fn send(&self, env: &Envelope) -> Option<u64> {
         let mut e = env.clone();
         e.seq = 0;
         e.ack = self.rel.lock().expect("lock").delivered;
-        self.emit(&e);
+        self.emit(&e)
     }
 
     /// Send a reliable message and wait for its acknowledgement.
@@ -221,6 +230,40 @@ impl Control {
         None
     }
 
+    /// Responder: resend `reply` (at most 3 times) when the initiator repeats the handshake
+    /// message `init_noise`, because our reply to it was lost (docs/design/probe.md §3.1).
+    pub fn set_handshake_replay(&self, init_noise: Vec<u8>, reply: Vec<u8>) {
+        *self.replay.lock().expect("lock") = Some((init_noise, reply, 3));
+    }
+
+    fn replay_handshake(&self, noise: &[u8], src: std::net::SocketAddr) -> bool {
+        let mut r = self.replay.lock().expect("lock");
+        let Some((init, reply, left)) = r.as_mut() else {
+            return false;
+        };
+        if init.as_slice() != noise || *left == 0 {
+            return false;
+        }
+        // Only a UDP session resends; on a TCP wire (after the TCP fallback) a late UDP Init
+        // is ignored and is not a resend.
+        let Wire::Udp { cmd, sock } = &self.wire else {
+            return false;
+        };
+        let queued = cmd
+            .send(PacerCmd::Raw {
+                sock: *sock,
+                dst: src,
+                bytes: reply.clone(),
+                at: 0,
+                log: None,
+            })
+            .is_ok();
+        if queued {
+            *left -= 1;
+        }
+        queued
+    }
+
     pub fn srtt(&self) -> Duration {
         Duration::from_nanos(self.rel.lock().expect("lock").srtt_ns)
     }
@@ -234,6 +277,9 @@ impl Control {
     ) {
         let mut last_clock = 0u64;
         let mut clock_burst = 5u32;
+        // Recent clock requests: t1 → Noise nonce of the request datagram.
+        let mut req_nonces: std::collections::VecDeque<(u64, Option<u64>)> =
+            std::collections::VecDeque::new();
         while !self.shared.stop.load(Ordering::Relaxed) {
             // Initiator drives clock exchanges: 5 at start, then 1 per second.
             if self.shared.role == Role::A {
@@ -246,10 +292,12 @@ impl Control {
                 if now - last_clock >= interval {
                     last_clock = now;
                     clock_burst = clock_burst.saturating_sub(1);
-                    self.send(&Envelope::new(
-                        "clock_req",
-                        Value::map().with("t1", mono_raw()),
-                    ));
+                    let t1 = mono_raw();
+                    let n = self.send(&Envelope::new("clock_req", Value::map().with("t1", t1)));
+                    req_nonces.push_back((t1, n));
+                    if req_nonces.len() > 32 {
+                        req_nonces.pop_front();
+                    }
                 }
             }
             let msg = match frames.recv_timeout(Duration::from_millis(50)) {
@@ -257,6 +305,12 @@ impl Control {
                 Err(RecvTimeoutError::Timeout) => continue,
                 Err(RecvTimeoutError::Disconnected) => return,
             };
+            if let Frame::Init { noise } = &msg.frame {
+                if self.replay_handshake(noise, msg.src) {
+                    rec.event("handshake_resent", Value::map());
+                }
+                continue;
+            }
             let Some(env) = self.transport.open(&msg.frame) else {
                 continue;
             };
@@ -291,6 +345,9 @@ impl Control {
                 "ack" => {}
                 "fb" => {
                     self.shared.last_feedback.store(msg.mono, Ordering::Relaxed);
+                    if let Some(sent) = env.body.get("sent").and_then(Value::as_u64) {
+                        self.shared.peer_bytes_sent.store(sent, Ordering::Relaxed);
+                    }
                     fb(&env.body);
                 }
                 "clock_req" => {
@@ -306,13 +363,24 @@ impl Control {
                 }
                 "clock_resp" => {
                     let b = &env.body;
+                    let t1 = b.u64_or("t1", 0);
+                    let req = req_nonces
+                        .iter()
+                        .find(|(t, _)| *t == t1)
+                        .and_then(|(_, n)| *n);
+                    let resp = match &msg.frame {
+                        Frame::Data { nonce, .. } => Some(*nonce),
+                        _ => None,
+                    };
                     rec.row(
                         "exchange",
                         vec![
-                            Some(b.u64_or("t1", 0) as i64),
+                            Some(t1 as i64),
                             Some(b.u64_or("t2", 0) as i64),
                             Some(b.u64_or("t3", 0) as i64),
                             Some(msg.mono as i64),
+                            req.map(|n| n as i64),
+                            resp.map(|n| n as i64),
                         ],
                     );
                 }

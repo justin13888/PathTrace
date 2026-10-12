@@ -1,11 +1,12 @@
 //! Linux system interface for PathTrace. The only workspace crate allowed `unsafe`; every
 //! unsafe block documents why it is sound.
 //!
-//! Facts relied upon are verified in docs/research/R-0010 … R-0013.
+//! Facts relied upon are verified in docs/research/R-0010 … R-0015.
 
 pub mod clock;
 pub mod netif;
 pub mod netlink;
+pub mod signal;
 pub mod tcp;
 pub mod udp;
 

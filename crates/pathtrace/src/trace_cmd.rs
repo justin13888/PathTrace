@@ -144,6 +144,23 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                         .map_or(0, <[Value]>::len)
                 })
                 .sum::<usize>();
+            // Host-side losses from the derived layer, per direction (derivation.md, Host drops).
+            let path = f
+                .sections
+                .iter()
+                .find(|s| &s.kind == b"PATH")
+                .and_then(|s| s.get("directions"));
+            let host = |field: &str| {
+                path.map(|d| {
+                    ["a_to_b", "b_to_a"]
+                        .iter()
+                        .filter_map(|dir| {
+                            let v = d.get(dir)?.get(field)?;
+                            Some((dir.to_string(), pt_format::jsonl::cbor_to_json(v)))
+                        })
+                        .collect::<serde_json::Map<_, _>>()
+                })
+            };
             let summary = serde_json::json!({
                 "file": file.display().to_string(),
                 "ptf_version": format!("{}.{}", f.major, f.minor),
@@ -152,6 +169,9 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 "profile": meta.get("profile").or(meta.get("session").and_then(|s| s.get("profile"))).and_then(Value::as_str),
                 "network_class": meta.get("network").and_then(|n| n.get("class")).and_then(Value::as_str),
                 "complete": meta.get("complete").and_then(Value::as_bool),
+                "merge_checks": meta.get("merge_checks").map(pt_format::jsonl::cbor_to_json),
+                "host_drops": host("host_drops"),
+                "local_qdisc_drops": host("local_qdisc_drops"),
                 "redaction": meta.get("redaction").and_then(Value::as_str),
                 "tool_commit": meta.get("tool").and_then(|t| t.get("git_commit")).and_then(Value::as_str),
                 "sections": kinds,
