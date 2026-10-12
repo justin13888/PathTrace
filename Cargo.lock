@@ -1018,7 +1018,7 @@ checksum = "c08d65885ee38876c4f86fa503fb49d7b507c2b62552df7c70b2fce627e06381"
 
 [[package]]
 name = "pathtrace"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "clap",
  "pt-derive",
@@ -1119,7 +1119,7 @@ dependencies = [
 
 [[package]]
 name = "pt-bench"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "arrow-array",
@@ -1133,14 +1133,14 @@ dependencies = [
 
 [[package]]
 name = "pt-derive"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "pt-format",
 ]
 
 [[package]]
 name = "pt-format"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "crc32c",
@@ -1151,7 +1151,7 @@ dependencies = [
 
 [[package]]
 name = "pt-probe"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "proptest",
@@ -1166,14 +1166,14 @@ dependencies = [
 
 [[package]]
 name = "pt-sys"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "pt-wire"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "blake3",
  "proptest",
@@ -1918,7 +1918,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "1.0.1"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "blake3",
