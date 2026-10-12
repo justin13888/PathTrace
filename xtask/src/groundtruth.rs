@@ -345,7 +345,7 @@ pub fn scenarios() -> Vec<Scenario> {
             &netem("delay 300ms rate 100mbit limit 10000"),
             "",
             "",
-            "S4",
+            "S6",
         ),
         s(
             "bufferbloat",
