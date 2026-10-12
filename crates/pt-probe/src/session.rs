@@ -278,11 +278,13 @@ impl Ctx {
         }
     }
 
-    /// Whether a stop signal arrived; records `interrupted` the first time.
+    /// Whether a stop signal arrived here, or the responder announced (`abort`) that one
+    /// arrived there; records `interrupted` the first time (docs/design/probe.md §8).
     fn interrupted(&mut self) -> bool {
-        if !self.interrupted
-            && let Some(sig) = pt_sys::signal::stop_requested()
-        {
+        if self.interrupted {
+            return true;
+        }
+        if let Some(sig) = pt_sys::signal::stop_requested() {
             self.interrupted = true;
             let name = pt_sys::signal::name(sig);
             self.rec
@@ -293,8 +295,28 @@ impl Ctx {
             self.say(&format!(
                 "{name}: ending the session (send it again to quit at once)"
             ));
+            return true;
         }
-        self.interrupted
+        // The initiator reads no other session-level message, so draining here loses nothing.
+        while let Some(env) = self.ctl.recv(Duration::ZERO) {
+            if env.kind != "abort" {
+                continue;
+            }
+            self.interrupted = true;
+            let name = env.body.str_or("signal", "other").to_string();
+            self.rec.event(
+                "interrupted",
+                Value::map()
+                    .with("signal", name.as_str())
+                    .with("by", "responder"),
+            );
+            self.notes.push(format!(
+                "responder stopped by {name}: remaining phases skipped, session ended early"
+            ));
+            self.say(&format!("responder stopped by {name}: ending the session"));
+            return true;
+        }
+        false
     }
 
     /// Start phase `id`; returns false (and starts nothing) once the session is interrupted.
@@ -948,9 +970,29 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     })
 }
 
-/// Fetch a finished session's responder log from `dst` (the responder's control address).
-/// With the pinned certificate: TLS on the responder's port, then TLS on 443. Without it:
-/// plain TCP on the responder's port (docs/design/probe.md §8).
+/// Fetch routes in order (docs/design/probe.md §8): with the pinned certificate, TLS on the
+/// responder's port, then TLS on 443. Plain TCP on the responder's port only when no
+/// certificate is known (`cert` empty), with a warning, since the fetch token then crosses
+/// the network in clear. A known certificate that cannot be used is an error, never a
+/// downgrade to plain TCP.
+fn fetch_routes(
+    dst: SocketAddr,
+    cert: &[u8],
+) -> io::Result<Vec<(u16, Option<Arc<rustls::ClientConfig>>)>> {
+    if cert.is_empty() {
+        eprintln!(
+            "[pathtrace] warning: no responder TLS certificate known; fetching over plain TCP on tcp/{} (the fetch token is sent unencrypted; `fetch --resume <id.session>` uses TLS)",
+            dst.port()
+        );
+        return Ok(vec![(dst.port(), None)]);
+    }
+    let c = tcp::client_config(cert)
+        .map_err(|e| io::Error::other(format!("pinned TLS certificate unusable: {e}")))?;
+    Ok(vec![(dst.port(), Some(c.clone())), (443, Some(c))])
+}
+
+/// Fetch a finished session's responder log from `dst` (the responder's control address)
+/// over the routes [`fetch_routes`] gives.
 pub fn fetch_with_retry(
     dst: SocketAddr,
     cert: &[u8],
@@ -960,17 +1002,10 @@ pub fn fetch_with_retry(
     verbose: bool,
 ) -> io::Result<u64> {
     let mut last = io::Error::other("no attempt");
-    let tls = if cert.is_empty() {
-        None
-    } else {
-        tcp::client_config(cert).ok()
-    };
-    let routes: Vec<(u16, Option<Arc<rustls::ClientConfig>>)> = match &tls {
-        Some(c) => vec![(dst.port(), Some(c.clone())), (443, Some(c.clone()))],
-        None => vec![(dst.port(), None)],
-    };
+    let routes = fetch_routes(dst, cert)?;
     for attempt in 0..10 {
         for (port, cfg) in routes.iter().cloned() {
+            let over = if cfg.is_some() { "TLS" } else { "plain TCP" };
             match tcp::fetch(
                 SocketAddr::new(dst.ip(), port),
                 cfg,
@@ -979,7 +1014,14 @@ pub fn fetch_with_retry(
                 out,
                 Duration::from_secs(5),
             ) {
-                Ok(n) => return Ok(n),
+                Ok(n) => {
+                    if verbose {
+                        eprintln!(
+                            "[pathtrace] fetched the responder log over {over} on tcp/{port}"
+                        );
+                    }
+                    return Ok(n);
+                }
                 Err(e) => {
                     if verbose {
                         eprintln!(
@@ -1694,17 +1736,26 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
         } else {
             u443_6.clone()
         };
-        match responder_session(opts, &kp, &state, &cert, main, u443, &data, src, tcp) {
+        let ran = match responder_session(opts, &kp, &state, &cert, main, u443, &data, src, tcp) {
             Ok(Some(id)) => {
                 done += 1;
                 if opts.verbose {
                     eprintln!("[pathtrace] session {id:08x} complete");
                 }
+                true
             }
-            Ok(None) => {}
-            Err(e) => eprintln!("[pathtrace] session error: {e}"),
-        }
+            Ok(None) => false,
+            Err(e) => {
+                eprintln!("[pathtrace] session error: {e}");
+                false
+            }
+        };
         if pt_sys::signal::stop_requested().is_some() {
+            if ran {
+                // The session was ended by the signal: give the initiator time to fetch the
+                // log, as after the last of `--max-sessions` (a second signal quits at once).
+                std::thread::sleep(Duration::from_secs(15));
+            }
             return Ok(());
         }
         if opts.max_sessions > 0 && done >= opts.max_sessions {
@@ -1902,8 +1953,21 @@ fn responder_session(
 
     let mut reason = "bye";
     loop {
-        if pt_sys::signal::stop_requested().is_some() {
+        if let Some(sig) = pt_sys::signal::stop_requested() {
+            // End the session the way the initiator does on a signal (docs/design/probe.md
+            // §8): record it, stop sending, tell the initiator reliably, and give it time to
+            // stop its flows and say bye.
             reason = "signal";
+            let name = pt_sys::signal::name(sig);
+            rec.event("interrupted", Value::map().with("signal", name));
+            if opts.verbose {
+                eprintln!("[pathtrace] {name}: ending session {session:08x}");
+            }
+            let _ = ep.cmd.send(PacerCmd::StopAll);
+            let abort = Value::map().with("reason", "signal").with("signal", name);
+            if ctl.request("abort", abort, Duration::from_secs(5)).is_ok() {
+                let _ = ctl.wait_for("bye", Duration::from_secs(10));
+            }
             break;
         }
         let Some(env) = ctl.recv(Duration::from_millis(500)) else {
@@ -1982,6 +2046,17 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fetch_routes_use_tls_when_a_cert_is_known() {
+        let dst: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+        let r = fetch_routes(dst, &[0x30, 0x82, 0x01, 0xff]).unwrap();
+        let r: Vec<(u16, bool)> = r.into_iter().map(|(p, c)| (p, c.is_some())).collect();
+        assert_eq!(r, vec![(4433, true), (443, true)]);
+        let r = fetch_routes(dst, &[]).unwrap();
+        let r: Vec<(u16, bool)> = r.into_iter().map(|(p, c)| (p, c.is_some())).collect();
+        assert_eq!(r, vec![(4433, false)]);
+    }
 
     #[test]
     fn session_file_roundtrips_and_is_private() {
