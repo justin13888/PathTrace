@@ -3,21 +3,21 @@
 ### REQ-FMT-001: Container framing
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r3
+- evidence: EXP-0003-r4
 
 A PTF file is an 8-byte magic, a version (major, minor), file flags, then a sequence of typed, length-prefixed sections, each protected by a CRC32C.
 
 ### REQ-FMT-002: Section criticality
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r3, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004
 
 A reader rejects a file containing an unknown critical section, or a critical section using unknown flag bits, and skips unknown non-critical sections without error.
 
 ### REQ-FMT-003: Bounded compressed sections
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r3, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004
 
 Section payloads may be zstd-compressed. Compressed payloads declare their uncompressed size, and readers enforce configurable caps so that a hostile file cannot exhaust memory.
 
@@ -31,7 +31,7 @@ Metadata is CBOR in a documented deterministic profile, with a published CDDL sc
 ### REQ-FMT-005: Self-describing columnar tables
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r3, EXP-0001-r2
+- evidence: EXP-0003-r4, EXP-0001-r2
 
 Bulk data is stored as tables whose column directory names each column's type, encoding, unit, clock domain, nullability and privacy class. Readers skip unknown columns.
 
@@ -59,14 +59,14 @@ META records the producing tool's version and git commit. Every derived paramete
 ### REQ-FMT-009: Versioning rules
 - status: met
 - spec: §7.5
-- evidence: EXP-0003-r3
+- evidence: EXP-0003-r4
 
 Minor versions only add (sections, columns, keys). Major versions change the meaning of a critical section. Readers reject files with a higher major version and accept any minor.
 
 ### REQ-FMT-010: Permanent backward compatibility
 - status: met
 - spec: new
-- evidence: EXP-0003-r3
+- evidence: EXP-0003-r4
 
 Every PTF file of version 1.0 or later remains readable by every later release. Golden files from every release are kept in the conformance corpus and tested on every change.
 
@@ -87,14 +87,14 @@ Encoding the same content twice with the same tool version yields identical byte
 ### REQ-FMT-013: Whole-file integrity
 - status: met
 - spec: §7.3
-- evidence: EXP-0003-r3
+- evidence: EXP-0003-r4
 
 An optional final INDX section records section offsets, the BLAKE3 of all preceding bytes, and the content digest.
 
 ### REQ-FMT-014: Lossless text twin
 - status: met
 - spec: §7.1
-- evidence: EXP-0003-r3, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004
 
 `pathtrace trace dump` writes JSON Lines and `pathtrace trace load` reads them back to a byte-identical canonical PTF file, including for sections and columns unknown to the tool.
 
@@ -122,7 +122,7 @@ Every identifying value is marked with a privacy class (`id` or `quasi`) where i
 ### REQ-FMT-018: Conformance suite
 - status: met
 - spec: §7.8
-- evidence: EXP-0003-r3
+- evidence: EXP-0003-r4
 
 A corpus of valid and invalid files with expected verdicts and a reference validator (`pathtrace trace check`) let an independent implementation prove conformance. An independent reader written only from the specification passes it.
 
