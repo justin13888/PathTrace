@@ -1,0 +1,2 @@
+a_to_b: tc qdisc add dev <dev> root netem delay 10.002ms 0.031ms distribution normal loss gemodel 2.5714% 94.7368% 100.0000% 0.0000% rate 487271kbit limit 404
+b_to_a: tc qdisc add dev <dev> root netem delay 10.002ms 0.024ms distribution normal
