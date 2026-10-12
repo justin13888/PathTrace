@@ -1660,6 +1660,59 @@ mod tests {
     }
 
     #[test]
+    fn two_unrecorded_burns_in_one_call_step_in_id_order() {
+        // Two datagrams in call 0, five in call 1, two in call 2. In call 1 two datagrams fail
+        // with no burn recorded and each consumes an id (3 and 5). The first failure anchors
+        // +1 at logged id 3. Within a call every stamp fits every row, so the second failure
+        // scores a +1 step at the call's first row (logged 2, now joining stamp 4) as high as at
+        // its true place: its candidates must start at the first failure's anchor, or its step
+        // lands before that anchor, out of id order.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows = [
+            (0, user(0)),
+            (1, user(0)),
+            (2, user(1)),
+            (3, user(1)),
+            (4, user(1)),
+            (5, user(1)),
+            (6, user(1)),
+            (7, user(2)),
+            (8, user(2)),
+        ];
+        let stamps = [
+            (0, user(0) + R + 5 * US),
+            (1, user(0) + R + 6 * US),
+            (2, user(1) + R + 5 * US),
+            (4, user(1) + R + 6 * US),
+            (6, user(1) + R + 7 * US),
+            (7, user(1) + R + 8 * US),
+            (8, user(1) + R + 9 * US),
+            (9, user(2) + R + 5 * US),
+            (10, user(2) + R + 6 * US),
+        ];
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![
+                failure("send_error", user(1) + 20 * US, None, None, "predicted"),
+                failure("send_error", user(1) + 30 * US, None, None, "predicted"),
+            ],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 4, 6, 7, 8, 9, 10],
+                Reanchor {
+                    anchors: 2,
+                    rows: 6
+                }
+            )
+        );
+        assert_eq!(tx_ids(&log).steps[&0], vec![(3, 1), (4, 2)]);
+        assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
     fn clock_pairs_are_interpolated() {
         let m = MonoToReal(vec![(0, 100), (1_000, 200)]);
         assert_eq!(m.interp(500), Some(650));
