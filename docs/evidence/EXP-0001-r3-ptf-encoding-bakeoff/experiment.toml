@@ -1,0 +1,11 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0001-r3"
+title = "PTF raw-layer encoding bake-off (re-run at PTF 1.1)"
+hypothesis = """The canonical PTF encoding of the per-packet table (columnar, delta2 timestamps at ns \
+resolution, 65536-row chunks, zstd 19) costs <= 8 B/packet in every scenario (wired 10/100/500 Mbit/s, \
+Wi-Fi-aggregated 100 Mbit/s), is within 10% of the smallest lossless candidate (PTF variants, JSONL+zstd, \
+CBOR rows+zstd, Arrow IPC+zstd), and encodes the largest scenario in <= 10 s."""
+command = "cargo run --release --quiet -p pt-bench -- bakeoff"
+covers = ["crates/pt-format/src", "bench/pt-bench/src"]
+requirements = ["REQ-FMT-005", "REQ-FMT-015"]
+supersedes = ["EXP-0001-r2"]

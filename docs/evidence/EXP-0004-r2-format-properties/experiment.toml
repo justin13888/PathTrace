@@ -1,0 +1,12 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0004-r2"
+title = "PTF property and unit tests: CBOR profile, encodings, recovery, determinism, redaction (re-run at PTF 1.1)"
+hypothesis = """pt-format's tests pass: the CBOR codec accepts exactly the deterministic profile and \
+round-trips canonically (property tests), every column encoding round-trips (property tests), a log \
+truncated at every byte offset recovers every complete section, encoding is byte-identical and the digest \
+compression-independent, decompression bombs are refused, the JSON twin is byte-identical, and redaction \
+removes exactly the annotated data."""
+command = "cargo test --release --locked -q -p pt-format"
+covers = ["crates/pt-format/src"]
+requirements = ["REQ-FMT-004", "REQ-FMT-006", "REQ-FMT-007", "REQ-FMT-011", "REQ-FMT-012", "REQ-FMT-017", "REQ-FMT-019"]
+supersedes = ["EXP-0004"]
