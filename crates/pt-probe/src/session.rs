@@ -707,9 +707,31 @@ struct Handshake {
     session: u32,
     noise: Vec<u8>,
     tcp: Option<TcpStream>,
-    /// The preferred family's address and why it was not used, when the session runs on the
-    /// other family.
-    fallback: Option<(SocketAddr, String)>,
+    /// The preferred family and why it was not used, when the session runs on the other family.
+    fallback: Option<(&'static str, String)>,
+}
+
+/// The `family_fallback` a session on `used` records (docs/design/probe.md §3.1): the
+/// preferred family and why it was not used, or `None` when `used` is of the preferred family.
+/// `why` holds the reason each tried address was given up; a responder without an address of
+/// the preferred family was never tried, and that is the reason.
+fn family_fallback(
+    used: &SocketAddr,
+    prefer_v6: bool,
+    why: &[(SocketAddr, String)],
+) -> Option<(&'static str, String)> {
+    if used.is_ipv6() == prefer_v6 {
+        return None;
+    }
+    let requested = if prefer_v6 { "ipv6" } else { "ipv4" };
+    let reason = why
+        .iter()
+        .find(|(a, _)| a.is_ipv6() == prefer_v6)
+        .map_or_else(
+            || format!("responder has no {requested} address"),
+            |(_, w)| w.clone(),
+        );
+    Some((requested, reason))
 }
 
 /// Try the UDP handshake on every reachable family, then the TCP fallback on each
@@ -750,15 +772,12 @@ fn handshake(
         let errs: Vec<String> = why.iter().map(|(a, w)| format!("{a}: {w}")).collect();
         return Err(no_route(addr, &errs));
     }
-    let preferred = order.first().copied().filter(|a| a.is_ipv6() == prefer_v6);
     let done = |cand: Candidate,
                 session: u32,
                 noise: Vec<u8>,
                 tcp: Option<TcpStream>,
                 why: &[(SocketAddr, String)]| {
-        let fallback = preferred
-            .filter(|p| *p != cand.dst)
-            .and_then(|p| why.iter().find(|(a, _)| *a == p).cloned());
+        let fallback = family_fallback(&cand.dst, prefer_v6, why);
         Handshake {
             cand,
             session,
@@ -943,8 +962,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     }
     if let Some((from, why)) = &fallback {
         eprintln!(
-            "[pathtrace] {} unusable ({why}); session runs over {} to {dst}",
-            family_name(from),
+            "[pathtrace] {from} unusable ({why}); session runs over {} to {dst}",
             family_name(&dst)
         );
     }
@@ -1053,7 +1071,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         rec.event(
             "family_fallback",
             Value::map()
-                .with("requested", family_name(from))
+                .with("requested", *from)
                 .with("used", family_name(&dst))
                 .with("reason", why.as_str()),
         );
@@ -2557,6 +2575,31 @@ mod tests {
         // One family only: that family, whatever is preferred.
         assert_eq!(family_order(&all[..1], true), vec![a("192.0.2.1:4433")]);
         assert!(family_order(&[], false).is_empty());
+    }
+
+    #[test]
+    fn family_fallback_names_the_preferred_family_and_why() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let (v4, v6) = (a("192.0.2.1:4433"), a("[2001:db8::1]:4433"));
+        // On the preferred family: no fallback.
+        assert_eq!(family_fallback(&v6, true, &[]), None);
+        assert_eq!(family_fallback(&v4, false, &[(v6, "x".into())]), None);
+        // The preferred family was tried and given up: its reason.
+        let why = [(v6, "no handshake reply over UDP".to_string())];
+        assert_eq!(
+            family_fallback(&v4, true, &why),
+            Some(("ipv6", "no handshake reply over UDP".into()))
+        );
+        // The responder has no address of the preferred family (an IPv4 literal with
+        // `--ipv6`): still a fallback, never a silent switch.
+        assert_eq!(
+            family_fallback(&v4, true, &[]),
+            Some(("ipv6", "responder has no ipv6 address".into()))
+        );
+        assert_eq!(
+            family_fallback(&v6, false, &[]),
+            Some(("ipv4", "responder has no ipv4 address".into()))
+        );
     }
 
     #[test]
