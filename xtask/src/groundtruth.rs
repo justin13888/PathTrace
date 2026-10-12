@@ -365,12 +365,14 @@ pub fn scenarios() -> Vec<Scenario> {
             "",
             "safety budget",
         ),
+        // An 8 KiB buffer drops only while the responder is descheduled (none on a quiet
+        // host, EXP-0002-r13); 20 ms slots deliver a→b in bursts that overflow it anyway.
         Scenario {
             serve_env: "PATHTRACE_RECV_BUF=8192",
             ..s(
                 "rcvbuf",
                 "smoke",
-                &netem("delay 10ms rate 100mbit limit 1000"),
+                &netem("delay 10ms rate 100mbit limit 1000 slot 20ms 20ms"),
                 &netem("delay 10ms rate 100mbit limit 1000"),
                 "",
                 "",
