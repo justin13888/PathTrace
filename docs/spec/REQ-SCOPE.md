@@ -47,7 +47,7 @@ A session measures over one primary address family, either IPv4 or IPv6. When th
 ### REQ-SCOPE-007: Own endpoints only
 - status: met
 - spec: §3, §6.7
-- evidence: EXP-0006-r6
+- evidence: EXP-0006-r7
 
 The probe only ever exchanges traffic with a responder operated by the user and authenticated by key.
 
