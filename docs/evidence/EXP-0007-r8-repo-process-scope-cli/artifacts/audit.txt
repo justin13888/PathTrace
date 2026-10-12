@@ -1,0 +1,19 @@
+audit: 108 requirements {"deferred": 17, "met": 85, "planned": 4, "user-acceptance": 2}, 47 experiments
+PENDING EXP-0007-r8: defined but not yet run (Repository process, scope, CLI surface, derivation purity and in-trace provenance (1.1, header minor apart from raw sections))
+ERROR   REQ-CLI-003 (docs/spec/REQ-CLI.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-DRV-001 (docs/spec/REQ-DRV.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-DRV-012 (docs/spec/REQ-DRV.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-FMT-008 (docs/spec/REQ-FMT.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-PRB-025 (docs/spec/REQ-PRB.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-001 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-002 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-003 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-004 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-005 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-006 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-007 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-REPO-008 (docs/spec/REQ-REPO.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SCOPE-001 (docs/spec/REQ-SCOPE.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SCOPE-002 (docs/spec/REQ-SCOPE.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SCOPE-003 (docs/spec/REQ-SCOPE.md): status met but no listed evidence has a current `pass` verdict
+ERROR   REQ-SCOPE-004 (docs/spec/REQ-SCOPE.md): status met but no listed evidence has a current `pass` verdict

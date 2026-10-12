@@ -1,0 +1,31 @@
+PASS convco: all non-merge commits conventional
+PASS every non-merge commit has a scope
+PASS merge-commit-only repository settings
+PASS ruleset active: no force-push, no deletion, merge only
+PASS GitHub detects Apache-2.0
+PASS CLAUDE.md -> AGENTS.md
+PASS tools pinned (mise.lock present)
+PASS PR 'Merge remote-tracking branch 'origin/main' into docs/42-ground-truth-evidence-rerun' starts with: docs(design): gate the slow-start step on the feedback lag
+PASS PR 'fix(probe): capture hardening for real paths (PTF 1.1) (#37)' starts with: docs(research): R-0015 OPT_ID on send errors, socket drops, qdisc counters
+PASS PR 'docs(evidence): release v1.0.1 verified (EXP-0008-r2) (#29)' starts with: docs(evidence): define EXP-0008-r2 release v1.0.1 verification
+PASS PR 'build(repo): release 1.0.1 (#28)' starts with: docs(design): doctor's timestamp self-test warms up before judging RX stamps
+PASS PR 'docs(evidence): release v1.0.0 verified (EXP-0008) (#26)' starts with: docs(evidence): define EXP-0008 release v1.0.0 verification
+PASS PR 'build(repo): release 1.0.0 (#25)' starts with: docs(docs): release runbook (bump, dry run, annotated tag, gated publish, evidence)
+PASS PR 'feat(derive): path model, exports, redaction, conformance and ground-truth evidence (#24)' starts with: docs(design): specify derivation and the saturation overdrive step
+PASS PR 'feat(probe): capture tool — probe, responder, wire protocol, observation logs and merge (#20)' starts with: docs(research): R-0010..R-0014 Linux socket, clock, TCP and netlink facts
+PASS PR 'feat(format): PTF 1.0 container, CBOR profile, columnar tables and JSONL twin (#19)' starts with: docs(design): specify PTF 1.0 container, CBOR profile and columnar tables
+PASS PR 'docs(spec): distil the draft spec into requirements, ADRs and research (#18)' starts with: docs(research): verify prior art and tooling claims first-hand
+PASS audit chain intact apart from requirements awaiting this experiment (17)
+PASS no non-Linux target_os code
+PASS exactly two endpoint roles (a, b): one path
+PASS PATH derivation never reads protocol results (tcpinfo/app only feed VALD)
+PASS no topology/chaos/replay/emulator crates (excluded areas)
+PASS rate cap defaults to 500 Mbit/s (probe and serve)
+PASS documented commands present (checked 12 + 5 trace subcommands)
+PASS trace info/check --json parse
+PASS exit codes 0 (ok) 1 (invalid) 2 (usage)
+PASS derive is deterministic and idempotent (byte-identical)
+PASS derive leaves raw sections byte-identical (JSON twin compared)
+PASS derive raises a 1.0 file's header minor to 1.1
+PASS trace provenance: tool commit, versioned methods, status on every PATH field
+PASS doctor runs, reports JSON, local checks ok
