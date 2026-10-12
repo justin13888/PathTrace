@@ -20,6 +20,11 @@
 #   SCRIPT_PM  shell commands run in the middlebox namespace in the background during the probe
 #              (e.g. scripted `tc qdisc change` for time-varying capacity)
 #   PROBE_SIGNAL_AFTER  send SIGINT to the probe after this many seconds (interruption tests)
+#   SERVE_SIGNAL_AFTER  send SERVE_SIGNAL (default TERM) to the responder after this many
+#              seconds; independent of PROBE_SIGNAL_AFTER, both count from the probe's start
+#   SERVE_RESTART  if non-empty, start the responder again after the probe exits (when the
+#              first one has exited), keep it running during POST_PA, then stop it with SIGTERM;
+#              its output goes to serve2.log
 #   POST_PA    shell commands run in the initiator namespace after the probe exits, with
 #              BIN, OUT and CFG (the initiator config dir) set; output in post_pa.log
 set -eu
@@ -36,6 +41,9 @@ SCRIPT_PM=${SCRIPT_PM:-}
 PROBE_ARGS=${PROBE_ARGS:-}
 SERVE_ARGS=${SERVE_ARGS:-}
 PROBE_SIGNAL_AFTER=${PROBE_SIGNAL_AFTER:-}
+SERVE_SIGNAL_AFTER=${SERVE_SIGNAL_AFTER:-}
+SERVE_SIGNAL=${SERVE_SIGNAL:-TERM}
+SERVE_RESTART=${SERVE_RESTART:-}
 POST_PA=${POST_PA:-}
 RESP_ADDR=${RESP_ADDR:-10.0.2.2}
 IP=ip
@@ -101,18 +109,35 @@ set +e
 # shellcheck disable=SC2086
 $IP netns exec pa env $PROBE_ENV "$BIN" --config-dir "$OUT/i" probe vm --class lab --profile "$PROFILE" --out "$OUT" $PROBE_ARGS >"$OUT/probe.out" 2>"$OUT/probe.err" &
 PROBE=$!
+if [ -n "$SERVE_SIGNAL_AFTER" ]; then
+  (sleep "$SERVE_SIGNAL_AFTER" && kill -"$SERVE_SIGNAL" "$SERVE" 2>/dev/null) &
+fi
 if [ -n "$PROBE_SIGNAL_AFTER" ]; then
-  sleep "$PROBE_SIGNAL_AFTER"
-  kill -INT "$PROBE" 2>/dev/null
+  (sleep "$PROBE_SIGNAL_AFTER" && kill -INT "$PROBE" 2>/dev/null) &
 fi
 wait "$PROBE"
 echo "$?" >"$OUT/probe.exit"
+SERVE2=
+if [ -n "$SERVE_RESTART" ]; then
+  wait "$SERVE"
+  echo "$?" >"$OUT/serve.exit"
+  # shellcheck disable=SC2086
+  $IP netns exec pb env $SERVE_ENV "$BIN" --config-dir "$OUT/r" serve --state-dir "$OUT/state" $SERVE_ARGS >"$OUT/serve2.log" 2>&1 &
+  SERVE2=$!
+  sleep 1
+fi
 if [ -n "$POST_PA" ]; then
   $IP netns exec pa env BIN="$BIN" OUT="$OUT" CFG="$OUT/i" sh -c "$POST_PA" >"$OUT/post_pa.log" 2>&1
   echo "$?" >"$OUT/post_pa.exit"
 fi
-wait "$SERVE"
-echo "$?" >"$OUT/serve.exit"
+if [ -n "$SERVE2" ]; then
+  kill -TERM "$SERVE2" 2>/dev/null
+  wait "$SERVE2"
+  echo "$?" >"$OUT/serve2.exit"
+else
+  wait "$SERVE"
+  echo "$?" >"$OUT/serve.exit"
+fi
 if [ -n "$PM_PID" ]; then kill "$PM_PID" 2>/dev/null; fi
 $IP netns exec pm tc -s qdisc show >"$OUT/qdisc_stats.txt" 2>&1
 exit 0
