@@ -1,0 +1,1 @@
+{"bypass":[],"enforcement":"active","merge_methods":["merge"],"rules":["deletion","non_fast_forward","pull_request","required_status_checks"]}

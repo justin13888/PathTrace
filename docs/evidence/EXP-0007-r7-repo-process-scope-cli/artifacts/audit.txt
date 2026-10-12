@@ -1,0 +1,4 @@
+audit: 108 requirements {"deferred": 17, "met": 85, "planned": 4, "user-acceptance": 2}, 46 experiments
+STALE   EXP-0007-r6: covered paths changed since 5fd620222461
+PENDING EXP-0007-r7: defined but not yet run (Repository process, scope, CLI surface, derivation purity and in-trace provenance (re-run at 1.1))
+audit: chain intact
