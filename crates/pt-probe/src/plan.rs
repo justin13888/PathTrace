@@ -1,7 +1,7 @@
 //! Profiles, flow-id allocation and the saturation controller
 //! (docs/design/probe.md §6–7, REQ-PRB-010/011/014/016, ADR 0010).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 
@@ -10,7 +10,7 @@ use pt_sys::clock::mono_raw;
 use pt_wire::ctrl::BodyExt;
 
 use crate::flows::{FlowSpec, Pattern, Role, Sock, Tos};
-use crate::io::{FlowBytes, PacerCmd};
+use crate::io::{FEEDBACK_INTERVAL_NS, FlowBytes, PacerCmd};
 
 /// Session profile (REQ-PRB-014).
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +316,9 @@ struct CtlState {
     overdrive_at: u64,
     /// Byte allowance of the flow (0 = none).
     max_bytes: u64,
+    /// Rates set during the last feedback lag plus [`RATE_HISTORY_NS`], oldest first:
+    /// (MONO_RAW time, bit/s). The first entry is the rate in effect at the window's start.
+    sent: VecDeque<(u64, f64)>,
 }
 
 /// Saturation controller (docs/design/probe.md §7): slow start doubling once per slow-start
@@ -351,6 +354,46 @@ fn ss_step(lag: Option<u64>) -> u64 {
 /// Bytes the overdrive step sends at 1.5× delivery rate `d` (bit/s).
 fn overdrive_bytes(d: f64) -> f64 {
     1.5 * d / 8.0 * OVERDRIVE_NS as f64 / 1e9
+}
+
+/// Rate history kept beyond the feedback lag, so the age of a report whose packet queued for
+/// up to this long is still covered (docs/design/probe.md §7).
+pub const RATE_HISTORY_NS: u64 = 1_000_000_000;
+
+/// Age of the queueing delay `q` (ns) a feedback reports, for a flow whose feedback lag is
+/// `lag` (docs/design/probe.md §7): how long ago the sender sent the packet it describes. That
+/// packet took the base RTT plus its own queueing delay. The lag, measured on the flow's first
+/// packets through an empty queue, overstates the base RTT by the wait for the receiver's next
+/// report, 0 to one feedback interval, so half an interval is taken off.
+fn q_age(lag: Option<u64>, q: f64) -> u64 {
+    lag.map_or(0, |l| l.saturating_sub(FEEDBACK_INTERVAL_NS / 2) + q as u64)
+}
+
+/// Bits sent in excess of delivery rate `d` (bit/s) during the window `[now − window, now]`,
+/// from the rate history `sent` (docs/design/probe.md §7). Negative when the sender sent less
+/// than `d`. The latest queue report does not reflect these bits yet: they are in flight or
+/// were sent after the reported packet.
+fn excess_bits(sent: &VecDeque<(u64, f64)>, now: u64, window: u64, d: f64) -> f64 {
+    let from = now.saturating_sub(window);
+    let mut bits = 0.0;
+    for (i, &(t, r)) in sent.iter().enumerate() {
+        let t0 = t.max(from);
+        let t1 = sent.get(i + 1).map_or(now, |&(t, _)| t).min(now);
+        if t1 > t0 {
+            bits += (r - d) * (t1 - t0) as f64 / 1e9;
+        }
+    }
+    bits
+}
+
+/// Record that the rate `r` was set at `now`, keeping only the rates in effect during the
+/// last `window` ns.
+fn push_rate(sent: &mut VecDeque<(u64, f64)>, now: u64, window: u64, r: f64) {
+    sent.push_back((now, r));
+    let from = now.saturating_sub(window);
+    while sent.len() > 1 && sent[1].0 <= from {
+        sent.pop_front();
+    }
 }
 
 /// Smallest byte allowance worth starting a saturation for (docs/design/probe.md §6).
@@ -412,6 +455,7 @@ impl Controller {
                 lag: None,
                 overdrive_at,
                 max_bytes,
+                sent: VecDeque::new(),
             },
         );
     }
@@ -485,11 +529,19 @@ impl Controller {
                     if d < 1000.0 {
                         st.rate *= 0.8;
                     } else {
-                        st.rate = d * (1.0 + 0.5 * (qt - q) / qt).clamp(0.7, 1.3);
+                        // q is about one RTT old: add the queue the bits sent since then will
+                        // build or drain at the delivery rate, so the gain acts on the queue
+                        // the new rate meets rather than on one it already corrected (issue
+                        // #40: without this, hold oscillates on long-RTT paths).
+                        let w = q_age(st.lag, q);
+                        let qp = (q + excess_bits(&st.sent, now, w, d) / d * 1e9).max(0.0);
+                        st.rate = d * (1.0 + 0.5 * (qt - qp) / qt).clamp(0.7, 1.3);
                     }
                 }
             }
             st.rate = st.rate.clamp(FLOOR_BPS, self.rate_cap);
+            let keep = st.lag.unwrap_or(0) + RATE_HISTORY_NS;
+            push_rate(&mut st.sent, now, keep, st.rate);
             let _ = self.pacer.send(PacerCmd::SetRate(id as u8, st.rate as u64));
         }
     }
@@ -678,64 +730,145 @@ mod tests {
         assert_eq!(set_rate(&rx), 8_000_000);
     }
 
-    /// Simulated path: rate-limited bottleneck with FIFO, one-way delay `owd_ms` each way,
-    /// feedback every 20 ms. Returns (seconds until the sent rate first reaches 90% of
-    /// `cap_bps`, seconds the bottleneck holds at least 2 ms of queue, which is what capacity
-    /// derivation needs).
-    fn simulate(cap_bps: f64, owd_ms: u64, secs: u64) -> (Option<f64>, f64) {
+    /// Simulated path in 1 ms steps: rate-limited bottleneck with a FIFO at the receiver end,
+    /// one-way delay `owd_ms` each way. Like the responder, the receiver reports every 20 ms
+    /// once the flow arrives (at 11, 31, 51 … ms, so the first report waits a path-dependent
+    /// part of an interval): the delivery rate over the interval and the queueing delay of the
+    /// last packet delivered.
+    fn simulate(cap_bps: f64, owd_ms: u64, secs: u64) -> Sim {
         let (tx, rx) = std::sync::mpsc::channel();
         let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
         let t0 = mono_raw();
         c.add(7, t0, 0, 0);
-        let tick = 20u64;
-        let n = (secs * 1000 / tick) as usize;
-        let lag = (2 * owd_ms / tick) as usize;
-        let half = (owd_ms / tick) as usize;
-        // Per tick: rate sent, bits delivered at the bottleneck, backlog after it (bits).
-        let (mut sent, mut deliv, mut backlog) = (vec![START_BPS], vec![0.0], vec![0.0f64]);
+        let n = (secs * 1000) as usize;
+        let owd = owd_ms as usize;
+        let cap = cap_bps / 1000.0; // bits per ms
+        // Rate sent in each ms; cumulative bits arrived at and delivered by the bottleneck at
+        // the end of each ms; reports in flight to the sender (arrival ms, q ns, rate bit/s).
+        let mut sent = vec![0.0; n];
+        let (mut arr, mut del) = (vec![0.0f64; n + 1], vec![0.0f64; n + 1]);
+        let mut reports = std::collections::VecDeque::new();
+        let mut rate = START_BPS;
         let mut reached = None;
         let mut queued = 0u32;
-        for i in 1..n {
-            sent.push(*sent.last().unwrap());
-            // The bottleneck sits at the receiver end: it sees what was sent one OWD ago.
-            let arriving = if i >= half { sent[i - half] } else { 0.0 };
-            let b = backlog[i - 1] + arriving * tick as f64 / 1000.0;
-            let out = b.min(cap_bps * tick as f64 / 1000.0);
-            deliv.push(out);
-            backlog.push(b - out);
-            if i > lag {
-                // What the receiver saw one OWD ago reaches the sender now.
-                let j = i - half;
-                let d = deliv[j] * 1000.0 / tick as f64;
-                let q = backlog[j] / cap_bps * 1e9;
-                c.feedback_at(&fb7(q as u64, d as u64), t0 + i as u64 * tick * MS);
-                let r = set_rate(&rx) as f64;
-                *sent.last_mut().unwrap() = r;
-                if reached.is_none() && r >= 0.9 * cap_bps {
-                    reached = Some(i as f64 * tick as f64 / 1000.0);
+        for t in 0..n {
+            while reports
+                .front()
+                .is_some_and(|r: &(usize, f64, f64)| r.0 == t)
+            {
+                let (_, q, d) = reports.pop_front().unwrap();
+                c.feedback_at(&fb7(q as u64, d as u64), t0 + t as u64 * MS);
+                rate = set_rate(&rx) as f64;
+                if reached.is_none() && rate >= 0.9 * cap_bps {
+                    reached = Some(t as f64 / 1000.0);
                 }
             }
-            if backlog[i] / cap_bps >= 0.002 {
+            sent[t] = rate;
+            let arriving = if t >= owd {
+                sent[t - owd] / 1000.0
+            } else {
+                0.0
+            };
+            arr[t + 1] = arr[t] + arriving;
+            del[t + 1] = arr[t + 1].min(del[t] + cap);
+            let now = t + 1;
+            if (arr[now] - del[now]) / cap >= 2.0 {
                 queued += 1;
             }
+            if now % 20 == 11 && del[now] > 0.0 {
+                let d = (del[now] - del[now.saturating_sub(20)]) * 50.0;
+                // When the last delivered bit arrived: interpolate the cumulative arrivals.
+                let k = arr[..=now].partition_point(|a| *a < del[now]).max(1);
+                let at = (k - 1) as f64 + (del[now] - arr[k - 1]) / (arr[k] - arr[k - 1]);
+                let q = (now as f64 - at).max(0.0) * 1e6;
+                reports.push_back((now + owd, q, d));
+            }
         }
-        (reached, queued as f64 * tick as f64 / 1000.0)
+        // Queue (ms) at the end of each ms of the second half: every ramp here is over by then,
+        // so the controller holds.
+        let held: Vec<f64> = (n / 2..=n).map(|t| (arr[t] - del[t]) / cap).collect();
+        let last = &held[held.len() - 2000..];
+        Sim {
+            reached,
+            queued_s: f64::from(queued) / 1000.0,
+            idle_s: held.iter().filter(|q| **q < 2.0).count() as f64 / 1000.0,
+            settled_ms: (
+                last.iter().fold(f64::MAX, |m, q| m.min(*q)),
+                last.iter().fold(0.0f64, |m, q| m.max(*q)),
+            ),
+        }
+    }
+
+    /// Outcome of [`simulate`].
+    #[derive(Debug)]
+    struct Sim {
+        /// Seconds until the sent rate first reaches 90% of capacity.
+        reached: Option<f64>,
+        /// Seconds the bottleneck holds at least 2 ms of queue, which is what capacity
+        /// derivation needs.
+        queued_s: f64,
+        /// Seconds of the second half (hold) with less than 2 ms of queue: the bottleneck
+        /// idles or nearly so.
+        idle_s: f64,
+        /// Smallest and largest queue (ms) in the last 2 s.
+        settled_ms: (f64, f64),
     }
 
     #[test]
     fn saturation_reaches_capacity_on_geo_paths() {
         // 300 ms each way at 100 Mbit/s (issue #30). Exiting slow start on lagged delivery
         // feedback took 6.7 s to reach 90% of capacity here.
-        let (reached, queued) = simulate(100e6, 300, 10);
-        assert!(reached.is_some_and(|s| s < 5.0), "{reached:?}");
-        assert!(queued >= 2.0, "{queued}");
+        let s = simulate(100e6, 300, 10);
+        assert!(s.reached.is_some_and(|t| t < 5.0), "{s:?}");
+        assert!(s.queued_s >= 2.0, "{s:?}");
         // 20 Mbit/s (the `geo` ground-truth scenario).
-        let (reached, queued) = simulate(20e6, 300, 10);
-        assert!(reached.is_some_and(|s| s < 4.0), "{reached:?}");
-        assert!(queued >= 2.0, "{queued}");
+        let s = simulate(20e6, 300, 10);
+        assert!(s.reached.is_some_and(|t| t < 4.0), "{s:?}");
+        assert!(s.queued_s >= 2.0, "{s:?}");
         // Short path: unchanged 50 ms steps.
-        let (reached, queued) = simulate(100e6, 10, 10);
-        assert!(reached.is_some_and(|s| s < 1.0), "{reached:?}");
-        assert!(queued >= 5.0, "{queued}");
+        let s = simulate(100e6, 10, 10);
+        assert!(s.reached.is_some_and(|t| t < 1.0), "{s:?}");
+        assert!(s.queued_s >= 5.0, "{s:?}");
+    }
+
+    #[test]
+    fn hold_keeps_a_queue_on_long_rtt_paths() {
+        // Issue #40: hold acted on a queue one feedback lag old. At 300 ms one way it held 0.7×
+        // capacity for a whole RTT after the queue had drained, so the bottleneck idled about
+        // half the hold time (2.3 of 5 s here at 100 Mbit/s, 2.6 s at 20 Mbit/s, 0.8 s even at
+        // 10 ms one way) and the rate swung 70–130 Mbit/s. Correcting for the bits sent since
+        // the reported queue leaves the slow-start overshoot's drain (under 0.25 s idle), then
+        // a steady queue at the 10 ms target.
+        for (cap, owd) in [
+            (100e6, 300),
+            (20e6, 300),
+            (100e6, 250),
+            (100e6, 150),
+            (10e6, 150),
+            (100e6, 50),
+            (100e6, 10),
+        ] {
+            let s = simulate(cap, owd, 10);
+            assert!(s.idle_s < 0.25, "{cap} bit/s, {owd} ms: {s:?}");
+            let (lo, hi) = s.settled_ms;
+            assert!(lo > 7.0 && hi < 13.0, "{cap} bit/s, {owd} ms: {s:?}");
+        }
+    }
+
+    #[test]
+    fn excess_bits_integrates_the_rate_history_over_the_window() {
+        let mut h = VecDeque::new();
+        push_rate(&mut h, 0, 100 * MS, 10e6);
+        push_rate(&mut h, 50 * MS, 100 * MS, 20e6);
+        // [0, 50) at 10 Mbit/s, [50, 100) at 20 Mbit/s, against a 10 Mbit/s delivery rate.
+        assert!((excess_bits(&h, 100 * MS, 100 * MS, 10e6) - 500_000.0).abs() < 1.0);
+        // Only the last 20 ms count.
+        assert!((excess_bits(&h, 100 * MS, 20 * MS, 10e6) - 200_000.0).abs() < 1.0);
+        // Below the delivery rate the excess is negative (the queue drains).
+        assert!((excess_bits(&h, 100 * MS, 100 * MS, 30e6) + 1_500_000.0).abs() < 1.0);
+        // Entries older than the window, other than the one in effect at its start, go.
+        push_rate(&mut h, 200 * MS, 100 * MS, 5e6);
+        assert_eq!(h.len(), 2);
+        assert_eq!(h[0].0, 50 * MS);
     }
 }
