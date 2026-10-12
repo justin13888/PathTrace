@@ -11,7 +11,7 @@ A session always has two Linux machines (x86_64 or aarch64, kernel ≥ 6.1), bot
 
 Set up the responder and pair the two once with [responder-deploy.md](responder-deploy.md); its smoke session must pass before the first field session. The responder must not sit on the network being measured, or the path under test is not the one the trace records.
 
-Which release to use: for every field session, both machines run the first release that contains PR #37 and PR #39, or a build from source of `main` after both merged. Do not use v1.0.1 on any network. It lacks the capture hardening of PR #37 that the steps below rely on (the `.session` file, the clean Ctrl-C exit 3, `fetch --resume`, the merge checks and host-drop accounting), and on real paths it loses observations that cannot be recaptured afterwards. It also ramps saturations too slowly on paths with an RTT of about 300 ms or more (GEO satellite, in-flight Wi-Fi; issue #30, fixed by PR #39).
+Which release to use: for every field session, both machines run v1.1.0 (or a later release), installed as in [responder-deploy.md](responder-deploy.md). Do not use v1.0.x on any network. It lacks the capture hardening of PR #37 that the steps below rely on (the `.session` file, the clean Ctrl-C exit 3, `fetch --resume`, the merge checks and host-drop accounting), and on real paths it loses observations that cannot be recaptured afterwards. It also ramps saturations too slowly on paths with an RTT of about 300 ms or more (GEO satellite, in-flight Wi-Fi; issue #30, fixed by PR #39).
 
 ## Before each session
 
