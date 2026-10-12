@@ -248,15 +248,21 @@ pub enum Rec {
     Flush,
 }
 
+/// Overflow counts already reported: rows per table, events, events per type.
+type Reported = (BTreeMap<&'static str, u64>, u64, BTreeMap<String, u64>);
+
 /// Records and events lost to a full channel, per table (docs/design/probe.md §1).
 #[derive(Debug, Default)]
 pub struct Overflow {
     pub rows: Mutex<BTreeMap<&'static str, u64>>,
     pub events: AtomicU64,
+    /// Lost events by type.
+    pub event_types: Mutex<BTreeMap<String, u64>>,
 }
 
-/// Cloneable handle for producers. Rows and events never block: a full channel is counted in
-/// `dropped`/`overflow`, and the logger records the counts as `channel_overflow` events.
+/// Cloneable handle for producers. Rows and data-path events ([`Recorder::event_nb`]) never
+/// block: a full channel is counted in `dropped`/`overflow`, and the logger records the counts
+/// as `channel_overflow` events. Other events ([`Recorder::event`]) wait for the logger.
 #[derive(Debug, Clone)]
 pub struct Recorder {
     tx: SyncSender<Rec>,
@@ -305,12 +311,28 @@ impl Recorder {
         self.event_at(pt_sys::clock::mono_raw(), kind, detail);
     }
 
+    /// Record an event from a thread that may wait for the logger (session, control and
+    /// sampler threads): it is never lost. The data path uses [`Recorder::event_nb`].
     pub fn event_at(&self, t: u64, kind: &str, detail: Value) {
-        let v = event_value(self.role, t, kind, detail);
-        // Events come from the pacer and receiver too, which must never block on the logger:
-        // a full channel is counted and reported as channel_overflow.
+        let _ = self
+            .tx
+            .send(Rec::Event(event_value(self.role, t, kind, detail)));
+    }
+
+    /// Record an event from the data path (pacer, receiver), which must never block on the
+    /// logger: on a full channel the event is counted by type and reported in
+    /// `channel_overflow` (docs/design/probe.md §1).
+    pub fn event_nb(&self, kind: &str, detail: Value) {
+        let v = event_value(self.role, pt_sys::clock::mono_raw(), kind, detail);
         if self.tx.try_send(Rec::Event(v)).is_err() {
             self.overflow.events.fetch_add(1, Ordering::Relaxed);
+            *self
+                .overflow
+                .event_types
+                .lock()
+                .expect("lock")
+                .entry(kind.to_string())
+                .or_default() += 1;
         }
     }
 
@@ -449,31 +471,41 @@ fn start_with_capacity(
             let mut last = Instant::now();
             // Overflow counts already reported, so each channel_overflow event carries the
             // increase since the previous one.
-            let mut reported: (BTreeMap<&'static str, u64>, u64) = (BTreeMap::new(), 0);
-            let report_overflow =
-                |events: &mut Vec<Value>, reported: &mut (BTreeMap<&'static str, u64>, u64)| {
-                    let now_rows = overflow.rows.lock().expect("lock").clone();
-                    let now_events = overflow.events.load(Ordering::Relaxed);
-                    let mut rows = Value::map();
-                    let mut any = false;
-                    for (t, n) in &now_rows {
-                        let new = n - reported.0.get(t).copied().unwrap_or(0);
-                        if new > 0 {
-                            rows = rows.with(t, new);
-                            any = true;
-                        }
+            let mut reported: Reported = (BTreeMap::new(), 0, BTreeMap::new());
+            let report_overflow = |events: &mut Vec<Value>, reported: &mut Reported| {
+                let now_rows = overflow.rows.lock().expect("lock").clone();
+                let now_events = overflow.events.load(Ordering::Relaxed);
+                let now_types = overflow.event_types.lock().expect("lock").clone();
+                let mut rows = Value::map();
+                let mut any = false;
+                for (t, n) in &now_rows {
+                    let new = n - reported.0.get(t).copied().unwrap_or(0);
+                    if new > 0 {
+                        rows = rows.with(t, new);
+                        any = true;
                     }
-                    let new_events = now_events - reported.1;
-                    if any || new_events > 0 {
-                        events.push(event_value(
-                            role,
-                            pt_sys::clock::mono_raw(),
-                            "channel_overflow",
-                            Value::map().with("rows", rows).with("events", new_events),
-                        ));
-                        *reported = (now_rows, now_events);
+                }
+                let mut types = Value::map();
+                for (t, n) in &now_types {
+                    let new = n - reported.2.get(t).copied().unwrap_or(0);
+                    if new > 0 {
+                        types = types.with(t, new);
                     }
-                };
+                }
+                let new_events = now_events - reported.1;
+                if any || new_events > 0 {
+                    events.push(event_value(
+                        role,
+                        pt_sys::clock::mono_raw(),
+                        "channel_overflow",
+                        Value::map()
+                            .with("rows", rows)
+                            .with("events", new_events)
+                            .with("event_types", types),
+                    ));
+                    *reported = (now_rows, now_events, now_types);
+                }
+            };
             let io = |e: pt_format::Error| std::io::Error::other(e.to_string());
             let flush = |bufs: &mut BTreeMap<&'static str, Buf>,
                          events: &mut Vec<Value>,
@@ -638,11 +670,14 @@ mod tests {
         let mut head = Map::new();
         head.insert(Key::from("kind"), Value::from("obslog"));
         // A channel of one message, filled before the logger can drain it: later rows and
-        // events are dropped, never blocking the caller.
+        // data-path events are dropped, never blocking the caller; session events wait.
         let (rec, h) = start_with_capacity(&path, head, Role::A, 1).unwrap();
         let row = vec![Some(0), Some(1), Some(2), Some(3)];
         for _ in 0..2000 {
             rec.row("bad", row.clone());
+            rec.event_nb("send_error", Value::map());
+        }
+        for _ in 0..50 {
             rec.event("phase_start", Value::map());
         }
         let dropped = rec.dropped.load(Ordering::Relaxed);
@@ -658,20 +693,33 @@ mod tests {
             },
         )
         .unwrap();
-        let mut rows = 0;
+        let (mut rows, mut lost, mut lost_send_error, mut kept, mut phases) = (0, 0, 0, 0, 0);
         for sec in f.sections.iter().filter(|s| &s.kind == b"EVNT") {
             for e in sec.get("events").and_then(Value::as_array).unwrap() {
-                if e.get("type").and_then(Value::as_str) == Some("channel_overflow") {
-                    let d = e.get("detail").unwrap();
-                    rows += d
-                        .get("rows")
-                        .and_then(|r| r.get("bad"))
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0);
+                match e.get("type").and_then(Value::as_str) {
+                    Some("channel_overflow") => {
+                        let d = e.get("detail").unwrap();
+                        let n = |k: &str, t: &str| {
+                            d.get(k)
+                                .and_then(|r| r.get(t))
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0)
+                        };
+                        rows += n("rows", "bad");
+                        lost_send_error += n("event_types", "send_error");
+                        lost += d.get("events").and_then(Value::as_u64).unwrap_or(0);
+                    }
+                    Some("send_error") => kept += 1,
+                    Some("phase_start") => phases += 1,
+                    _ => {}
                 }
             }
         }
         assert_eq!(rows, dropped);
+        // Data-path events lost to the full channel are counted by type.
+        assert!(lost > 0 && lost_send_error == lost && kept + lost == 2000);
+        // Session-thread events wait for the logger and are never lost.
+        assert_eq!(phases, 50);
         let _ = std::fs::remove_file(&path);
     }
 }

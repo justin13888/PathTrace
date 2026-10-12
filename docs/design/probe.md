@@ -19,7 +19,7 @@ The probe records everything observable about the path, in both directions, into
 | context (both endpoints; Wi-Fi on the initiator only) | Interface counters, UDP/softnet stack counters and egress qdisc counters at 10 Hz; nl80211 station info and clock pairs at 1 Hz; rtnetlink events | Slow syscalls kept off the data path |
 | tcp | Reference flows and TCP class probes; `TCP_INFO` sampling every 10 ms on both ends | Kernel TCP blocks |
 
-Records and events flow to the logger over one bounded `std::sync::mpsc` channel, and producers never block on it. If it is full, the record or event is counted per table; the logger writes a `channel_overflow {rows: {table: n}, events: n}` event with the new counts at its next flush and at the end. Records are never silently lost, and backpressure never stalls pacing.
+Records and events flow to the logger over one bounded `std::sync::mpsc` channel. The pacer and receiver never block on it: if it is full, their record or event is counted (rows per table, events per type), and the logger writes a `channel_overflow {rows: {table: n}, events: n, event_types: {type: n}}` event with the new counts at its next flush and at the end. Events from the session, control and sampler threads (`phase_start`, `session_end`, `interrupted`, …) wait for the logger instead, so they are never lost and derivation can rely on the phase timeline. Records are never silently lost, and backpressure never stalls pacing.
 
 ## 2. Keys and pairing
 

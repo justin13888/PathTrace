@@ -312,7 +312,7 @@ fn record_send_failure(
             "send_error"
         }
     };
-    rec.event(kind, d);
+    rec.event_nb(kind, d);
 }
 
 fn pacer_loop(
@@ -427,7 +427,7 @@ fn pacer_loop(
                 let ip = bytes.len() as i64 + i64::from(udp_overhead(s.is_v6()));
                 if o.failed {
                     if o.would_block() {
-                        rec.event(
+                        rec.event_nb(
                             "send_eagain",
                             Value::map()
                                 .with("sock", *sock)
@@ -472,7 +472,7 @@ fn pacer_loop(
                 } else {
                     // An echo or handshake reply: no `tx` row, but its id is recorded so the
                     // merge's id check can account for its stamp (probe.md §4.1).
-                    rec.event(
+                    rec.event_nb(
                         "raw_sent",
                         Value::map()
                             .with("sock", *sock)
@@ -493,7 +493,7 @@ fn pacer_loop(
         if over_cap && !cap_logged {
             cap_logged = true;
             shared.cap_hit.store(true, Ordering::Relaxed);
-            rec.event(
+            rec.event_nb(
                 "budget_cap",
                 Value::map().with("bytes_sent", shared.bytes_sent.load(Ordering::Relaxed)),
             );
@@ -501,7 +501,7 @@ fn pacer_loop(
         let light_dead = now.saturating_sub(last_ctrl) > LIGHT_DEAD_MAN_NS;
         if light_dead != light_paused {
             light_paused = light_dead;
-            rec.event(
+            rec.event_nb(
                 if light_dead {
                     "light_paused"
                 } else {
@@ -539,7 +539,7 @@ fn pacer_loop(
                 }
                 DeadMan::Pause | DeadMan::Resume => {
                     g.paused = !g.paused;
-                    rec.event(
+                    rec.event_nb(
                         if g.paused {
                             "flow_paused"
                         } else {
@@ -595,7 +595,7 @@ fn pacer_loop(
             }
         }
         for (id, why) in stopped {
-            rec.event(
+            rec.event_nb(
                 "flow_stopped",
                 Value::map().with("flow", id).with("reason", why),
             );
@@ -668,7 +668,7 @@ fn pacer_loop(
                 }
                 let (flow, due, ..) = &items[i];
                 if o.would_block() {
-                    rec.event(
+                    rec.event_nb(
                         "send_eagain",
                         Value::map()
                             .with("sock", sock)
@@ -698,7 +698,7 @@ fn pacer_loop(
             }
             if s.tx_id_mode() != id_modes[sock] {
                 id_modes[sock] = s.tx_id_mode();
-                rec.event(
+                rec.event_nb(
                     "tx_id_mode",
                     Value::map()
                         .with("sock", sock)
@@ -774,7 +774,7 @@ fn receiver_loop(
                             payload,
                         } => {
                             let quoted = Header::decode(&payload);
-                            rec.event(
+                            rec.event_nb(
                                 "icmp",
                                 Value::map()
                                     .with("sock", si)
@@ -789,7 +789,7 @@ fn receiver_loop(
                             );
                         }
                         ErrEvent::Local { errno, info } => {
-                            rec.event(
+                            rec.event_nb(
                                 "local_error",
                                 Value::map()
                                     .with("sock", si)
@@ -874,7 +874,7 @@ fn receiver_loop(
                 }
                 let next = src_idx.len() as u64;
                 let idx = *src_idx.entry(m.src).or_insert_with(|| {
-                    rec.event(
+                    rec.event_nb(
                         "peer_addr",
                         Value::map()
                             .with("idx", next)
