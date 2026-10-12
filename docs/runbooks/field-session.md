@@ -18,6 +18,12 @@ Which release to use: for every field session, both machines run the first relea
 1. Connect to the network and note what it is (class, venue).
 2. Close large downloads, sync clients and video calls on the laptop. Local traffic competes with the probe (interface counters are recorded, so it is visible, but it biases capacity).
 3. Plug in the laptop: power saving adds timing noise.
+4. Run `pathtrace doctor vm`. It exits 1 only when a session cannot work (old kernel, no key, the responder's port unreachable or intercepted on every address family). Read the warnings too:
+   - `tcp/<port> not intercepted` failed, or `tcp/<port> reachable` failed on every port: a captive portal. Log in through a browser, then run `doctor` again. A trace taken behind an unopened portal records the portal, not the path.
+   - `udp/<port> not refused` warns `refused`: this network (or the responder) rejects that UDP port. The session still runs and records the UDP classes on that port as blocked (all of them, over a TCP-only session, when the responder port itself is refused). `not refused` does not prove that UDP arrives: only a session can, so the probe's own result is the final word.
+   - `clock sync` warns: start an NTP daemon (chrony, or `timedatectl set-ntp true`) and wait until `doctor` reports it synchronised. Check the responder the same way once, with `pathtrace doctor` on it.
+   - `power` warns: the laptop is on battery (step 3). `cpu governor` warns: the governor pins the lowest frequency; switch to `schedutil` or `performance` for the session.
+   - `ipv6` warns: the network or the responder has no IPv6, so only IPv4 is tested (and the probe uses IPv4). Checks with an ` (ipv6)` suffix cover the second family when both exist.
 
 ## Run
 
