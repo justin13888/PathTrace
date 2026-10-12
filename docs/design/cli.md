@@ -61,7 +61,34 @@
 - **Choice**: `keygen` on both machines, then `authorize` on the responder (prints the pairing string), then `responder add` on the initiator. Secrets never travel in command-line arguments to the network, only between the user's own terminals.
 
 ### `doctor` does not open a session
-- **Choice**: an unauthenticated UDP datagram gets no reply by design (the responder must not answer strangers), so `doctor` tests TCP ports, DNS, timestamping, clocks, the interface, Wi-Fi stats and keys. The end-to-end check is `probe --profile smoke` (about 25 s, at most 50 MB).
+- **Problem**: REQ-PRB-025 asks for reachability of the responder on every class port, UDP included. A UDP port can only be shown open by a reply, and the responder replies only to a valid Noise handshake, which starts a real session: a responder log, a session slot (a second initiator is refused as busy), and a `fetch` token.
+- **Constraints**: the responder must not answer strangers (REQ-SEC-001, REQ-PRB-004), so no unauthenticated echo; `doctor` must be cheap to run repeatedly and leave nothing behind on the responder; the end-to-end check already exists.
+- **Alternatives**: a handshake-only session that `doctor` closes at once (proves UDP and pairing, but writes a responder log per run, holds the slot, and needs a wire change for a "check" session the responder discards); an unauthenticated echo on the responder (rejected: answers strangers).
+- **Choice**: `doctor` still opens no session. For UDP it sends three empty datagrams, 300 ms apart, from a connected socket to each UDP class port and waits up to 1 s for an ICMP error. `refused` (ICMP port unreachable: nothing listens, or a firewall rejects) and `unreachable` (ICMP host or network unreachable) are warnings; silence is reported as `not refused`, which shows the datagrams were not rejected but not that they arrived. An empty datagram never decodes as a handshake or probe packet, so the responder ignores it (during a running session it is counted as an unknown packet). The end-to-end check stays `probe --profile smoke` (about 25 s, at most 50 MB).
+- **Rationale**: a refusal is the common UDP failure (responder down, `--no-class-ports`, a host firewall rejecting) and is detected without any responder state; a silent drop is indistinguishable from delivery without a reply, which only a session can give.
+- **Validated by**: unit tests of the check classifiers in `crates/pathtrace/src/doctor.rs`; EXP-0007 runs `doctor --json` from a fresh process.
+
+### `doctor` checks
+Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts that make a session impossible are fatal.
+
+| Check | Fatal | What it reads |
+|---|---|---|
+| `kernel >= 6.1` | yes | `/proc/sys/kernel/osrelease` |
+| `key` | yes | `<config>/key` |
+| `kernel timestamps` | no | loopback self-test (below); `ok` only when both kernel RX and kernel TX stamps were seen |
+| `clocksource` | no | `tsc` or `arch_sys_counter` |
+| `clock sync` | no | `adjtimex(2)` read-only: synchronised by an NTP daemon (chrony, ntpd, systemd-timesyncd), with its estimated and maximum error. An undisciplined clock drifts during a session and widens one-way-delay uncertainty |
+| `power` | no | `/sys/class/power_supply`: warns on battery (power saving adds timing noise) |
+| `cpu governor` | no | `/sys/devices/system/cpu/cpu*/cpufreq`: warns on `powersave` under a driver where it pins the lowest frequency (not `intel_pstate` or `amd-pstate-epp`, whose `powersave` is a dynamic policy) |
+| `resolve responder` | yes | DNS: every address of the responder |
+| `ipv4`, `ipv6` | no | a local route to the responder's first address of that family; a family the responder has no address for, or this host has no route for, is reported and skipped (the IPv6 check: `probe` falls back to the other family, probe.md §3.1) |
+| per family: `egress interface`, `metered`, `wifi link stats` | no | as `probe` records them |
+| per family: `tcp/<port> reachable` | no (`responder reachable` is the fatal summary) | TCP connect (3 s) to the responder port, 443 and 80 |
+| per family: `udp/<port> not refused` | no | the UDP test above, on the responder port and 443 |
+| per family: `tcp/<port> not intercepted` | no (`responder reachable` is the fatal summary) | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass. When the request cannot be made (the second connect or the write fails) it warns `not tested`, and the port does not count as clean |
+| `responder reachable` | yes | on at least one family, the responder port took a TCP connection that was tested and that nothing intercepted; it fails only when the responder port is unreachable, intercepted or untested on every family, because `probe` falls back to the other family (probe.md §3.1) |
+
+Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power and timestamps matter as much. NIC offload state (GRO, LRO, GSO, TSO) is not checked yet: it needs a `pt-sys` ethtool reader (issue #45).
 
 ### `doctor`'s timestamp self-test warms up
 - **Problem**: the kernel enables RX timestamping lazily (deferred static-key work after the first socket asks for it), so the first datagrams after bind can arrive unstamped. A single-packet self-test then falsely reports `kernel RX stamps false` (EXP-0008).
