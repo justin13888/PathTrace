@@ -1,0 +1,5 @@
+wired-10M: packets=35168 canonical=5.007 B/pkt (budget<=8: true), smallest-lossless=ptf-delta2/ns/zstd19/chunk65536 5.007 B/pkt (within 10%: true), canonical encode 13 ms (<=10s: true)
+wired-100M: packets=280410 canonical=4.713 B/pkt (budget<=8: true), smallest-lossless=ptf-delta2/ns/zstd19/chunk262144 4.713 B/pkt (within 10%: true), canonical encode 70 ms (<=10s: true)
+wired-500M: packets=1370375 canonical=4.677 B/pkt (budget<=8: true), smallest-lossless=ptf-delta2/ns/zstd19/chunk65536 4.677 B/pkt (within 10%: true), canonical encode 362 ms (<=10s: true)
+wifi-100M: packets=280410 canonical=4.482 B/pkt (budget<=8: true), smallest-lossless=ptf-delta2/ns/zstd9/chunk65536 4.471 B/pkt (within 10%: true), canonical encode 92 ms (<=10s: true)
+verdict: pass
