@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/target/groundtruth/rate-cap/01a131bf-78b3-76a2-b399-56888c9f075a.ptf
+content_digest: 025ede4ac52ee788fa6ad83974052e6c862c9aef71506798f1c1ce351f5183c4
+packets a_to_b: 3414
+packets b_to_a: 3389
+session: 7be1fc31

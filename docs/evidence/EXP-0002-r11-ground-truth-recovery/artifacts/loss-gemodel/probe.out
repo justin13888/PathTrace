@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/target/groundtruth/loss-gemodel/01a131b8-1403-752c-89fb-0cf00b469dc4.ptf
+content_digest: 90c1f7b79fb2122be049cc8cfb2dbaade2fe4d4c58c6d52a9328f7ce2d00e432
+packets a_to_b: 120843
+packets b_to_a: 120995
+session: 59765388
