@@ -244,17 +244,24 @@ impl Control {
         if init.as_slice() != noise || *left == 0 {
             return false;
         }
-        *left -= 1;
-        if let Wire::Udp { cmd, sock } = &self.wire {
-            let _ = cmd.send(PacerCmd::Raw {
+        // Only a UDP session resends; on a TCP wire (after the TCP fallback) a late UDP Init
+        // is ignored and is not a resend.
+        let Wire::Udp { cmd, sock } = &self.wire else {
+            return false;
+        };
+        let queued = cmd
+            .send(PacerCmd::Raw {
                 sock: *sock,
                 dst: src,
                 bytes: reply.clone(),
                 at: 0,
                 log: None,
-            });
+            })
+            .is_ok();
+        if queued {
+            *left -= 1;
         }
-        true
+        queued
     }
 
     pub fn srtt(&self) -> Duration {
