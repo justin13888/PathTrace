@@ -59,7 +59,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "delay.light-window-min/1",
         "jitter.light-residual/1",
         "delay.size-slope/1",
-        "capacity.saturated-arrivals/1",
+        "capacity.saturated-arrivals/2",
         "capacity.train-dispersion/1",
         "queue.loss-onset/2",
         "policer.lossy-flat/2",
