@@ -107,22 +107,44 @@ impl Profile {
         }
     }
 
+    /// Planned seconds per phase, in session order (upper estimates, for the background
+    /// reserve; docs/design/probe.md §6).
+    pub fn phase_plan(&self, track_s: u64) -> Vec<(u16, f64)> {
+        vec![
+            (0, 2.0),
+            (1, 10.0),
+            (2, self.quiet_s),
+            (3, self.chirp_s + 0.5),
+            (4, self.sat_s + 1.0),
+            (5, self.sat_s + 1.0),
+            (6, self.both_s + 1.0),
+            (7, 3.0 * (self.class_sat_s + 0.5)),
+            (8, if self.refs { 35.0 } else { 0.0 }),
+            (10, track_s as f64),
+        ]
+    }
+
+    /// Seconds the session lasts at least, because of the NAT binding probes.
+    pub fn nat_s(&self) -> f64 {
+        self.nat_timeouts_s.iter().max().copied().unwrap_or(0) as f64 + 2.0
+    }
+
     /// Planned session length in seconds (an upper estimate, for the background reserve).
     pub fn planned_s(&self, track_s: u64) -> f64 {
-        let nat = self.nat_timeouts_s.iter().max().copied().unwrap_or(0) as f64 + 2.0;
-        let phases = 2.0
-            + 10.0
-            + self.quiet_s
-            + self.chirp_s
-            + 0.5
-            + 2.0 * (self.sat_s + 1.0)
-            + (self.both_s + 1.0)
-            + 3.0 * (self.class_sat_s + 0.5)
-            + if self.refs { 35.0 } else { 0.0 }
-            + track_s as f64;
-        phases.max(nat) + 5.0
+        let phases: f64 = self.phase_plan(track_s).iter().map(|p| p.1).sum();
+        phases.max(self.nat_s()) + 5.0
     }
 }
+
+/// Bytes the P8 TCP bulk transfer of a sender with data cap `cap` may send: reserved from the
+/// start of the session, so the saturations before it leave room for it (docs/design/probe.md
+/// §6).
+pub fn ref_tcp_bytes(cap: u64) -> u64 {
+    (cap / 8).min(100_000_000)
+}
+
+/// UDP CBR reference flow bytes per sender in P8 (2 Mbit/s for 5 s).
+pub const REF_CBR_BYTES: u64 = 2_000_000 / 8 * 5;
 
 /// Fixed flow ids (docs/design/probe.md §6). Deep-tracking saturations use 100+.
 pub mod ids {

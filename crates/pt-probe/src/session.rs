@@ -251,10 +251,49 @@ struct Budget {
     left_s: [f64; 2],
     /// Background bytes per second per sender (light flow, trains, control).
     bg_bps: f64,
-    /// Reserve per sender for the P8 constant-rate flows.
-    cbr_bytes: u64,
-    /// Planned end of the session (upper estimate).
-    end: Instant,
+    /// Reserve per sender for P8 (TCP bulk transfer and constant-rate flow); 0 once P8 ran.
+    ref_bytes: [u64; 2],
+    /// Planned seconds per phase (`Profile::phase_plan`).
+    plan: Vec<(u16, f64)>,
+    /// Planned seconds of the current phase, of the phases after it (plus margin), and when
+    /// the current phase started.
+    cur_s: f64,
+    rest_s: f64,
+    phase_start: Instant,
+    /// The session lasts at least until here (NAT binding probes).
+    nat_end: Instant,
+}
+
+impl Budget {
+    /// Phase `id` starts: the reserve covers its planned time and every later phase's, so a
+    /// phase that ran long does not shrink the reserve for the ones still to come.
+    fn enter(&mut self, id: u16) {
+        self.cur_s = self.plan.iter().find(|p| p.0 == id).map_or(0.0, |p| p.1);
+        self.rest_s = self
+            .plan
+            .iter()
+            .filter(|p| p.0 > id)
+            .map(|p| p.1)
+            .sum::<f64>()
+            + 5.0;
+        self.phase_start = Instant::now();
+    }
+
+    /// Planned seconds still to come.
+    fn time_left_s(&self) -> f64 {
+        let planned =
+            (self.cur_s - self.phase_start.elapsed().as_secs_f64()).max(0.0) + self.rest_s;
+        planned.max(
+            self.nat_end
+                .saturating_duration_since(Instant::now())
+                .as_secs_f64(),
+        )
+    }
+
+    /// Bytes sender `k` must keep for background traffic and P8 from now on.
+    fn reserve(&self, k: usize) -> u64 {
+        (self.bg_bps * self.time_left_s()) as u64 + self.ref_bytes[k]
+    }
 }
 
 struct Ctx {
@@ -324,6 +363,7 @@ impl Ctx {
         if self.interrupted() {
             return false;
         }
+        self.budget.enter(id);
         self.log_phase(id, name);
         true
     }
@@ -453,11 +493,7 @@ impl Ctx {
             Role::B => sh.peer_bytes_sent.load(Ordering::Relaxed),
         };
         let b = &mut self.budget;
-        let time_left = b
-            .end
-            .saturating_duration_since(Instant::now())
-            .as_secs_f64();
-        let reserve = (b.bg_bps * time_left) as u64 + b.cbr_bytes;
+        let reserve = b.reserve(k);
         let a = crate::plan::allowance(b.cap[k], spent, reserve, dur_s, b.left_s[k]);
         b.left_s[k] = (b.left_s[k] - dur_s).max(0.0);
         if a < crate::plan::MIN_ALLOWANCE {
@@ -862,19 +898,32 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let track_s = opts.track_s.unwrap_or(opts.profile.track_s);
     let p = &opts.profile;
     let started = Instant::now();
-    let budget = Budget {
-        cap: [
-            p.data_cap,
-            p.data_cap.min(wb.u64_or("data_cap", p.data_cap)),
-        ],
+    let cap = [
+        p.data_cap,
+        p.data_cap.min(wb.u64_or("data_cap", p.data_cap)),
+    ];
+    let ref_bytes = |c: u64| {
+        if p.refs {
+            crate::plan::ref_tcp_bytes(c) + crate::plan::REF_CBR_BYTES
+        } else {
+            0
+        }
+    };
+    let mut budget = Budget {
+        cap,
         left_s: [
             p.saturation_s(Role::A, track_s),
             p.saturation_s(Role::B, track_s),
         ],
         bg_bps: crate::plan::background_bps(p, mtu),
-        cbr_bytes: if p.refs { 2_000_000 / 8 * 5 } else { 0 },
-        end: started + Duration::from_secs_f64(p.planned_s(track_s)),
+        ref_bytes: [ref_bytes(cap[0]), ref_bytes(cap[1])],
+        plan: p.phase_plan(track_s),
+        cur_s: 0.0,
+        rest_s: 0.0,
+        phase_start: started,
+        nat_end: started + Duration::from_secs_f64(p.nat_s()),
     };
+    budget.enter(0);
     let mut ctx = Ctx {
         ep,
         ctl,
@@ -1353,16 +1402,27 @@ fn run_phases(
         if !ctx.phase(8, "reference flows") {
             return;
         }
-        let budget = p
-            .data_cap
-            .saturating_sub(ctx.ep.shared.bytes_sent.load(Ordering::Relaxed));
-        let bulk = (budget / 4).min(100_000_000);
+        // Each direction's bulk transfer gets its reserved bytes, or what its sender has left
+        // after the background and CBR still to come, whichever is less (probe.md §6).
+        let bulk = |ctx: &Ctx, k: usize| {
+            let sh = &ctx.ep.shared;
+            let spent = if k == 0 {
+                sh.bytes_sent.load(Ordering::Relaxed)
+            } else {
+                sh.peer_bytes_sent.load(Ordering::Relaxed)
+            };
+            let b = &ctx.budget;
+            let after = (b.bg_bps * b.time_left_s()) as u64 + crate::plan::REF_CBR_BYTES;
+            crate::plan::ref_tcp_bytes(b.cap[k])
+                .min(b.cap[k].saturating_sub(spent).saturating_sub(after))
+        };
         let dur = if p.name == "smoke" { 2.0 } else { 5.0 };
         let addr443 = SocketAddr::new(dst.ip(), 443);
-        for (id, kind) in [
-            (ids::TCP_BULK_UP, Kind::Upload),
-            (ids::TCP_BULK_DOWN, Kind::Download),
+        for (id, kind, k) in [
+            (ids::TCP_BULK_UP, Kind::Upload, 0),
+            (ids::TCP_BULK_DOWN, Kind::Download, 1),
         ] {
+            let bulk = bulk(ctx, k);
             let hdr = ConnHeader {
                 session,
                 flow: id,
@@ -1439,6 +1499,8 @@ fn run_phases(
             ctx.start(vec![s], 50);
             ctx.sleep(dur + 0.5);
         }
+        // P8 is done: its reserve is free for the tracking saturations.
+        ctx.budget.ref_bytes = [0, 0];
     }
     let track = opts.track_s.unwrap_or(p.track_s);
     if track > 0 {
@@ -2046,6 +2108,40 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn budget_reserve_covers_the_planned_time_still_to_come() {
+        let p = Profile::by_name("standard").unwrap();
+        let now = Instant::now();
+        let mut b = Budget {
+            cap: [p.data_cap; 2],
+            left_s: [0.0; 2],
+            bg_bps: 1000.0,
+            ref_bytes: [
+                crate::plan::ref_tcp_bytes(p.data_cap) + crate::plan::REF_CBR_BYTES,
+                0,
+            ],
+            plan: p.phase_plan(0),
+            cur_s: 0.0,
+            rest_s: 0.0,
+            phase_start: now,
+            nat_end: now,
+        };
+        b.enter(0);
+        let total = b.time_left_s();
+        assert!((total - (p.planned_s(0))).abs() < 0.5, "{total}");
+        b.enter(4);
+        // P4, P5, P6, P7, P8 and the margin are still to come.
+        let from4 = 2.0 * 11.0 + 6.0 + 3.0 * 3.5 + 35.0 + 5.0;
+        assert!((b.time_left_s() - from4).abs() < 0.5);
+        // P4 overran by a minute: the later phases still need their planned time.
+        b.phase_start = now.checked_sub(Duration::from_secs(60)).unwrap();
+        assert!((b.time_left_s() - (from4 - 11.0)).abs() < 0.5);
+        // The reserve includes P8 (TCP bulk and CBR) for the sender that still has it.
+        let bg = (1000.0 * b.time_left_s()) as u64;
+        assert!(b.reserve(0) >= bg + 25_000_000 + crate::plan::REF_CBR_BYTES);
+        assert!(b.reserve(1) <= bg + 1000);
+    }
 
     #[test]
     fn fetch_routes_use_tls_when_a_cert_is_known() {

@@ -158,7 +158,9 @@ Standard profile (about 90 s of data phases):
 `allowance = (cap − spent_sender − reserve_sender) × this_phase_s / remaining_saturation_s_sender`
 
 - `spent` is the sender's bytes so far: the initiator's own counter, or the responder's counter as reported in its feedback (`sent`).
-- `reserve` is the background traffic still to come (light flow, trains, control, CBR) over the remaining planned time.
+- `reserve` is the background traffic still to come (light flow, trains, control) over the planned time still to come, plus P8 until it has run: the CBR flow and the TCP bulk transfer, which is reserved up front at min(cap / 8, 100 MB) per sender. The planned time still to come is the current phase's planned time not yet used plus the planned time of every later phase (at least until the NAT probes end), so a phase that runs long does not shrink the reserve of the phases after it.
+- In P8, each direction's TCP bulk transfer sends at most its reserved bytes, and at most what its sender has left after the background and CBR still to come.
+- A flow id that is reused (tracking rounds wrap after 150) starts its byte count again.
 - `remaining_saturation_s` covers this and all later saturation phases of that sender.
 
 A phase whose allowance is under 1 MB is skipped and records `phase_skipped {reason: "budget"}`. The pacer of either endpoint stops a flow when its bytes reach `max_bytes` (`flow_stopped {reason: "allowance"}`), and the controller starts the overdrive early so that it fits in the allowance (§7). On fast paths, saturations therefore get shorter and every phase still runs. If a hard cap is reached anyway, the pacer stops every probe flow, the light flow included, and records a `budget_cap` event. Only the control traffic needed to finish the session continues, and it is still counted (EXP-0002-r2).
