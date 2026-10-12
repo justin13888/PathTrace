@@ -2,6 +2,17 @@
 
 Goal: one trustworthy `.ptf` trace per session, labelled so that class-level conclusions are possible later (REQ-PRB-028, issue #16).
 
+## What you need
+
+A session always has two Linux machines (x86_64 or aarch64, kernel ≥ 6.1), both under your control, with `pathtrace` installed on each:
+
+- **Initiator**: the machine physically on the network you want to record (your laptop at the hotel, café or on the train). It runs `pathtrace probe`, so the trace describes the path from where it sits.
+- **Responder**: a second machine with a stable, publicly reachable address (a VM or a home server with the ports in [deploy/README.md](../../deploy/README.md) open). It runs `pathtrace serve` under systemd and never initiates anything.
+
+Set up the responder and pair the two once with [responder-deploy.md](responder-deploy.md); its smoke session must pass before the first field session. The responder must not sit on the network being measured, or the path under test is not the one the trace records.
+
+Which release to use: for every field session, both machines run the first release that contains PR #37 and PR #39, or a build from source of `main` after both merged. Do not use v1.0.1 on any network. It lacks the capture hardening of PR #37 that the steps below rely on (the `.session` file, the clean Ctrl-C exit 3, `fetch --resume`, the merge checks and host-drop accounting), and on real paths it loses observations that cannot be recaptured afterwards. It also ramps saturations too slowly on paths with an RTT of about 300 ms or more (GEO satellite, in-flight Wi-Fi; issue #30, fixed by PR #39).
+
 ## Before each session
 
 1. Connect to the network and note what it is (class, venue).

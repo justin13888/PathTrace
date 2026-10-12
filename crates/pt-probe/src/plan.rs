@@ -283,14 +283,20 @@ struct CtlState {
     rate: f64,
     mode: Mode,
     last_double: u64,
+    /// MONO_RAW time the flow starts sending.
+    start: u64,
+    /// Feedback lag: time from the flow's start to the first feedback reporting a delivery,
+    /// about one RTT (None until that feedback arrives).
+    lag: Option<u64>,
     /// MONO_RAW time from which to overdrive (fill the bottleneck buffer), or u64::MAX.
     overdrive_at: u64,
     /// Byte allowance of the flow (0 = none).
     max_bytes: u64,
 }
 
-/// Saturation controller (docs/design/probe.md §7): slow start doubling every 50 ms until the
-/// queueing delay exceeds the target, then hold a standing queue around the target.
+/// Saturation controller (docs/design/probe.md §7): slow start doubling once per slow-start
+/// step (50 ms, or one feedback lag on long-RTT paths) until the queueing delay exceeds the
+/// target or the delivery rate stops catching up, then hold a standing queue around the target.
 #[derive(Debug)]
 pub struct Controller {
     pub role: Role,
@@ -305,6 +311,18 @@ pub const START_BPS: f64 = 2_000_000.0;
 /// Length of the buffer-filling overdrive at the end of a saturation.
 pub const OVERDRIVE_NS: u64 = 1_500_000_000;
 pub const FLOOR_BPS: f64 = 100_000.0;
+/// Shortest slow-start step (one doubling, or the exit test).
+pub const SS_STEP_NS: u64 = 50_000_000;
+/// Margin added to the feedback lag before a slow-start step: one feedback interval, so the
+/// delivery-rate window reports packets sent after the previous doubling.
+pub const SS_LAG_MARGIN_NS: u64 = 20_000_000;
+
+/// Slow-start step for a flow whose feedback lag is `lag` (docs/design/probe.md §7): the rate
+/// may only double, or slow start exit on the delivery rate, once the feedback reflects the
+/// rate set at the previous step.
+fn ss_step(lag: Option<u64>) -> u64 {
+    lag.map_or(SS_STEP_NS, |l| SS_STEP_NS.max(l + SS_LAG_MARGIN_NS))
+}
 
 /// Bytes the overdrive step sends at 1.5× delivery rate `d` (bit/s).
 fn overdrive_bytes(d: f64) -> f64 {
@@ -366,6 +384,8 @@ impl Controller {
                 rate: START_BPS,
                 mode: Mode::SlowStart,
                 last_double: mono_raw(),
+                start,
+                lag: None,
                 overdrive_at,
                 max_bytes,
             },
@@ -378,11 +398,15 @@ impl Controller {
 
     /// Handle a feedback message from the peer.
     pub fn on_feedback(&self, body: &Value) {
+        self.feedback_at(body, mono_raw());
+    }
+
+    /// Handle a feedback message that arrived at MONO_RAW time `now`.
+    fn feedback_at(&self, body: &Value, now: u64) {
         let Some(list) = body.get("flows").and_then(Value::as_array) else {
             return;
         };
         let qt_base = *self.q_target_ns.lock().expect("lock") as f64;
-        let now = mono_raw();
         let mut flows = self.flows.lock().expect("lock");
         for f in list {
             let id = f.u64_or("flow", 999);
@@ -398,16 +422,20 @@ impl Controller {
             } else {
                 0.0
             });
+            if st.lag.is_none() && d > 0.0 {
+                st.lag = Some(now.saturating_sub(st.start));
+            }
             match st.mode {
                 Mode::SlowStart => {
-                    // Leave slow start when the queue builds or we send much faster than the
-                    // path delivers; continue at the delivery rate.
-                    if q > qt
-                        || (d > 0.0 && st.rate > 2.0 * d && now - st.last_double >= 50_000_000)
-                    {
+                    // Leave slow start when the queue builds, or when the delivery rate has not
+                    // caught up with the rate set one step ago (it reports what was sent one
+                    // feedback lag earlier, so a shorter step would exit on every long-RTT
+                    // path); continue at the delivery rate. Otherwise double once per step.
+                    let step_due = now.saturating_sub(st.last_double) >= ss_step(st.lag);
+                    if q > qt || (d > 0.0 && st.rate > 2.0 * d && step_due) {
                         st.mode = Mode::Hold;
                         st.rate = if d > 0.0 { d } else { st.rate / 2.0 };
-                    } else if now - st.last_double >= 50_000_000 {
+                    } else if step_due {
                         st.rate *= 2.0;
                         st.last_double = now;
                     }
@@ -532,39 +560,142 @@ mod tests {
         assert!(l.iter().all(|s| *s <= 1400));
     }
 
+    /// Feedback for flow 7 with queueing delay `q` (ns) and delivery rate `d` (bit/s).
+    fn fb7(q: u64, d: u64) -> Value {
+        Value::map().with(
+            "flows",
+            Value::Array(vec![
+                Value::map()
+                    .with("flow", 7u64)
+                    .with("qdelay_ns", q)
+                    .with("rate_bps", d),
+            ]),
+        )
+    }
+
+    fn set_rate(rx: &std::sync::mpsc::Receiver<PacerCmd>) -> u64 {
+        let PacerCmd::SetRate(7, r) = rx.recv().unwrap() else {
+            panic!()
+        };
+        r
+    }
+
+    const MS: u64 = 1_000_000;
+
     #[test]
     fn controller_slow_start_then_hold() {
         let (tx, rx) = std::sync::mpsc::channel();
         let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
-        c.add(7, mono_raw(), 0, 0);
-        // Low queue: rate should double (after 50 ms).
-        std::thread::sleep(std::time::Duration::from_millis(60));
-        c.on_feedback(&Value::map().with(
-            "flows",
-            Value::Array(vec![
-                    Value::map()
-                        .with("flow", 7u64)
-                        .with("qdelay_ns", 0u64)
-                        .with("rate_bps", 1_000_000u64),
-                ]),
-        ));
-        let PacerCmd::SetRate(7, r) = rx.recv().unwrap() else {
-            panic!()
-        };
-        assert_eq!(r, 4_000_000);
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        // Short path: first feedback after 20 ms; the step stays 50 ms.
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 20 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        // Low queue: rate doubles once the step has passed.
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 60 * MS);
+        assert_eq!(set_rate(&rx), 4_000_000);
         // High queue: switch to hold at the delivery rate.
-        c.on_feedback(&Value::map().with(
-            "flows",
-            Value::Array(vec![
-                    Value::map()
-                        .with("flow", 7u64)
-                        .with("qdelay_ns", 50_000_000u64)
-                        .with("rate_bps", 3_000_000u64),
-                ]),
-        ));
-        let PacerCmd::SetRate(7, r) = rx.recv().unwrap() else {
-            panic!()
-        };
-        assert_eq!(r, 3_000_000);
+        c.feedback_at(&fb7(50 * MS, 3_000_000), t0 + 80 * MS);
+        assert_eq!(set_rate(&rx), 3_000_000);
+    }
+
+    #[test]
+    fn slow_start_exits_when_delivery_stops_catching_up() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        // A 3 Mbit/s policer (no queue): delivery reaches 2, then stays at 3.
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 20 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 60 * MS);
+        assert_eq!(set_rate(&rx), 4_000_000);
+        c.feedback_at(&fb7(0, 3_000_000), t0 + 120 * MS);
+        assert_eq!(set_rate(&rx), 8_000_000);
+        // 8 > 2 × 3 after a full step: hold at the delivery rate.
+        c.feedback_at(&fb7(0, 3_000_000), t0 + 180 * MS);
+        assert_eq!(set_rate(&rx), 3_000_000);
+    }
+
+    #[test]
+    fn slow_start_waits_one_feedback_lag_on_long_rtt_paths() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        // 600 ms RTT: the first delivery report arrives after 600 ms.
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 600 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 625 * MS);
+        assert_eq!(set_rate(&rx), 4_000_000);
+        // The delivery rate still reports 2 Mbit/s for one more lag: neither double nor exit.
+        for ms in [700, 800, 1000, 1200] {
+            c.feedback_at(&fb7(0, 2_000_000), t0 + ms * MS);
+            assert_eq!(set_rate(&rx), 4_000_000, "at {ms} ms");
+        }
+        // Delivery caught up one lag after the doubling: double again.
+        c.feedback_at(&fb7(0, 4_000_000), t0 + 1250 * MS);
+        assert_eq!(set_rate(&rx), 8_000_000);
+    }
+
+    /// Simulated path: rate-limited bottleneck with FIFO, one-way delay `owd_ms` each way,
+    /// feedback every 20 ms. Returns (seconds until the sent rate first reaches 90% of
+    /// `cap_bps`, seconds the bottleneck holds at least 2 ms of queue, which is what capacity
+    /// derivation needs).
+    fn simulate(cap_bps: f64, owd_ms: u64, secs: u64) -> (Option<f64>, f64) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        let tick = 20u64;
+        let n = (secs * 1000 / tick) as usize;
+        let lag = (2 * owd_ms / tick) as usize;
+        let half = (owd_ms / tick) as usize;
+        // Per tick: rate sent, bits delivered at the bottleneck, backlog after it (bits).
+        let (mut sent, mut deliv, mut backlog) = (vec![START_BPS], vec![0.0], vec![0.0f64]);
+        let mut reached = None;
+        let mut queued = 0u32;
+        for i in 1..n {
+            sent.push(*sent.last().unwrap());
+            // The bottleneck sits at the receiver end: it sees what was sent one OWD ago.
+            let arriving = if i >= half { sent[i - half] } else { 0.0 };
+            let b = backlog[i - 1] + arriving * tick as f64 / 1000.0;
+            let out = b.min(cap_bps * tick as f64 / 1000.0);
+            deliv.push(out);
+            backlog.push(b - out);
+            if i > lag {
+                // What the receiver saw one OWD ago reaches the sender now.
+                let j = i - half;
+                let d = deliv[j] * 1000.0 / tick as f64;
+                let q = backlog[j] / cap_bps * 1e9;
+                c.feedback_at(&fb7(q as u64, d as u64), t0 + i as u64 * tick * MS);
+                let r = set_rate(&rx) as f64;
+                *sent.last_mut().unwrap() = r;
+                if reached.is_none() && r >= 0.9 * cap_bps {
+                    reached = Some(i as f64 * tick as f64 / 1000.0);
+                }
+            }
+            if backlog[i] / cap_bps >= 0.002 {
+                queued += 1;
+            }
+        }
+        (reached, queued as f64 * tick as f64 / 1000.0)
+    }
+
+    #[test]
+    fn saturation_reaches_capacity_on_geo_paths() {
+        // 300 ms each way at 100 Mbit/s (issue #30). Exiting slow start on lagged delivery
+        // feedback took 6.7 s to reach 90% of capacity here.
+        let (reached, queued) = simulate(100e6, 300, 10);
+        assert!(reached.is_some_and(|s| s < 5.0), "{reached:?}");
+        assert!(queued >= 2.0, "{queued}");
+        // 20 Mbit/s (the `geo` ground-truth scenario).
+        let (reached, queued) = simulate(20e6, 300, 10);
+        assert!(reached.is_some_and(|s| s < 4.0), "{reached:?}");
+        assert!(queued >= 2.0, "{queued}");
+        // Short path: unchanged 50 ms steps.
+        let (reached, queued) = simulate(100e6, 10, 10);
+        assert!(reached.is_some_and(|s| s < 1.0), "{reached:?}");
+        assert!(queued >= 5.0, "{queued}");
     }
 }
