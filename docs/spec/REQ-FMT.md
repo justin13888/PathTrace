@@ -101,7 +101,7 @@ An optional final INDX section records section offsets, the BLAKE3 of all preced
 ### REQ-FMT-015: Space budget
 - status: met
 - spec: new
-- evidence: EXP-0002-r11, EXP-0001-r3
+- evidence: EXP-0002-r12, EXP-0001-r3
 
 In `standard` and `deep` sessions, where the volume is, the raw per-packet layer costs at most 8 bytes per packet after compression, and a `standard` session at up to 100 Mbit/s produces a file of at most 10 MB. `smoke` and `light` sessions are small in absolute terms (about 100 kB). Their fixed overhead dominates, so they are exempt from the per-packet figure, though it is still measured and reported in the ground-truth evidence.
 
@@ -136,14 +136,14 @@ PTF 1.0 defines META, FLOW, CLOK, OBSV, CTXS, EVNT (raw layer), PATH, SERS, PLCY
 ### REQ-FMT-020: Path model fields
 - status: met
 - spec: §7.4
-- evidence: EXP-0002-r11
+- evidence: EXP-0002-r12
 
 PATH holds, per direction, capacity (delivery opportunities or rate segments with quality), light-flow capacity, base delay with its split method, jitter (series and fitted model), loss (events and Gilbert-Elliott fit with intervals), queue (depth in bytes and time, discipline hint), policer per class, reordering, duplication, path MTU with black-hole flag, and ECN/DSCP handling, each with method and confidence.
 
 ### REQ-FMT-021: Interoperability exports and imports
 - status: met
 - spec: §7.7
-- evidence: EXP-0002-r11, EXP-0006-r6
+- evidence: EXP-0002-r12, EXP-0006-r6
 
 Mahimahi traces can be imported (capacity only, all other fields `unknown`) and exported (uplink and downlink traces plus delay and loss arguments); a netem command line can be exported from a trace's static summary.
 
@@ -151,7 +151,7 @@ Mahimahi traces can be imported (capacity only, all other fields `unknown`) and 
 - status: met
 - spec: new
 - design: docs/design/simulator-requirements.md
-- evidence: EXP-0002-r11
+- evidence: EXP-0002-r12
 
 PTF carries every input the anticipated simulator pipeline stages need, demonstrated by recovering known ground-truth impairments from probe captures and by reproducing a trace after replay through an independent emulator.
 

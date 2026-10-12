@@ -25,6 +25,6 @@ From 1.0, commands and flags are stable. Removing one requires a deprecation war
 - status: met
 - spec: new
 - design: docs/design/cli.md
-- evidence: EXP-0002-r11, EXP-0007-r6
+- evidence: EXP-0002-r12, EXP-0007-r6
 
 Exit codes are documented and stable: 0 success, 1 check failed or invalid input, 2 usage error, 3 partial result (for example, a session completed with failed phases).

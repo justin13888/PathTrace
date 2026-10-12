@@ -32,7 +32,7 @@ PathTrace does not model competing flows, does not provide chaos or fault inject
 ### REQ-SCOPE-005: Access-network rates
 - status: met
 - spec: §2.2, §6.7
-- evidence: EXP-0002-r11, EXP-0007-r6
+- evidence: EXP-0002-r12, EXP-0007-r6
 
 Target paths run at up to 1 Gbit/s. The probe enforces a hard sending-rate cap (default 500 Mbit/s).
 
@@ -40,7 +40,7 @@ Target paths run at up to 1 Gbit/s. The probe enforces a hard sending-rate cap (
 - status: met
 - spec: §6.6, §9.3
 - adr: 0013
-- evidence: EXP-0002-r11
+- evidence: EXP-0002-r12
 
 A session measures over one primary address family, either IPv4 or IPv6. When the responder name resolves to both families, TCP class reachability is also probed over the secondary family.
 
