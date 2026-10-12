@@ -301,6 +301,7 @@ fn record_send_failure(
         .with("seq", item.map(|i| i.1))
         .with("size", item.map(|i| u64::from(i.2)))
         .with("burned_id", o.burned_id.map(u64::from))
+        .with("unburned_id", o.unburned_id.map(u64::from))
         .with("tx_ids", s.tx_id_mode().name());
     let kind = match &o.error {
         None => "send_partial",
@@ -431,6 +432,7 @@ fn pacer_loop(
                             Value::map()
                                 .with("sock", *sock)
                                 .with("burned_id", o.burned_id.map(u64::from))
+                                .with("unburned_id", o.unburned_id.map(u64::from))
                                 .with("tx_ids", s.tx_id_mode().name())
                                 .with(
                                     "skipped",
@@ -661,6 +663,7 @@ fn pacer_loop(
                         Value::map()
                             .with("sock", sock)
                             .with("burned_id", o.burned_id.map(u64::from))
+                            .with("unburned_id", o.unburned_id.map(u64::from))
                             .with("tx_ids", s.tx_id_mode().name())
                             .with(
                                 "skipped",

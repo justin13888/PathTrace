@@ -77,9 +77,9 @@ TX stamps are matched to transmissions by the socket's OPT_ID. The id of each da
 | Mode | Kernel | Rule |
 |---|---|---|
 | `explicit` | ≥ 6.13 | Every datagram carries its id in an `SCM_TS_OPT_ID` cmsg. The pacer's counter advances on every attempt, so a failed attempt burns its own id and the join is exact. If the first send on the socket returns EINVAL (the kernel does not know the cmsg), the socket switches to `predicted` and logs `tx_id_mode` |
-| `predicted` | < 6.13 | The kernel assigns ids from a per-socket counter, which the pacer predicts. Every failed datagram is assumed to have consumed an id unless the error is one the kernel raises before taking it (ENETUNREACH, EINVAL, EAFNOSUPPORT, EACCES, EDESTADDRREQ) |
+| `predicted` | < 6.13 | The kernel assigns ids from a per-socket counter, which the pacer predicts. Errors the kernel raises before taking an id (ENETUNREACH, EINVAL, EAFNOSUPPORT, EACCES, EDESTADDRREQ) consume none. Below 6.13 every other error is assumed to consume one; on 6.13 and later (predicted mode is then only forced, `PATHTRACE_TX_IDS=predicted`) only errors after the append stage (ENOBUFS, EPERM) do, since the kernel returns the id on append-stage errors (EAGAIN, EMSGSIZE, a pending ICMP error). A partial `sendmmsg` (errno unknown) is assumed to consume one; if the retry of that datagram then fails at once with an error that consumes none, the burn is undone (`unburned_id`) |
 
-Each failed or skipped send is an event with the socket, flow, sequence number and the burned id (`burned_id`, null when none was consumed), so that a later merge can re-anchor predicted ids against the stamp times:
+Each failed or skipped send is an event with the socket, flow, sequence number and the burned id (`burned_id`, null when none was consumed; `unburned_id` when the previous partial send's assumed burn was undone), so that a later merge can re-anchor predicted ids against the stamp times:
 - `send_error {errno}`: the kernel reported an error for this datagram. It is not resent.
 - `send_partial`: `sendmmsg` stopped at this datagram without an errno (it reports one only for the first datagram). The datagram is retried alone, so its errno becomes visible if it fails again.
 - `send_eagain`: the send buffer is full. The rest of the batch is skipped and listed (`skipped: [[flow, seq], …]`); none of it gets a `tx` row.

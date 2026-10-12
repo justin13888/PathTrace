@@ -75,18 +75,85 @@ pub fn kernel_has_ts_opt_id() -> bool {
 }
 
 /// Errors a kernel raises before the append stage, which therefore never consume an OPT_ID
-/// (R-0015). Every other send error is assumed to consume one in `Predicted` mode.
-fn error_before_append(e: &io::Error) -> bool {
+/// (R-0015).
+fn error_before_append(errno: i32) -> bool {
     matches!(
-        e.raw_os_error(),
-        Some(
-            libc::ENETUNREACH
-                | libc::EINVAL
-                | libc::EAFNOSUPPORT
-                | libc::EACCES
-                | libc::EDESTADDRREQ
-        )
+        errno,
+        libc::ENETUNREACH | libc::EINVAL | libc::EAFNOSUPPORT | libc::EACCES | libc::EDESTADDRREQ
     )
+}
+
+/// Errors raised after the append stage (a qdisc drop with `IP_RECVERR`, a netfilter drop),
+/// which consume an OPT_ID on every kernel (R-0015).
+fn error_after_append(errno: i32) -> bool {
+    matches!(errno, libc::ENOBUFS | libc::EPERM)
+}
+
+/// Whether a failed datagram consumed an OPT_ID in `Predicted` mode (R-0015). `error` is
+/// `None` after a partial `sendmmsg`, whose errno is unknown: assumed consumed.
+/// `restores_append_ids`: the kernel (≥ 6.13) returns the id on append-stage errors (EAGAIN,
+/// EMSGSIZE, a pending ICMP error such as ECONNREFUSED), so only errors after the append
+/// stage consume one; older kernels consume one on every error except those before append.
+fn predicted_consumes(error: Option<&io::Error>, restores_append_ids: bool) -> bool {
+    let Some(errno) = error.and_then(io::Error::raw_os_error) else {
+        return true;
+    };
+    if error_before_append(errno) {
+        return false;
+    }
+    !restores_append_ids || error_after_append(errno)
+}
+
+/// Whether the running kernel returns the OPT_ID of a datagram that fails in the append stage
+/// (6.13 and later, R-0015).
+fn kernel_restores_append_ids() -> bool {
+    kernel_has_ts_opt_id()
+}
+
+/// Id accounting after one `sendmmsg` call (docs/design/probe.md §4.1).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct IdAccount {
+    /// Id of the batch's first datagram.
+    first_id: u32,
+    /// Id the next datagram gets.
+    next_id: u32,
+    burned_id: Option<u32>,
+    unburned_id: Option<u32>,
+    /// A burn was assumed for a datagram whose errno is unknown (partial send).
+    provisional: bool,
+}
+
+/// Settle ids for a call that started at `first_id` and had `sent` datagrams accepted.
+/// `provisional`: the previous call on this socket assumed a burn after a partial send. The
+/// pacer retries the failed datagram alone right away, so if this call fails at once with an
+/// error that consumes no id, that datagram did not consume one either: the burn is undone.
+fn settle_ids(
+    mode: TxIdMode,
+    first_id: u32,
+    sent: usize,
+    failed: bool,
+    error: Option<&io::Error>,
+    restores_append_ids: bool,
+    provisional: bool,
+) -> IdAccount {
+    let consumed = failed
+        && match mode {
+            TxIdMode::Explicit => true,
+            TxIdMode::Predicted | TxIdMode::None => predicted_consumes(error, restores_append_ids),
+        };
+    let undo = provisional && mode != TxIdMode::Explicit && failed && sent == 0 && !consumed;
+    let first_id = if undo {
+        first_id.wrapping_sub(1)
+    } else {
+        first_id
+    };
+    IdAccount {
+        first_id,
+        next_id: first_id.wrapping_add(sent as u32 + u32::from(consumed)),
+        burned_id: consumed.then(|| first_id.wrapping_add(sent as u32)),
+        unburned_id: undo.then_some(first_id),
+        provisional: consumed && mode != TxIdMode::Explicit && error.is_none(),
+    }
 }
 
 /// Socket configuration.
@@ -142,6 +209,11 @@ pub struct SendOutcome {
     /// The id the failed attempt consumed: exact in `Explicit` mode, assumed in `Predicted`
     /// mode, `None` when no id was consumed.
     pub burned_id: Option<u32>,
+    /// `Predicted` mode: the id the previous call reported as `burned_id` after a partial
+    /// send (errno unknown) was not consumed after all, because this call, the retry of that
+    /// datagram, failed at once with an error that consumes no id. Ids are back to before
+    /// that burn.
+    pub unburned_id: Option<u32>,
 }
 
 impl SendOutcome {
@@ -226,6 +298,13 @@ pub struct UdpSock {
     id_mode: AtomicU8,
     /// Whether a send has confirmed the id mode yet.
     mode_confirmed: AtomicBool,
+    /// The kernel returns ids on append-stage errors (≥ 6.13), for `Predicted` mode.
+    restores_append_ids: bool,
+    /// `Predicted` mode: the last call assumed a burn after a partial send (errno unknown).
+    provisional_burn: AtomicBool,
+    /// Control message type that carries an explicit id (`SCM_TS_OPT_ID`; tests replace it
+    /// with an unknown type to get the EINVAL of a kernel without it).
+    opt_id_cmsg: libc::c_int,
 }
 
 pub(crate) fn sockaddr_from(addr: &SocketAddr) -> (libc::sockaddr_storage, libc::socklen_t) {
@@ -428,6 +507,9 @@ impl UdpSock {
             next_id: AtomicU32::new(0),
             id_mode: AtomicU8::new(mode.code()),
             mode_confirmed: AtomicBool::new(false),
+            restores_append_ids: kernel_restores_append_ids(),
+            provisional_burn: AtomicBool::new(false),
+            opt_id_cmsg: SCM_TS_OPT_ID,
         })
     }
 
@@ -470,6 +552,7 @@ impl UdpSock {
                 failed: false,
                 error: None,
                 burned_id: None,
+                unburned_id: None,
             };
         }
         let mode = self.tx_id_mode();
@@ -491,24 +574,25 @@ impl UdpSock {
             Err(e) => (0, Some(e)),
         };
         let failed = sent < n;
-        let consumed = failed
-            && match mode {
-                TxIdMode::Explicit => true,
-                TxIdMode::Predicted | TxIdMode::None => {
-                    !error.as_ref().is_some_and(error_before_append)
-                }
-            };
-        let burned_id = consumed.then(|| first_id.wrapping_add(sent as u32));
-        self.next_id.store(
-            first_id.wrapping_add(sent as u32 + u32::from(consumed)),
-            Ordering::Relaxed,
+        let acct = settle_ids(
+            mode,
+            first_id,
+            sent,
+            failed,
+            error.as_ref(),
+            self.restores_append_ids,
+            self.provisional_burn.load(Ordering::Relaxed),
         );
+        self.provisional_burn
+            .store(acct.provisional, Ordering::Relaxed);
+        self.next_id.store(acct.next_id, Ordering::Relaxed);
         SendOutcome {
             sent,
-            first_id,
+            first_id: acct.first_id,
             failed,
             error,
-            burned_id,
+            burned_id: acct.burned_id,
+            unburned_id: acct.unburned_id,
         }
     }
 
@@ -565,7 +649,7 @@ impl UdpSock {
                 if let Some(id0) = first_id {
                     let c2 = libc::CMSG_NXTHDR(h, c);
                     (*c2).cmsg_level = libc::SOL_SOCKET;
-                    (*c2).cmsg_type = SCM_TS_OPT_ID;
+                    (*c2).cmsg_type = self.opt_id_cmsg;
                     (*c2).cmsg_len = libc::CMSG_LEN(size_of::<u32>() as u32) as _;
                     std::ptr::write_unaligned(
                         libc::CMSG_DATA(c2).cast::<u32>(),
@@ -983,6 +1067,156 @@ mod tests {
             "{ids:?} last {last}"
         );
         assert!(ids.iter().all(|i| *i == 0 || *i == last), "{ids:?}");
+    }
+
+    #[test]
+    fn predicted_consumption_rules() {
+        let e = io::Error::from_raw_os_error;
+        for restores in [false, true] {
+            // A partial send's errno is unknown: assumed consumed.
+            assert!(predicted_consumes(None, restores));
+            for n in [
+                libc::ENETUNREACH,
+                libc::EINVAL,
+                libc::EAFNOSUPPORT,
+                libc::EACCES,
+                libc::EDESTADDRREQ,
+            ] {
+                assert!(!predicted_consumes(Some(&e(n)), restores), "{n} {restores}");
+            }
+            for n in [libc::ENOBUFS, libc::EPERM] {
+                assert!(predicted_consumes(Some(&e(n)), restores), "{n} {restores}");
+            }
+        }
+        // Append-stage errors consume an id before 6.13 only.
+        for n in [libc::EAGAIN, libc::EMSGSIZE, libc::ECONNREFUSED] {
+            assert!(predicted_consumes(Some(&e(n)), false), "{n}");
+            assert!(!predicted_consumes(Some(&e(n)), true), "{n}");
+        }
+    }
+
+    #[test]
+    fn partial_send_burn_is_undone_by_a_retry_that_consumes_nothing() {
+        use TxIdMode::{Explicit, Predicted};
+        let e = io::Error::from_raw_os_error;
+        let acct = |first_id, next_id, burned_id, unburned_id, provisional| IdAccount {
+            first_id,
+            next_id,
+            burned_id,
+            unburned_id,
+            provisional,
+        };
+        // 3 of 5 accepted, errno unknown: id 13 assumed burned, provisionally.
+        assert_eq!(
+            settle_ids(Predicted, 10, 3, true, None, false, false),
+            acct(10, 14, Some(13), None, true)
+        );
+        // The retry fails at once before the append stage: the burn is undone.
+        let enet = e(libc::ENETUNREACH);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&enet), false, true),
+            acct(13, 13, None, Some(13), false)
+        );
+        // The retry fails with an error that consumes an id: both burns stand.
+        let nobufs = e(libc::ENOBUFS);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&nobufs), false, true),
+            acct(14, 15, Some(14), None, false)
+        );
+        // The retry succeeds: the burn stands.
+        assert_eq!(
+            settle_ids(Predicted, 14, 1, false, None, false, true),
+            acct(14, 15, None, None, false)
+        );
+        // EAGAIN consumes nothing from 6.13 on, so it undoes the burn there only.
+        let eagain = e(libc::EAGAIN);
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&eagain), true, true).unburned_id,
+            Some(13)
+        );
+        assert_eq!(
+            settle_ids(Predicted, 14, 0, true, Some(&eagain), false, true),
+            acct(14, 15, Some(14), None, false)
+        );
+        // Explicit ids: every failed attempt burns its own id, nothing is provisional.
+        assert_eq!(
+            settle_ids(Explicit, 10, 3, true, None, true, false),
+            acct(10, 14, Some(13), None, false)
+        );
+    }
+
+    #[test]
+    fn forced_predicted_ids_match_the_kernel_after_partial_send_and_retry() {
+        let a = UdpSock::bind(
+            "127.0.0.1:0".parse().unwrap(),
+            SockOpts {
+                force_predicted_ids: true,
+                ..SockOpts::default()
+            },
+        )
+        .unwrap();
+        if a.tx_id_mode() != TxIdMode::Predicted || !a.restores_append_ids {
+            // Below 6.13 the oversized datagram's EMSGSIZE (an early length check that
+            // consumes no id) cannot be told from an append-stage EMSGSIZE (which does); the
+            // rules are covered by `predicted_consumption_rules`.
+            return;
+        }
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let ok: &'static [u8] = Box::leak(Box::new([1u8; 100]));
+        let big: &'static [u8] = Box::leak(vec![2u8; 70_000].into_boxed_slice());
+        let m = |p: &'static [u8]| OutMsg {
+            dst,
+            payload: p,
+            tos: 0,
+        };
+        let batch = [m(ok), m(big), m(ok)];
+        let o = a.send_batch(&batch);
+        assert_eq!((o.sent, o.burned_id), (1, Some(1)));
+        // The retry reveals EMSGSIZE, which consumes no id on 6.13+: the burn is undone.
+        let o = a.send_batch(&batch[1..]);
+        assert_eq!(o.sent, 0);
+        assert_eq!((o.burned_id, o.unburned_id), (None, Some(1)));
+        let o = a.send_batch(&batch[2..]);
+        assert_eq!((o.sent, o.first_id), (1, 1));
+        let mut ids = drain_stamp_ids(&a, 4);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1], "kernel ids must match the predicted ones");
+    }
+
+    #[test]
+    fn explicit_ids_fall_back_to_predicted_on_einval() {
+        let mut a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        if !a.caps().kernel_tx {
+            return;
+        }
+        // An unknown SOL_SOCKET cmsg gets the EINVAL a kernel without SCM_TS_OPT_ID returns.
+        a.opt_id_cmsg = 0x7fff;
+        a.id_mode
+            .store(TxIdMode::Explicit.code(), Ordering::Relaxed);
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let p = [5u8; 100];
+        let msgs = [
+            OutMsg {
+                dst,
+                payload: &p,
+                tos: 0,
+            },
+            OutMsg {
+                dst,
+                payload: &p,
+                tos: 0,
+            },
+        ];
+        let o = a.send_batch(&msgs);
+        assert_eq!((o.sent, o.failed, o.first_id), (2, false, 0));
+        assert_eq!(a.tx_id_mode(), TxIdMode::Predicted);
+        let mut ids = drain_stamp_ids(&a, 4);
+        ids.sort_unstable();
+        ids.dedup();
+        assert_eq!(ids, vec![0, 1]);
     }
 
     #[test]
