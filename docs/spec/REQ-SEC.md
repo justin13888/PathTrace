@@ -24,7 +24,7 @@ Private keys live in `$XDG_CONFIG_HOME/pathtrace/` with mode 0600. The tool refu
 ### REQ-SEC-004: Fuzzed parsers
 - status: met
 - spec: §13.3
-- evidence: EXP-0005-r6
+- evidence: EXP-0005-r7
 
 PTF parsing, control messages and probe packets have cargo-fuzz targets, smoke-run in CI.
 

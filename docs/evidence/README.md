@@ -59,7 +59,8 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0005-r3](EXP-0005-r3-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run at version 1.0.1) | pass | superseded by EXP-0005-r4 | REQ-FMT-016, REQ-SEC-004 |
 | [EXP-0005-r4](EXP-0005-r4-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (re-run at PTF 1.1, wire minor 1) | fail | superseded by EXP-0005-r5 | REQ-FMT-016, REQ-SEC-004 |
 | [EXP-0005-r5](EXP-0005-r5-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (re-run at PTF 1.1, wire minor 1) | pass | superseded by EXP-0005-r6 | REQ-FMT-016, REQ-SEC-004 |
-| [EXP-0005-r6](EXP-0005-r6-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run after #39 to #51) | pass | **current** | REQ-FMT-016, REQ-SEC-004 |
+| [EXP-0005-r6](EXP-0005-r6-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run after #39 to #51) | pass | superseded by EXP-0005-r7 | REQ-FMT-016, REQ-SEC-004 |
+| [EXP-0005-r7](EXP-0005-r7-fuzz-smoke/) | Fuzzing PTF, CBOR, JSON twin and wire parsers (120 s per target) (re-run at 1.1.0) | pass | **current** | REQ-FMT-016, REQ-SEC-004 |
 | [EXP-0006](EXP-0006-probe-session-and-policy/) | Probe, wire and syscall tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r2 | 18 (see `experiment.toml`) |
 | [EXP-0006-r2](EXP-0006-r2-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r3 | 17 (see `experiment.toml`) |
 | [EXP-0006-r3](EXP-0006-r3-probe-session-and-policy/) | Probe, wire, syscall and derive tests, end-to-end namespace session, unsafe and dependency policy | pass | superseded by EXP-0006-r4 | 17 (see `experiment.toml`) |
