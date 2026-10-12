@@ -1,0 +1,13 @@
+   Compiling pathtrace v1.0.1 (/var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-aa87c57c9dd06258f/crates/pathtrace)
+    Finished `release` profile [optimized + debuginfo] target(s) in 1.62s
+────────────
+ Nextest run ID d7df4435-24d9-43aa-8cac-80f4940b13c2 with nextest profile: default
+    Starting 6 tests across 2 binaries
+        PASS [  37.630s] (1/6) pathtrace::netns responder_signal_ends_the_session_for_both
+        PASS [  37.761s] (2/6) pathtrace::netns interrupted_session_ends_gracefully_and_stays_fetchable
+        PASS [  43.237s] (3/6) pathtrace::netns smoke_session_through_netem
+        PASS [  43.589s] (4/6) pathtrace::netns responder_log_fetchable_after_responder_killed_mid_session
+        PASS [  43.684s] (5/6) pathtrace::netns lost_handshake_reply_is_resent
+        PASS [  54.729s] (6/6) pathtrace::netns fetch_resume_uses_pinned_tls_and_falls_back_to_443
+────────────
+     Summary [  54.735s] 6 tests run: 6 passed, 0 skipped
