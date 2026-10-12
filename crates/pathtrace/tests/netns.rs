@@ -105,6 +105,11 @@ fn smoke_session_through_netem() {
         assert!(c["txts_joined"].as_u64().unwrap_or(0) > 1000, "{dir}: {c}");
         assert_eq!(c["txts_implausible"], 0, "{dir}: {c}");
     }
+    // ... and at the id level: no stamp id is left unexplained.
+    for ep in ["a", "b"] {
+        let c = &info["merge_checks"];
+        assert_eq!(c[format!("txts_unexplained_{ep}")], 0, "{c}");
+    }
     for t in [
         "tcpinfo[a]",
         "tcpinfo[b]",

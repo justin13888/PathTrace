@@ -480,6 +480,14 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
                     );
                 }
             }
+            for (ep, c) in &r.ids {
+                if c.unexplained > 0 {
+                    eprintln!(
+                        "warning: endpoint {ep}: {} TX stamp ids match no transmission and no burned id: transmit ids may be shifted (see probe.md §4.1)",
+                        c.unexplained
+                    );
+                }
+            }
             if r.logs.iter().any(|l| l.stopped.is_some()) {
                 partial = true;
             }

@@ -84,7 +84,7 @@ Each failed or skipped send is an event with the socket, flow, sequence number a
 - `send_partial`: `sendmmsg` stopped at this datagram without an errno (it reports one only for the first datagram). The datagram is retried alone, so its errno becomes visible if it fails again.
 - `send_eagain`: the send buffer is full. The rest of the batch is skipped and listed (`skipped: [[flow, seq], …]`); none of it gets a `tx` row.
 
-A datagram without a `tx` row never left the host, so it is never counted as path loss. `merge` reports how many `tx`–`txts` joins are implausible in time and keeps every stamp that matches no transmission (`txts_unmatched`).
+A datagram without a `tx` row never left the host, so it is never counted as path loss. `merge` reports how many `tx`–`txts` joins are implausible in time and keeps every stamp it does not join (`txts_unmatched`: stamps that match no transmission, and repeats of a (sock, id, kind)). The time window cannot see ids that are off by one, since a neighbour's stamp is only microseconds away, so `merge` also checks ids per endpoint (`merge_checks`): `tx_unstamped_<ep>` counts `tx` rows without a SCHED stamp on sockets that have stamps, and `txts_unexplained_<ep>` counts SCHED stamp ids, from the socket's first `tx` id on, that match neither a `tx` row, a burned id nor a `raw_sent` id. A shifted id shows in both; aligned ids give 0 unexplained stamps (a lost or late stamp only adds to `tx_unstamped`).
 
 ### 4.2 Host drops (R-0015)
 
@@ -118,7 +118,7 @@ Per endpoint, in its observation log (`META.kind = "obslog"`, `META.role = "a" |
 | `netstack` (CTXS) | 10 Hz | t, udp and udp6 in_errors, rcvbuf_errors, sndbuf_errors, in_csum_errors; softnet_dropped, softnet_squeezed (cumulative, nullable) |
 | `qdisc` (CTXS) | 10 Hz | t, bytes, packets, qlen, backlog, drops, requeues, overlimits of the egress root qdisc (cumulative except qlen and backlog) |
 | `wifi` (CTXS, initiator) | 1 Hz | t, freq (MHz), width, signal, beacon_signal (dBm), tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bss (hash, pii quasi) |
-| EVNT | events | `handshake`, `handshake_resent`, `phase_start`, `phase_failed`, `phase_skipped`, `class_skipped`, `peer_addr`, `nat_rebind`, `addr_new`/`addr_del`/`route_*`/`link_*`, `icmp` (error-queue ICMP: sock, errno, type, code, info, offender, quoted flow and seq), `local_error`, `send_error`, `send_partial`, `send_eagain`, `tx_id_mode`, `tcp_probe`, `udp_reachability`, `saved_syn`, `ref_tcp`, `flow_stopped`, `flow_paused`/`flow_resumed`, `light_paused`/`light_resumed`, `budget_cap`, `channel_overflow`, `interrupted`, `session_end` |
+| EVNT | events | `handshake`, `handshake_resent`, `phase_start`, `phase_failed`, `phase_skipped`, `class_skipped`, `peer_addr`, `nat_rebind`, `addr_new`/`addr_del`/`route_*`/`link_*`, `icmp` (error-queue ICMP: sock, errno, type, code, info, offender, quoted flow and seq), `local_error`, `send_error`, `send_partial`, `send_eagain`, `raw_sent` (a datagram sent without a `tx` row, such as an echo or a handshake reply: sock, id, size), `tx_id_mode`, `tcp_probe`, `udp_reachability`, `saved_syn`, `ref_tcp`, `flow_stopped`, `flow_paused`/`flow_resumed`, `light_paused`/`light_resumed`, `budget_cap`, `channel_overflow`, `interrupted`, `session_end` |
 
 UDP class, NAT and PMTU probes are ordinary flows in `tx`/`rx` (their echoes are logged by the endpoint that sent them). TCP class probes are `tcp_probe` events.
 

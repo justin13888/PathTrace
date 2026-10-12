@@ -11,7 +11,7 @@ This document is the normative specification of PTF 1.x (currently 1.1). An inde
 | Version | Release | Additions (minor versions only add, P6) |
 |---|---|---|
 | 1.0 | pathtrace 1.0.0 | Initial format |
-| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and `txts_unmatched_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
+| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and per endpoint `txts_unmatched_<ep>`, `tx_unstamped_<ep>`, `txts_unexplained_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
@@ -286,7 +286,7 @@ Every table has `attrs.dir` (`a_to_b` / `b_to_a`) or `attrs.endpoint` (`a` / `b`
 | `tcpinfo` (OBSV) | endpoint | flow, t (`<ep>.mono`), optlen (bytes the kernel returned), then one nullable u64 per `struct tcp_info` field up to kernel 6.7 (null when the kernel struct is shorter) |
 | `app` (OBSV) | endpoint | flow, t (`<ep>.mono`), event enum[connect_start, connected, tls_done, first_byte, progress, done, req_start, resp_done, error], bytes, value (i64) |
 | `bad` (OBSV) | endpoint | t, bad_tag, unknown (wrong session), truncated: per-second counters |
-| `txts_unmatched` (OBSV, 1.1) | endpoint | kernel TX stamps that match no `tx` row (echoes, failed sends, mispredicted ids): sock, id, kind enum[sched, snd], real (`<ep>.real`) |
+| `txts_unmatched` (OBSV, 1.1) | endpoint | kernel TX stamps the join does not use: those that match no `tx` row (echoes, failed sends, mispredicted ids) and every repeat of a (sock, id, kind) after its first: sock, id, kind enum[sched, snd], real (`<ep>.real`) |
 | `pairs` (CLOK) | endpoint | mono (`<ep>.mono`), real (`<ep>.real`), width ns: min-width clock sandwich; boot u64? delta2 ns (CLOCK_BOOTTIME, read inside the sandwich; 1.1) |
 | `exchange` (CLOK) | endpoint=a | t1, t4 (`a.mono`), t2, t3 (`b.mono`); req_nonce, resp_nonce u64? delta (Noise nonces of the request and response datagrams, i.e. their seq as flows 250/251; 1.1) |
 | `ifstats` (CTXS) | endpoint | t, rx/tx bytes, packets, dropped, errors (cumulative counters) |

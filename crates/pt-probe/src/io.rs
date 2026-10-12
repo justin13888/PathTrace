@@ -469,6 +469,16 @@ fn pacer_loop(
                         Some(0),
                     ]);
                     shared.bytes_sent.fetch_add(ip as u64, Ordering::Relaxed);
+                } else {
+                    // An echo or handshake reply: no `tx` row, but its id is recorded so the
+                    // merge's id check can account for its stamp (probe.md §4.1).
+                    rec.event(
+                        "raw_sent",
+                        Value::map()
+                            .with("sock", *sock)
+                            .with("id", u64::from(id))
+                            .with("size", ip),
+                    );
                 }
             }
         }
