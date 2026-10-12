@@ -10,21 +10,21 @@ A PTF file is an 8-byte magic, a version (major, minor), file flags, then a sequ
 ### REQ-FMT-002: Section criticality
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r4, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004-r2
 
 A reader rejects a file containing an unknown critical section, or a critical section using unknown flag bits, and skips unknown non-critical sections without error.
 
 ### REQ-FMT-003: Bounded compressed sections
 - status: met
 - spec: §7.2
-- evidence: EXP-0003-r4, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004-r2
 
 Section payloads may be zstd-compressed. Compressed payloads declare their uncompressed size, and readers enforce configurable caps so that a hostile file cannot exhaust memory.
 
 ### REQ-FMT-004: Deterministic CBOR metadata with a schema
 - status: met
 - spec: §7.2
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Metadata is CBOR in a documented deterministic profile, with a published CDDL schema for every defined section.
 
@@ -38,14 +38,14 @@ Bulk data is stored as tables whose column directory names each column's type, e
 ### REQ-FMT-006: Raw layer is lossless and uncorrected
 - status: met
 - spec: §7.1
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Raw observations are integers (ns, bytes, bit/s) recorded in the clock domain they were measured in, never corrected in place. Clock corrections are derived data.
 
 ### REQ-FMT-007: Unknown and lost are explicit
 - status: met
 - spec: §7.1, §6.5
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Absence is represented by validity bitmaps and explicit `unknown` status, never by sentinel values. Capacity segments carry a quality of `saturated`, `estimated` or `unknown`.
 
@@ -73,14 +73,14 @@ Every PTF file of version 1.0 or later remains readable by every later release. 
 ### REQ-FMT-011: Crash-safe observation logs
 - status: met
 - spec: new
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Observation logs are written append-only in time-bounded chunks. After a crash or truncation at any byte offset, a reader recovers every complete chunk.
 
 ### REQ-FMT-012: Canonical encoding and content digest
 - status: met
 - spec: new
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Encoding the same content twice with the same tool version yields identical bytes. A content digest computed over the uncompressed canonical section payloads identifies a trace independently of compression settings.
 
@@ -94,7 +94,7 @@ An optional final INDX section records section offsets, the BLAKE3 of all preced
 ### REQ-FMT-014: Lossless text twin
 - status: met
 - spec: §7.1
-- evidence: EXP-0003-r4, EXP-0004
+- evidence: EXP-0003-r4, EXP-0004-r2
 
 `pathtrace trace dump` writes JSON Lines and `pathtrace trace load` reads them back to a byte-identical canonical PTF file, including for sections and columns unknown to the tool.
 
@@ -115,7 +115,7 @@ The reader never panics, never recurses without bound and keeps memory bounded o
 ### REQ-FMT-017: Privacy by construction
 - status: met
 - spec: §7.6
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 Every identifying value is marked with a privacy class (`id` or `quasi`) where it is stored. `trace redact --level shareable` removes `id` data and `--level anonymous` also removes `quasi` data and shifts wall-clock domains, without per-field code. The level applied is recorded in META.
 
@@ -129,7 +129,7 @@ A corpus of valid and invalid files with expected verdicts and a reference valid
 ### REQ-FMT-019: Section inventory
 - status: met
 - spec: §7.3
-- evidence: EXP-0004
+- evidence: EXP-0004-r2
 
 PTF 1.0 defines META, FLOW, CLOK, OBSV, CTXS, EVNT (raw layer), PATH, SERS, PLCY, VALD (derived layer) and INDX.
 
