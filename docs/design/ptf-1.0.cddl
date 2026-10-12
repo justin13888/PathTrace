@@ -42,7 +42,7 @@ meta = {
   ? tool: tool,
   ? captured_by: { ? a: tool, ? b: tool },
   ? role: "a" / "b",                                 ; obslog only
-  ? session: { * tstr => any },                      ; per endpoint: id, profile, t0_mono, t0_real
+  ? session: { * tstr => any },                      ; per endpoint: id, profile, t0_mono, t0_real, t0_boot (1.1: CLOCK_BOOTTIME read in the same clock pair, ns)
   ? profile: tstr,
   ? endpoints: { ? a: endpoint, ? b: endpoint },
   ? endpoint: endpoint,                              ; obslog only
@@ -65,8 +65,8 @@ endpoint = {
   ? iface: { ? name: tstr, ? index: uint, ? type: tstr, ? driver: tstr / null, ? mtu: uint / null, ? usb: bool, * tstr => any },
   ? timestamping: { * tstr => any },
   ? sockets: [* socket],                             ; 1.1: one entry per UDP socket, in sock-index order
-  ? qdisc: { ? kind: tstr, ? handle: uint, * tstr => any },   ; 1.1: egress root qdisc
-  ? txqueuelen: uint,                                ; 1.1
+  ? qdisc: { ? kind: tstr, ? handle: uint, * tstr => any } / null,   ; 1.1: egress root qdisc (null: none reported)
+  ? txqueuelen: uint / null,                         ; 1.1 (null: unknown)
   * tstr => any
 }
 socket = {
