@@ -579,3 +579,53 @@ done"#;
     );
     assert!(refused.iter().any(|s| s.contains("\"tcp\"")), "{refused:?}");
 }
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn forced_predicted_ids_join_exactly() {
+    // probe.md §4.1 (issue #36): with transmit ids predicted on both endpoints, every stamp
+    // still joins its own transmission, and merge finds nothing to re-anchor.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 15ms rate 10mbit limit 100",
+        &[
+            ("PROBE_ENV", "PATHTRACE_TX_IDS=predicted"),
+            ("SERVE_ENV", "PATHTRACE_TX_IDS=predicted"),
+        ],
+        "0",
+        "predicted",
+    );
+    assert_eq!(info["complete"], true, "{info}");
+    let bin = env!("CARGO_BIN_EXE_pathtrace");
+    let dump = Command::new(bin)
+        .args(["trace", "dump"])
+        .arg(&trace)
+        .output()
+        .unwrap();
+    let meta = String::from_utf8_lossy(&dump.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "META")
+        .expect("META");
+    for ep in ["a", "b"] {
+        let socks = meta["head"]["endpoints"][ep]["sockets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !socks.is_empty() && socks.iter().all(|s| s["tx_ids"] == "predicted"),
+            "{ep}: {socks:?}"
+        );
+    }
+    let c = &info["merge_checks"];
+    for dir in ["a_to_b", "b_to_a"] {
+        assert!(c[dir]["txts_joined"].as_u64().unwrap_or(0) > 1000, "{c}");
+        assert_eq!(c[dir]["txts_implausible"], 0, "{c}");
+    }
+    for ep in ["a", "b"] {
+        assert_eq!(c[format!("txts_unexplained_{ep}")], 0, "{c}");
+        assert_eq!(c[format!("tx_reanchors_{ep}")], 0, "{c}");
+        assert_eq!(c[format!("tx_reanchored_{ep}")], 0, "{c}");
+    }
+}
