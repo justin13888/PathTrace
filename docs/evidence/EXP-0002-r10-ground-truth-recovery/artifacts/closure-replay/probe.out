@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-aa87c57c9dd06258f/target/groundtruth/closure-replay/01a130ef-472e-778a-a6f3-d9034e2917bf.ptf
+content_digest: 99538c4379a5ef9d1f784682aa22dc4ad5403d0741d79a11f1281c4797ad1b85
+packets a_to_b: 48604
+packets b_to_a: 21894
+session: 2f0b8a46
