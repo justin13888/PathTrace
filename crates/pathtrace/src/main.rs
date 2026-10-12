@@ -417,7 +417,10 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
     let responder = find_responder(&cfg, &a.responder)?;
     let profile_name = if a.profile == "auto" {
-        // The family the session will use: the preferred one only if this host routes it.
+        // The first family this host routes (the preferred one if it can). The session may
+        // still end on the other family when this one gives no UDP handshake reply
+        // (probe.md §3.1); the profile is chosen before the handshake because `hello` carries
+        // its data cap, so it then reflects this family's interface.
         let (_, ip) = session::route(&responder.addr, a.ipv6).map_err(|e| e.to_string())?;
         let iface = pt_sys::netif::iface_with_addr(ip)
             .ok()
