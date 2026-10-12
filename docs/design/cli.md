@@ -85,8 +85,8 @@ Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts th
 | per family: `egress interface`, `metered`, `wifi link stats` | no | as `probe` records them |
 | per family: `tcp/<port> reachable` | no (`responder reachable` is the fatal summary) | TCP connect (3 s) to the responder port, 443 and 80 |
 | per family: `udp/<port> not refused` | no | the UDP test above, on the responder port and 443 |
-| per family: `tcp/<port> not intercepted` | responder port: yes; 443, 80: no | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass |
-| `responder reachable` | yes | on at least one family, the responder port took a TCP connection that nothing intercepted |
+| per family: `tcp/<port> not intercepted` | no (`responder reachable` is the fatal summary) | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass. When the request cannot be made (the second connect or the write fails) it warns `not tested`, and the port does not count as clean |
+| `responder reachable` | yes | on at least one family, the responder port took a TCP connection that was tested and that nothing intercepted; it fails only when the responder port is unreachable, intercepted or untested on every family, because `probe` falls back to the other family (probe.md §3.1) |
 
 Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power and timestamps matter as much. NIC offload state (GRO, LRO, GSO, TSO) is not checked yet: it needs a `pt-sys` ethtool reader (issue #45).
 

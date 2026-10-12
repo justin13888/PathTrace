@@ -316,6 +316,17 @@ fn http_probe(dst: SocketAddr) -> Result<Option<String>, String> {
     Ok(interception(&buf[..n]))
 }
 
+/// Whether a port is known clean after [`http_probe`], and the check's detail. A probe that
+/// could not run (the second connect or the write failed) leaves interception untested, so the
+/// port is not clean: it must not count towards `responder reachable`.
+fn intercept_detail(r: Result<Option<String>, String>) -> (bool, String) {
+    match r {
+        Ok(None) => (true, String::new()),
+        Ok(Some(d)) => (false, d),
+        Err(e) => (false, format!("not tested: {e}")),
+    }
+}
+
 /// Checks for one address family of the responder. `suffix` is empty for the first family
 /// `probe` would use (1.0 check names) and ` (ipv6)`/` (ipv4)` for the other. Returns whether
 /// the responder port took a TCP connection that nothing intercepted.
@@ -375,38 +386,15 @@ fn family_checks(c: &mut Vec<Check>, dst: SocketAddr, suffix: &str) -> bool {
         if !ok {
             continue;
         }
-        let clean = match http_probe(a) {
-            Ok(None) => {
-                check(
-                    c,
-                    &format!("tcp/{port} not intercepted{suffix}"),
-                    true,
-                    "",
-                    false,
-                );
-                true
-            }
-            Ok(Some(d)) => {
-                check(
-                    c,
-                    &format!("tcp/{port} not intercepted{suffix}"),
-                    false,
-                    d,
-                    port == main,
-                );
-                false
-            }
-            Err(e) => {
-                check(
-                    c,
-                    &format!("tcp/{port} not intercepted{suffix}"),
-                    false,
-                    format!("not tested: {e}"),
-                    false,
-                );
-                true
-            }
-        };
+        // Non-fatal per family: `responder reachable` is the fatal summary over all families.
+        let (clean, d) = intercept_detail(http_probe(a));
+        check(
+            c,
+            &format!("tcp/{port} not intercepted{suffix}"),
+            clean,
+            d,
+            false,
+        );
         reachable |= port == main && clean;
     }
     for port in [main, 443] {
@@ -474,7 +462,7 @@ fn responder_checks(c: &mut Vec<Check>, r: &Responder) {
             reachable = true;
         } else {
             why.push(format!(
-                "{fam}: tcp/{} unreachable or intercepted",
+                "{fam}: tcp/{} unreachable, intercepted, or not tested for interception",
                 dst.port()
             ));
         }
@@ -649,6 +637,15 @@ mod tests {
             "{d}"
         );
         assert!(interception(b"\x15\x03\x01").unwrap().contains("3 bytes"));
+    }
+
+    #[test]
+    fn untested_interception_is_not_clean() {
+        assert_eq!(intercept_detail(Ok(None)), (true, String::new()));
+        assert!(!intercept_detail(Ok(Some("answered HTTP".into()))).0);
+        let (clean, d) = intercept_detail(Err("connection timed out".into()));
+        assert!(!clean);
+        assert_eq!(d, "not tested: connection timed out");
     }
 
     #[test]
