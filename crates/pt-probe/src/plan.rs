@@ -232,6 +232,30 @@ pub fn auto_profile(metered: &str) -> &'static str {
     }
 }
 
+/// Line `probe` prints whenever `--profile auto` decides: the chosen profile, the egress
+/// interface, and the metered state. A state that is neither `yes…` nor `no…` (no
+/// NetworkManager, unmanaged interface, timeout) makes it a warning: `standard` was picked
+/// without knowing whether the link is capped, and phone hotspots are rarely flagged metered.
+pub fn auto_profile_notice(iface: &str, metered: &str) -> String {
+    let chosen = auto_profile(metered);
+    let iface = if iface.is_empty() {
+        "egress interface"
+    } else {
+        iface
+    };
+    let m = metered.trim();
+    if m.starts_with("yes") || m.starts_with("no") {
+        format!("profile auto: {chosen} ({iface} metered: {m}); override with --profile")
+    } else {
+        let m = if m.is_empty() { "unknown" } else { m };
+        format!(
+            "warning: profile auto: {chosen}, but the metered state of {iface} is {m} \
+             (NetworkManager unavailable or not managing it); on a capped link \
+             (phone hotspot, roaming SIM, in-flight Wi-Fi) pass --profile light"
+        )
+    }
+}
+
 /// Flow specs under which control datagrams are observed (flows 250/251; seq = Noise nonce).
 pub fn control_specs(main_port: u16) -> Vec<FlowSpec> {
     [
@@ -483,6 +507,22 @@ mod tests {
         assert_eq!(auto_profile("no (guessed)"), "standard");
         assert_eq!(auto_profile("unknown"), "standard");
         assert_eq!(auto_profile(""), "standard");
+    }
+
+    #[test]
+    fn auto_profile_notice_always_names_choice_and_warns_when_blind() {
+        let yes = auto_profile_notice("wlan0", "yes (guessed)");
+        assert!(yes.starts_with("profile auto: light (wlan0 metered: yes (guessed))"));
+        let no = auto_profile_notice("eth0", "no");
+        assert!(no.starts_with("profile auto: standard (eth0 metered: no)"));
+        for m in ["unknown", "", "  "] {
+            let w = auto_profile_notice("wlan0", m);
+            assert!(w.starts_with("warning: profile auto: standard"), "{w}");
+            assert!(w.contains("wlan0 is unknown"), "{w}");
+            assert!(w.contains("--profile light"), "{w}");
+        }
+        let w = auto_profile_notice("", "unknown");
+        assert!(w.contains("egress interface is unknown"), "{w}");
     }
 
     #[test]
