@@ -1,15 +1,16 @@
 //! Context that cannot be recovered after the session (REQ-PRB-019): host facts, interface,
 //! Wi-Fi link state, interface counters, routing changes, clock pairs.
 
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use pt_format::Value;
+use pt_format::{Key, Value};
 use pt_sys::clock::ClockPair;
 use pt_sys::clock::{mono_raw, pair};
-use pt_sys::netif::{IfType, if_stats, iface_info, stack_stats};
+use pt_sys::netif::{IfType, if_stats, iface_info, iface_with_addr, local_addr_for, stack_stats};
 use pt_sys::netlink::{Nl80211, QdiscReader, RtMonitor};
 
 use crate::record::{Recorder, pii};
@@ -122,6 +123,29 @@ pub fn iface_facts(name: &str) -> Value {
         .with("usb", i.usb)
 }
 
+/// The detail of an `iface_change` event (probe.md §4.4). Interface names are `pii: quasi`, as
+/// META's `/endpoint/iface/name`; only top-level detail values carry a `pii` wrapper, so the
+/// name is dropped from `iface` (`to` carries it).
+fn iface_change_detail(
+    from: Option<String>,
+    to: &str,
+    mut iface: Value,
+    qdisc: Value,
+    txqueuelen: Option<u32>,
+    local: IpAddr,
+) -> Value {
+    if let Value::Map(m) = &mut iface {
+        m.remove(&Key::from("name"));
+    }
+    Value::map()
+        .with("from", pii(from, "quasi"))
+        .with("to", pii(to, "quasi"))
+        .with("iface", iface)
+        .with("qdisc", qdisc)
+        .with("txqueuelen", txqueuelen)
+        .with("addr", pii(local.to_string(), "id"))
+}
+
 /// Egress queueing facts for META (`endpoint.qdisc`, `endpoint.txqueuelen`; PTF 1.1).
 pub fn egress_facts(name: &str) -> (Value, Option<u32>) {
     let i = iface_info(name);
@@ -155,12 +179,20 @@ pub struct Sampler {
 }
 
 impl Sampler {
-    pub fn start(iface: Option<String>, rec: Recorder, wifi: bool) -> Sampler {
+    /// Sample `iface`, then follow the interface that carries the route to `peer` whenever
+    /// routing changes (docs/design/probe.md §4.4). Wi-Fi link state is sampled only when
+    /// `wifi` is set and the followed interface is Wi-Fi.
+    pub fn start(
+        iface: Option<String>,
+        peer: Option<IpAddr>,
+        rec: Recorder,
+        wifi: bool,
+    ) -> Sampler {
         let stop = Arc::new(AtomicBool::new(false));
         let s2 = stop.clone();
         let h = std::thread::Builder::new()
             .name("context".into())
-            .spawn(move || run(iface, rec, wifi, s2))
+            .spawn(move || run(iface, peer, rec, wifi, s2))
             .expect("spawn context thread");
         Sampler { stop, h: Some(h) }
     }
@@ -173,22 +205,63 @@ impl Sampler {
     }
 }
 
-fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) {
-    let info = iface.as_deref().map(iface_info);
-    let mut nl = if wifi && info.as_ref().is_some_and(|i| i.kind == IfType::Wifi) {
-        match Nl80211::open() {
-            Ok(n) => Some(n),
-            Err(e) => {
-                rec.event(
-                    "wifi_unavailable",
-                    Value::map().with("error", e.to_string()),
-                );
-                None
-            }
+/// The interface the sampler follows, identified by name and index (a re-created interface
+/// keeps its name but gets a new index and fresh counters).
+#[derive(Debug, Default)]
+struct Follow {
+    cur: Option<(String, u32)>,
+}
+
+impl Follow {
+    /// Take the interface the route to the peer now uses. Returns the previous one when it
+    /// changed; an unresolved route (`None`, as in the middle of a switch) keeps the current.
+    fn update(&mut self, resolved: Option<(String, u32)>) -> Option<Option<(String, u32)>> {
+        let to = resolved.filter(|(n, _)| !n.is_empty())?;
+        if self.cur.as_ref() == Some(&to) {
+            return None;
         }
-    } else {
-        None
+        Some(self.cur.replace(to))
+    }
+}
+
+/// The local address the kernel would use to reach `peer`, and the interface holding it.
+/// Nothing is sent.
+fn route_to(peer: IpAddr) -> Option<(IpAddr, String)> {
+    let local = local_addr_for(SocketAddr::new(peer, 9)).ok()?;
+    let name = iface_with_addr(local).ok().flatten()?;
+    Some((local, name))
+}
+
+fn open_wifi(rec: &Recorder) -> Option<Nl80211> {
+    match Nl80211::open() {
+        Ok(n) => Some(n),
+        Err(e) => {
+            rec.event(
+                "wifi_unavailable",
+                Value::map().with("error", e.to_string()),
+            );
+            None
+        }
+    }
+}
+
+fn run(
+    iface: Option<String>,
+    peer: Option<IpAddr>,
+    rec: Recorder,
+    wifi: bool,
+    stop: Arc<AtomicBool>,
+) {
+    let mut info = iface.as_deref().filter(|n| !n.is_empty()).map(iface_info);
+    let mut follow = Follow {
+        cur: info.as_ref().map(|i| (i.name.clone(), i.index)),
     };
+    let mut nl = None;
+    let mut wifi_tried = false;
+    if wifi && info.as_ref().is_some_and(|i| i.kind == IfType::Wifi) {
+        wifi_tried = true;
+        nl = open_wifi(&rec);
+    }
     let rt = RtMonitor::open().ok();
     let mut qd = QdiscReader::open().ok();
     let mut tick = 0u64;
@@ -231,8 +304,8 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
                 v(u64::from(q.backlog)),
             ]);
         }
-        if let Some(name) = iface.as_deref()
-            && let Some(s) = if_stats(name)
+        if let Some(i) = info.as_ref()
+            && let Some(s) = if_stats(&i.name)
         {
             if_rows.push(vec![
                 Some(t as i64),
@@ -249,6 +322,7 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
         if tick.is_multiple_of(10) {
             pair_rows.push(pair_row(&pair(8)));
             if let (Some(n), Some(i)) = (nl.as_mut(), info.as_ref())
+                && i.kind == IfType::Wifi
                 && let Ok(w) = n.sample(i.index)
             {
                 let bss = w.bssid.map(|b| {
@@ -274,15 +348,21 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
             rec.rows("wifi", std::mem::take(&mut wifi_rows));
             rec.rows("pairs", std::mem::take(&mut pair_rows));
         }
+        // Without rtnetlink the route to the peer is re-resolved once per second.
+        let mut recheck = rt.is_none() && tick.is_multiple_of(10);
         if let Some(m) = rt.as_ref() {
             let mut evs = Vec::new();
             match m.poll_events(&mut evs) {
                 Ok(()) => {}
-                Err(e) => rec.event(
-                    "rtnetlink_overrun",
-                    Value::map().with("error", e.to_string()),
-                ),
+                Err(e) => {
+                    recheck = true;
+                    rec.event(
+                        "rtnetlink_overrun",
+                        Value::map().with("error", e.to_string()),
+                    );
+                }
             }
+            recheck |= !evs.is_empty();
             for e in evs {
                 rec.event(
                     e.kind.name(),
@@ -291,6 +371,28 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
                         .with("default_route", e.default_route)
                         .with("addr", pii(e.addr.map(|a| a.to_string()), "id")),
                 );
+            }
+        }
+        if recheck && let Some((local, name)) = peer.and_then(route_to) {
+            let to = iface_info(&name);
+            if let Some(from) = follow.update(Some((to.name.clone(), to.index))) {
+                let (qdisc, txqueuelen) = egress_facts(&name);
+                rec.event(
+                    "iface_change",
+                    iface_change_detail(
+                        from.map(|f| f.0),
+                        &name,
+                        iface_facts(&name),
+                        qdisc,
+                        txqueuelen,
+                        local,
+                    ),
+                );
+                if wifi && to.kind == IfType::Wifi && nl.is_none() && !wifi_tried {
+                    wifi_tried = true;
+                    nl = open_wifi(&rec);
+                }
+                info = Some(to);
             }
         }
         tick += 1;
@@ -302,4 +404,63 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
     rec.rows("qdisc", qdisc_rows);
     rec.rows("wifi", wifi_rows);
     rec.rows("pairs", pair_rows);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn at(name: &str, index: u32) -> Option<(String, u32)> {
+        Some((name.to_string(), index))
+    }
+
+    #[test]
+    fn follow_reports_each_switch_once() {
+        let mut f = Follow {
+            cur: at("wlan0", 3),
+        };
+        assert_eq!(f.update(at("wlan0", 3)), None);
+        // Mid-switch there is no route to the peer: keep sampling the current interface.
+        assert_eq!(f.update(None), None);
+        assert_eq!(f.update(at("", 0)), None);
+        assert_eq!(f.update(at("usb0", 7)), Some(at("wlan0", 3)));
+        assert_eq!(f.update(at("usb0", 7)), None);
+        // Re-plugged: same name, new index, fresh counters.
+        assert_eq!(f.update(at("usb0", 9)), Some(at("usb0", 7)));
+        // A session that started without a known interface picks the first one it resolves.
+        let mut f = Follow::default();
+        assert_eq!(f.update(at("eth0", 2)), Some(None));
+    }
+
+    #[test]
+    fn iface_change_tags_names_at_top_level() {
+        let iface = Value::map().with("name", "usb0").with("index", 7u32);
+        let d = iface_change_detail(
+            Some("wlan0".into()),
+            "usb0",
+            iface,
+            Value::Null,
+            Some(1000),
+            "10.0.0.2".parse().unwrap(),
+        );
+        for (k, v, class) in [
+            ("from", "wlan0", "quasi"),
+            ("to", "usb0", "quasi"),
+            ("addr", "10.0.0.2", "id"),
+        ] {
+            let w = d.get(k).unwrap();
+            assert_eq!(w.get("pii").and_then(Value::as_str), Some(class), "{k}");
+            assert_eq!(w.get("value").and_then(Value::as_str), Some(v), "{k}");
+        }
+        let iface = d.get("iface").unwrap();
+        assert!(iface.get("name").is_none());
+        assert_eq!(iface.get("index").and_then(Value::as_u64), Some(7));
+    }
+
+    #[test]
+    fn resolves_loopback_route() {
+        let (local, name) = route_to("127.0.0.1".parse().unwrap()).unwrap();
+        assert_eq!(local, "127.0.0.1".parse::<IpAddr>().unwrap());
+        assert_eq!(name, "lo");
+    }
 }

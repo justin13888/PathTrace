@@ -9,20 +9,23 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use pt_format::Value;
-use pt_sys::clock::{mono_raw, sleep_until};
+use pt_sys::clock::{boottime, mono_raw, sleep_until};
 use pt_sys::udp::{
     ErrEvent, InMsg, MAX_DATAGRAM, OutMsg, SendOutcome, TxIdMode, TxKind, UdpSock, poll_many,
 };
 use pt_wire::ctrl::{Envelope, Frame};
 use pt_wire::probe::{self, Header, PktType, Tagger};
 
-use crate::flows::{Due, FlowSpec, Gen, Pattern, Role, Sock};
+use crate::flows::{Catchup, Due, FlowSpec, Gen, Pattern, Role, Sock};
 use crate::record::{Recorder, pii};
 
 /// Feedback interval and dead-man limits (REQ-PRB-005).
 pub const FEEDBACK_INTERVAL_NS: u64 = 20_000_000;
 pub const DEAD_MAN_NS: u64 = 500_000_000;
 pub const LIGHT_DEAD_MAN_NS: u64 = 5_000_000_000;
+/// A flow whose next deadline is further behind than this skips ahead instead of catching
+/// up, and a suspend longer than this is recorded (docs/design/probe.md §4.3).
+pub const STALL_NS: u64 = 2_000_000;
 /// Flow ids under which control datagrams are observed (sender a / sender b).
 pub const CONTROL_FLOW_A: u8 = 250;
 pub const CONTROL_FLOW_B: u8 = 251;
@@ -34,6 +37,8 @@ pub struct CtrlIn {
     pub src: SocketAddr,
     /// Local MONO_RAW at receipt.
     pub mono: u64,
+    /// Index of the UDP socket it arrived on; `None` over the TCP fallback stream.
+    pub sock: Option<usize>,
 }
 
 /// Per-flow receive statistics used for feedback.
@@ -315,6 +320,23 @@ fn record_send_failure(
     rec.event_nb(kind, d);
 }
 
+/// Detects a suspend of the host: MONO_RAW stops while the system is suspended and BOOTTIME
+/// does not, so BOOTTIME − MONO_RAW grows by the time spent suspended (probe.md §4.3).
+#[derive(Debug, Default)]
+struct SuspendWatch {
+    offset: Option<i64>,
+}
+
+impl SuspendWatch {
+    /// Feed one (BOOTTIME, MONO_RAW) reading; returns the suspended time (ns) when the offset
+    /// grew by more than [`STALL_NS`] since the previous reading.
+    fn observe(&mut self, boot: u64, mono: u64) -> Option<u64> {
+        let off = boot as i64 - mono as i64;
+        let grew = off - self.offset.replace(off)?;
+        (grew > STALL_NS as i64).then_some(grew as u64)
+    }
+}
+
 fn pacer_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -328,6 +350,7 @@ fn pacer_loop(
     let mut light_paused = false;
     let mut cap_logged = false;
     let mut id_modes: Vec<TxIdMode> = socks.iter().map(|s| s.tx_id_mode()).collect();
+    let mut suspend = SuspendWatch::default();
     let handle = |c: PacerCmd,
                   gens: &mut Vec<Gen>,
                   tagger: &mut Option<Tagger>,
@@ -361,7 +384,21 @@ fn pacer_loop(
     };
     loop {
         // Commands: block briefly when idle, otherwise poll.
+        // BOOTTIME is read between two MONO_RAW reads, and a reading the scheduler interrupted
+        // is not used, so a preemption is never taken for a suspend.
+        let m0 = mono_raw();
+        let boot = boottime();
         let now = mono_raw();
+        if now - m0 < 100_000
+            && let Some(ns) = suspend.observe(boot, m0 + (now - m0) / 2)
+        {
+            rec.event_nb(
+                "stall",
+                Value::map()
+                    .with("cause", "suspend")
+                    .with("suspended_ns", ns),
+            );
+        }
         let next_flow = gens.iter().map(|g| g.next_due).min();
         let next_raw = delayed.iter().map(|d| d.0).min();
         let next = next_flow
@@ -514,6 +551,7 @@ fn pacer_loop(
         // Collect due packets per socket.
         let mut per_sock: HashMap<usize, Vec<DueItem>> = HashMap::new();
         let mut stopped = Vec::new();
+        let mut stalls: Vec<(u8, Catchup)> = Vec::new();
         for g in gens.iter_mut() {
             let sock = ids.get(&g.spec.sock.name()).copied().unwrap_or(0);
             let fb_lost = now.saturating_sub(last_fb) > DEAD_MAN_NS
@@ -578,6 +616,11 @@ fn pacer_loop(
                 "pmtu" => PktType::PmtuProbe,
                 _ => PktType::Data,
             };
+            // After a stall the overdue packets are skipped (or the schedule shifted), never
+            // sent back to back (probe.md §4.3).
+            if let Some(c) = g.skip_overdue(now, STALL_NS) {
+                stalls.push((g.spec.id, c));
+            }
             while g.next_due <= now + 20_000 && n < 64 {
                 let Some(due) = g.take() else { break };
                 let skip = g.paused || (g.spec.kind == "light" && light_paused);
@@ -593,6 +636,29 @@ fn pacer_loop(
                 }
                 n += 1;
             }
+        }
+        if let Some(late) = stalls.iter().map(|(_, c)| c.late_ns).max() {
+            rec.event_nb(
+                "stall",
+                Value::map()
+                    .with("cause", "late")
+                    .with("late_ns", late)
+                    .with(
+                        "flows",
+                        Value::Array(
+                            stalls
+                                .iter()
+                                .map(|(id, c)| {
+                                    Value::map()
+                                        .with("flow", *id)
+                                        .with("late_ns", c.late_ns)
+                                        .with("skipped", c.skipped)
+                                        .with("shifted_ns", c.shifted_ns)
+                                })
+                                .collect(),
+                        ),
+                    ),
+            );
         }
         for (id, why) in stopped {
             rec.event_nb(
@@ -731,6 +797,38 @@ fn pacer_loop(
     }
 }
 
+/// The `src` index of a received datagram's source tuple; the first datagram from a tuple
+/// records its `peer_addr` event (docs/design/probe.md §5).
+fn peer_idx(
+    src_idx: &mut HashMap<SocketAddr, u64>,
+    rec: &Recorder,
+    sock: usize,
+    src: SocketAddr,
+) -> u64 {
+    let next = src_idx.len() as u64;
+    *src_idx.entry(src).or_insert_with(|| {
+        rec.event_nb(
+            "peer_addr",
+            Value::map()
+                .with("idx", next)
+                .with("sock", sock)
+                .with("addr", pii(src.to_string(), "id")),
+        );
+        next
+    })
+}
+
+/// The probe header an ICMP error quotes, under QUIC framing or not (docs/design/probe.md
+/// §3.3). A quoted control datagram yields none: its first byte (`0xC1`–`0xC3`) would pass
+/// for a QUIC long header, and stripping it would read ciphertext as a flow and seq.
+fn quoted_header(payload: &[u8]) -> Option<Header> {
+    if Frame::is_control(payload) {
+        None
+    } else {
+        Header::decode(probe::quic::strip(payload))
+    }
+}
+
 fn receiver_loop(
     shared: Arc<Shared>,
     socks: Vec<Arc<UdpSock>>,
@@ -773,7 +871,7 @@ fn receiver_loop(
                             offender,
                             payload,
                         } => {
-                            let quoted = Header::decode(&payload);
+                            let quoted = quoted_header(&payload);
                             rec.event_nb(
                                 "icmp",
                                 Value::map()
@@ -840,7 +938,7 @@ fn receiver_loop(
                             Some(rx_src),
                             m.tos.map(i64::from),
                             m.ttl.map(i64::from),
-                            Some(0),
+                            Some(peer_idx(&mut src_idx, &rec, si, m.src) as i64),
                             m.rxq_drops.map(i64::from),
                         ]);
                     }
@@ -851,20 +949,13 @@ fn receiver_loop(
                             frame,
                             src: m.src,
                             mono,
+                            sock: Some(si),
                         });
                     }
                     continue;
                 }
                 let Some(tg) = tagger.as_ref() else { continue };
-                let inner = if data
-                    .first()
-                    .is_some_and(|b| b & 0x40 != 0 && b >> 4 != probe::VERSION)
-                {
-                    probe::quic::unwrap(data).unwrap_or(data)
-                } else {
-                    data
-                };
-                let Some(h) = tg.verify(inner) else {
+                let Some(h) = tg.verify(probe::quic::strip(data)) else {
                     bad_tag += 1;
                     continue;
                 };
@@ -872,17 +963,7 @@ fn receiver_loop(
                     unknown += 1;
                     continue;
                 }
-                let next = src_idx.len() as u64;
-                let idx = *src_idx.entry(m.src).or_insert_with(|| {
-                    rec.event_nb(
-                        "peer_addr",
-                        Value::map()
-                            .with("idx", next)
-                            .with("sock", si)
-                            .with("addr", pii(m.src.to_string(), "id")),
-                    );
-                    next
-                });
+                let idx = peer_idx(&mut src_idx, &rec, si, m.src);
                 // The responder replies on each socket to where the initiator's flows come from,
                 // except NAT probes, which deliberately come from spare source ports.
                 let from_spare = shared
@@ -1067,5 +1148,74 @@ mod tests {
         for k in ["light", "nat", "class", "control"] {
             assert_eq!(dead_man(k, true, false), DeadMan::Run, "{k}");
         }
+    }
+
+    #[test]
+    fn peer_idx_numbers_source_tuples_once() {
+        let path = std::env::temp_dir().join(format!("pt-peer-{}.ptflog", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut head = pt_format::Map::new();
+        head.insert(pt_format::Key::from("kind"), Value::from("obslog"));
+        let (rec, h) = crate::record::start(&path, head, Role::B).unwrap();
+        let a: SocketAddr = "192.0.2.1:4433".parse().unwrap();
+        let b: SocketAddr = "192.0.2.1:4434".parse().unwrap();
+        let mut idx = HashMap::new();
+        // A control datagram and a probe from one tuple share its index.
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        assert_eq!(peer_idx(&mut idx, &rec, 1, b), 1);
+        assert_eq!(peer_idx(&mut idx, &rec, 0, a), 0);
+        drop(rec);
+        // One `peer_addr` event per new tuple.
+        assert_eq!(h.join().unwrap().unwrap().events, 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn quoted_control_datagrams_decode_no_header() {
+        let h = Header {
+            ptype: PktType::Data,
+            flow: 3,
+            phase: 4,
+            session: 9,
+            seq: 77,
+            t_intended: 1,
+            train: 0,
+            train_idx: 0,
+            flags: 0,
+        };
+        let mut hb = [0u8; probe::HEADER_LEN];
+        h.encode(&mut hb);
+        // Ciphertext whose bytes land a valid probe header right after a QUIC long header.
+        let mut ciphertext = vec![0u8; probe::quic::LONG_OVERHEAD - 13];
+        ciphertext.extend_from_slice(&hb);
+        let ctrl = Frame::Data {
+            session: 9,
+            nonce: 5,
+            ciphertext,
+        }
+        .encode();
+        // Stripped as QUIC, the quote would yield a made-up flow and seq.
+        assert_eq!(Header::decode(probe::quic::strip(&ctrl)), Some(h));
+        assert_eq!(quoted_header(&ctrl), None);
+        // Probe datagrams, bare or QUIC-framed, still yield theirs.
+        assert_eq!(quoted_header(&hb), Some(h));
+        let q = probe::quic::wrap(false, [1; 8], [2; 8], &hb);
+        assert_eq!(quoted_header(&q), Some(h));
+    }
+
+    #[test]
+    fn suspend_watch_reports_growth_of_boottime_over_mono() {
+        let mut w = SuspendWatch::default();
+        let ms = 1_000_000;
+        // BOOTTIME 1 s ahead of MONO_RAW at boot already.
+        assert_eq!(w.observe(1_000 * ms, 0), None);
+        // Both advance together; a slow drift of the offset is no suspend.
+        assert_eq!(w.observe(1_100 * ms, 100 * ms), None);
+        assert_eq!(w.observe(1_201 * ms, 200 * ms), None);
+        // 30 s suspended: MONO_RAW advanced 1 ms, BOOTTIME 30.001 s.
+        assert_eq!(w.observe(31_202 * ms, 201 * ms), Some(30_000 * ms));
+        // The new offset is the baseline from then on.
+        assert_eq!(w.observe(31_302 * ms, 301 * ms), None);
     }
 }

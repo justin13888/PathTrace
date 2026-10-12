@@ -13,7 +13,7 @@ Goal: a public Linux VM running `pathtrace serve` under systemd, paired with you
 Download the release tarball for each machine's architecture from the GitHub release page, verify it, and install:
 
 ```sh
-VER=v1.0.1            # the release you are installing
+VER=v1.0.1            # the release you are installing; field sessions need one containing PR #37 and #39 (field-session.md)
 ARCH=x86_64           # or aarch64
 curl -fLO https://github.com/justin13888/PathTrace/releases/download/$VER/pathtrace-$VER-$ARCH-unknown-linux-musl.tar.gz
 curl -fLO https://github.com/justin13888/PathTrace/releases/download/$VER/SHA256SUMS
@@ -69,7 +69,7 @@ Treat the pairing string as a secret (it contains the pre-shared key). Keys and 
 From the laptop on any network:
 
 ```sh
-pathtrace doctor vm                  # local prerequisites + TCP reachability; exits 1 on fatal problems
+pathtrace doctor vm                  # local prerequisites, IPv4/IPv6 reachability, UDP refusals, portals; exits 1 on fatal problems
 mkdir -p ~/traces && cd ~/traces
 pathtrace probe vm --class home --profile smoke
 ```
@@ -91,7 +91,9 @@ pathtrace trace info <id>.ptf | head -30     # "complete": true
 | `warning: … TX stamp ids match no transmission and no burned id` | Transmit ids are likely shifted by one (predicted ids, kernels before 6.13). As above: usable, and the raw logs keep every stamp |
 | `wire protocol mismatch` | Laptop and VM run different major versions; install the same release on both |
 | Laptop on 1.1, VM still on 1.0 (or the reverse) | Sessions run (same wire major), but a 1.0 responder reports no bytes sent (`sent` feedback) and enforces no byte allowance (`max_bytes`), so a fast path can hit the VM's data cap and stop the light flow early; a 1.0 initiator ignores the responder's `abort` when the VM is stopped mid-session. The peer's wire minor is recorded in META (`extra.<ep>.responder.wire_minor`, `extra.<ep>.initiator_wire_minor`). Upgrade both |
-| `doctor` warns about `kernel timestamps` | Traces still work with user-space timestamps (recorded per packet); precision is lower |
+| `doctor` warns about `kernel timestamps` | Traces still work with user-space timestamps (recorded per packet); precision is lower. The check needs both kernel RX and kernel TX stamps |
+| `doctor` warns `udp/443 not refused` (refused) | The responder does not listen on 443: it runs with `--no-class-ports` or lacks `CAP_NET_BIND_SERVICE`, or a firewall rejects UDP 443. Fix the unit (deploy/README.md) or the security group |
+| `doctor` warns `clock sync` on the VM | Run `pathtrace doctor` (no responder) on the VM too; enable chrony or systemd-timesyncd (`timedatectl set-ntp true`) |
 
 ## Maintenance
 

@@ -349,3 +349,283 @@ fn responder_log_fetchable_after_responder_killed_mid_session() {
             > 1000
     );
 }
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn ipv6_without_a_route_falls_back_to_ipv4() {
+    // probe.md §3.1: `--ipv6` on a host without IPv6 connectivity runs the session over IPv4
+    // (issue #34) instead of failing, and the trace says so.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[
+            ("HOSTS", "10.0.2.2 resp\nfd00:2::2 resp"),
+            ("RESP_ADDR", "resp"),
+            ("SETUP_PA", "ip -6 route del default"),
+            ("PROBE_ARGS", "--ipv6"),
+        ],
+        "0",
+        "v6fallback",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert_eq!(info["complete"], true, "{info}");
+    assert!(err.contains("ipv6 unusable"), "{err}");
+    let ev = events(&trace);
+    let fb: Vec<_> = ev
+        .iter()
+        .filter(|e| e["type"] == "family_fallback")
+        .collect();
+    assert_eq!(fb.len(), 1, "{ev:?}");
+    let s = fb[0].to_string();
+    assert!(
+        s.contains("ipv6") && s.contains("ipv4") && s.contains("no route"),
+        "{s}"
+    );
+    for dir in ["pkt[a_to_b]", "pkt[b_to_a]"] {
+        assert!(
+            info["tables"][dir]["rows"].as_u64().unwrap_or(0) > 1000,
+            "{dir}"
+        );
+    }
+}
+
+/// The one `family_fallback` event of a trace, as JSON text.
+fn family_fallback(trace: &Path) -> String {
+    let ev = events(trace);
+    let fb: Vec<_> = ev
+        .iter()
+        .filter(|e| e["type"] == "family_fallback")
+        .collect();
+    assert_eq!(fb.len(), 1, "{ev:?}");
+    fb[0].to_string()
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn ipv6_udp_timeout_falls_back_to_ipv4_udp() {
+    // probe.md §3.1: the preferred family is routable but gives no UDP handshake reply; a UDP
+    // session on the other family is preferred to a TCP-only one on the preferred family.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[
+            ("HOSTS", "10.0.2.2 resp\nfd00:2::2 resp"),
+            ("RESP_ADDR", "resp"),
+            (
+                "SETUP_PM",
+                "nft add table inet f && nft add chain inet f fw '{ type filter hook forward priority 0; }' && nft add rule inet f fw meta nfproto ipv6 meta l4proto udp drop",
+            ),
+            ("PROBE_ARGS", "--ipv6"),
+        ],
+        "0",
+        "v6udpdrop",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert_eq!(info["complete"], true, "{info}");
+    assert!(err.contains("ipv6 unusable"), "{err}");
+    assert!(!err.contains("TCP fallback"), "{err}");
+    let s = family_fallback(&trace);
+    assert!(
+        s.contains("\"ipv6\"")
+            && s.contains("\"ipv4\"")
+            && s.contains("no handshake reply over UDP")
+            && !s.contains("or TCP"),
+        "{s}"
+    );
+    for dir in ["pkt[a_to_b]", "pkt[b_to_a]"] {
+        assert!(
+            info["tables"][dir]["rows"].as_u64().unwrap_or(0) > 1000,
+            "{dir}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn tcp_fallback_tries_each_family() {
+    // probe.md §3.1: with UDP blocked on both families and TCP blocked over IPv6, the TCP
+    // fallback moves on from the preferred family to IPv4 and the trace says why.
+    let (trace, _) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[
+            ("HOSTS", "10.0.2.2 resp\nfd00:2::2 resp"),
+            ("RESP_ADDR", "resp"),
+            (
+                "SETUP_PM",
+                "nft add table inet f && nft add chain inet f fw '{ type filter hook forward priority 0; }' && nft add rule inet f fw meta l4proto udp drop && nft add rule inet f fw meta nfproto ipv6 meta l4proto tcp drop",
+            ),
+            ("PROBE_ARGS", "--ipv6"),
+        ],
+        "3",
+        "tcpv4",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert!(err.contains("TCP fallback"), "{err}");
+    assert!(err.contains("ipv6 unusable"), "{err}");
+    let s = family_fallback(&trace);
+    assert!(
+        s.contains("\"ipv6\"")
+            && s.contains("\"ipv4\"")
+            && s.contains("no handshake reply over UDP or TCP"),
+        "{s}"
+    );
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn tcp_fallback_session_sends_no_udp() {
+    // probe.md §3.1: with UDP blocked the session runs over TCP and skips every UDP part
+    // (issue #34): neither endpoint puts a UDP probe on the path, and each skipped part is
+    // recorded. Exit 3: the trace has no UDP observations.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[(
+            "SETUP_PM",
+            "nft add table inet f && nft add chain inet f fw '{ type filter hook forward priority 0; }' && nft add rule inet f fw meta l4proto udp drop",
+        )],
+        "3",
+        "tcponly",
+    );
+    let out = trace.parent().unwrap();
+    let err = std::fs::read_to_string(out.join("probe.err")).unwrap_or_default();
+    assert!(err.contains("TCP fallback"), "{err}");
+    for dir in ["pkt[a_to_b]", "pkt[b_to_a]"] {
+        assert_eq!(
+            info["tables"][dir]["rows"].as_u64().unwrap_or(0),
+            0,
+            "{dir}: {info}"
+        );
+    }
+    let ev = events(&trace);
+    let skipped: Vec<String> = ev
+        .iter()
+        .filter(|e| e["type"] == "phase_skipped" && e.to_string().contains("udp_blocked"))
+        .map(ToString::to_string)
+        .collect();
+    for what in [
+        "background",
+        "udp classes",
+        "quiet",
+        "chirps",
+        "saturation",
+        "cbr",
+    ] {
+        assert!(
+            skipped.iter().any(|s| s.contains(what)),
+            "{what}: {skipped:?}"
+        );
+    }
+    // The TCP parts still ran.
+    assert!(ev.iter().any(|e| e["type"] == "tcp_probe"), "{ev:?}");
+    assert!(ev.iter().any(|e| e["type"] == "ref_tcp"), "{ev:?}");
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn second_initiator_is_told_busy() {
+    // probe.md §8 (issue #34): while a session runs, another initiator's handshake is
+    // answered with `busy`, over UDP on the session's family, over UDP on the other family, and
+    // over TCP, and the initiator says so (exit 1) instead of reporting the responder unreachable.
+    let script = r#"sleep 4
+cp -a "$OUT/i" "$OUT/i6"
+sed 's/ 10\.0\.2\.2 / fd00:2::2 /' "$OUT/i/responders" >"$OUT/i6/responders"
+chmod 600 "$OUT/i6/responders"
+for k in v4 v6 tcp; do
+  cfg="$OUT/i"; [ "$k" = v6 ] && cfg="$OUT/i6"
+  if [ "$k" = tcp ]; then
+    nft add table inet o
+    nft add chain inet o out '{ type filter hook output priority 0; }'
+    nft add rule inet o out meta l4proto udp drop
+  fi
+  mkdir -p "$OUT/second-$k"
+  "$BIN" --config-dir "$cfg" probe vm --class lab --profile smoke --out "$OUT/second-$k" >/dev/null 2>"$OUT/second-$k.err"
+  echo "$?" >"$OUT/second-$k.exit"
+done"#;
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[("SCRIPT_PM", script)],
+        "0",
+        "busy",
+    );
+    let out = trace.parent().unwrap();
+    let read = |f: &str| std::fs::read_to_string(out.join(f)).unwrap_or_default();
+    assert_eq!(info["complete"], true, "{info}");
+    for k in ["v4", "v6", "tcp"] {
+        let err = read(&format!("second-{k}.err"));
+        assert_eq!(read(&format!("second-{k}.exit")).trim(), "1", "{k}: {err}");
+        assert!(err.contains("responder busy"), "{k}: {err}");
+    }
+    let refused: Vec<String> = events(&trace)
+        .iter()
+        .filter(|e| e["type"] == "handshake_refused")
+        .map(ToString::to_string)
+        .collect();
+    assert_eq!(refused.len(), 3, "{refused:?}");
+    assert_eq!(
+        refused.iter().filter(|s| s.contains("\"udp\"")).count(),
+        2,
+        "{refused:?}"
+    );
+    assert!(refused.iter().any(|s| s.contains("\"tcp\"")), "{refused:?}");
+}
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn forced_predicted_ids_join_exactly() {
+    // probe.md §4.1 (issue #36): with transmit ids predicted on both endpoints, every stamp
+    // still joins its own transmission, and merge finds nothing to re-anchor.
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 15ms rate 10mbit limit 100",
+        &[
+            ("PROBE_ENV", "PATHTRACE_TX_IDS=predicted"),
+            ("SERVE_ENV", "PATHTRACE_TX_IDS=predicted"),
+        ],
+        "0",
+        "predicted",
+    );
+    assert_eq!(info["complete"], true, "{info}");
+    let bin = env!("CARGO_BIN_EXE_pathtrace");
+    let dump = Command::new(bin)
+        .args(["trace", "dump"])
+        .arg(&trace)
+        .output()
+        .unwrap();
+    let meta = String::from_utf8_lossy(&dump.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "META")
+        .expect("META");
+    for ep in ["a", "b"] {
+        let socks = meta["head"]["endpoints"][ep]["sockets"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(
+            !socks.is_empty() && socks.iter().all(|s| s["tx_ids"] == "predicted"),
+            "{ep}: {socks:?}"
+        );
+    }
+    let c = &info["merge_checks"];
+    for dir in ["a_to_b", "b_to_a"] {
+        assert!(c[dir]["txts_joined"].as_u64().unwrap_or(0) > 1000, "{c}");
+        assert_eq!(c[dir]["txts_implausible"], 0, "{c}");
+    }
+    for ep in ["a", "b"] {
+        assert_eq!(c[format!("txts_unexplained_{ep}")], 0, "{c}");
+        assert_eq!(c[format!("tx_reanchors_{ep}")], 0, "{c}");
+        assert_eq!(c[format!("tx_reanchored_{ep}")], 0, "{c}");
+    }
+}

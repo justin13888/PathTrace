@@ -64,7 +64,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "queue.loss-onset/2",
         "policer.lossy-flat/2",
         "hostdrop.rxq-gap/1",
-        "qdisc.drop-count/1",
+        "qdisc.drop-count/2",
         "loss.gilbert-runs/2",
         "reorder.late-arrivals/1",
         "duplicate.count/1",

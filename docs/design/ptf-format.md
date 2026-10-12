@@ -11,7 +11,7 @@ This document is the normative specification of PTF 1.x (currently 1.1). An inde
 | Version | Release | Additions (minor versions only add, P6) |
 |---|---|---|
 | 1.0 | pathtrace 1.0.0 | Initial format |
-| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and per endpoint `txts_unmatched_<ep>`, `tx_unstamped_<ep>`, `txts_unexplained_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
+| 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and per endpoint `txts_unmatched_<ep>`, `tx_unstamped_<ep>`, `txts_unexplained_<ep>`, `tx_reanchors_<ep>`, `tx_reanchored_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
@@ -302,7 +302,7 @@ FLOW lists every flow (kind, sender, socket, class, pattern, TOS policy, QUIC sh
 
 Observation logs (`META.kind = "obslog"`) carry the per-endpoint precursors: `tx` (sock, flow, seq, size, phase, train, train_idx, tos_tx, id = OPT_ID, tx_intended, tx_user_lag), `txts` (sock, id, kind enum[sched, snd], real) and `rx` (sock, flow, seq, size, rx, rx_src, tos_rx, ttl_rx, src, rxq_drops). Any non-META section may repeat in logs. `merge` joins `tx`+`txts` by (sock, OPT_ID) and then with the peer's `rx` by (flow, seq) into `pkt`, losslessly (`dup`, `unmatched`, `echo` and `txts_unmatched` keep everything else, and log tables merge does not know are copied unchanged into OBSV).
 
-`rxq_drops` is the receiving socket's cumulative drop count (`SO_RXQ_OVFL`) when the datagram was queued: it increases between two arrivals on a socket exactly when that socket dropped datagrams in between. It is null where the socket could not enable the option. How OPT_IDs were assigned is recorded per socket in `META.endpoints.<ep>.sockets[].tx_ids` (`explicit`: exact; `predicted`: inferred, failures recorded as events; `none`: no TX stamps), probe.md §4.1.
+`rxq_drops` is the receiving socket's cumulative drop count (`SO_RXQ_OVFL`) when the datagram was queued: it increases between two arrivals on a socket exactly when that socket dropped datagrams in between. It is null where the socket could not enable the option. How OPT_IDs were assigned is recorded per socket in `META.endpoints.<ep>.sockets[].tx_ids` (`explicit`: exact; `predicted`: inferred, failures recorded as events, and `merge` re-anchors the ids after each failure against the stamp times, counted in `merge_checks` as `tx_reanchors_<ep>` and `tx_reanchored_<ep>`; `none`: no TX stamps), probe.md §4.1.
 
 ## Derived series (SERS, critical + derived)
 

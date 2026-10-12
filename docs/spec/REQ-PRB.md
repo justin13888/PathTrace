@@ -175,6 +175,7 @@ The `tcp/443` class runs a real TLS 1.3 session. The responder certificate is pi
 ### REQ-PRB-025: Preflight doctor
 - status: met
 - spec: new
+- design: docs/design/cli.md
 - evidence: EXP-0007-r6
 
 `pathtrace doctor` checks local prerequisites (timestamping support, clocks, offloads, keys) and reachability of the responder on every class port before a field session.
@@ -222,3 +223,10 @@ Every place where the probe's own hosts can lose or skip a datagram is recorded,
 - evidence: EXP-0006-r6
 
 SIGINT or SIGTERM ends a session cleanly on either endpoint, with a partial trace. The responder's log stays fetchable after an interruption of the initiator or a restart of the responder, using a session file written before measuring. A lost handshake reply does not end the session.
+
+### REQ-PRB-032: Interface switches, stalls and suspends do not distort the capture
+- status: planned
+- spec: new
+- design: docs/design/probe.md
+
+After an interface switch, both endpoints keep sampling the interface that carries the route to the peer (interface counters, egress qdisc, Wi-Fi link state) and record the switch. After the pacer stalls, it skips ahead instead of sending its overdue packets back to back, and records the stall; a suspend of the host is recorded too.

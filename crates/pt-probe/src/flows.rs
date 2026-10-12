@@ -92,6 +92,15 @@ pub enum Pattern {
     Burst { count: u32, gap_ns: u64 },
 }
 
+/// The P3 chirp: 26 packets, gaps 2 ms × 0.8^k (k = 0 … 24), every 500 ms. At 1280–1500 bytes
+/// it spans about 5–6 Mbit/s to 1.08–1.27 Gbit/s (docs/design/probe.md §6, Chirps).
+pub const CHIRP: Pattern = Pattern::Chirp {
+    count: 26,
+    gap0_ns: 2_000_000,
+    factor: 0.8,
+    period_ns: 500_000_000,
+};
+
 /// TOS byte policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tos {
@@ -418,6 +427,46 @@ impl Gen {
         self.seq += 1;
         Some(due)
     }
+
+    /// Bring a schedule that is more than `max_late` ns behind `now` back to `now`
+    /// (docs/design/probe.md §4.3). A stream (iso, train, chirp, rate) skips every overdue
+    /// packet: its sequence numbers are consumed and never sent. A counted pattern (ladder,
+    /// burst), whose every packet is needed, keeps its packets and shifts the rest of its
+    /// schedule by the delay. Returns `None` when the flow is not stalled.
+    pub fn skip_overdue(&mut self, now: u64, max_late: u64) -> Option<Catchup> {
+        if self.done || self.next_due.saturating_add(max_late) >= now {
+            return None;
+        }
+        let late_ns = now - self.next_due;
+        let mut c = Catchup {
+            late_ns,
+            skipped: 0,
+            shifted_ns: 0,
+        };
+        match self.spec.pattern {
+            Pattern::Ladder { .. } | Pattern::Burst { .. } => {
+                self.next_due = now;
+                c.shifted_ns = late_ns;
+            }
+            _ => {
+                while self.next_due < now && self.take().is_some() {
+                    c.skipped += 1;
+                }
+            }
+        }
+        Some(c)
+    }
+}
+
+/// What [`Gen::skip_overdue`] did to a stalled flow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Catchup {
+    /// How far the flow's next deadline was behind, ns.
+    pub late_ns: u64,
+    /// Overdue packets skipped (streams).
+    pub skipped: u64,
+    /// How far the schedule was shifted, ns (counted patterns).
+    pub shifted_ns: u64,
 }
 
 #[cfg(test)]
@@ -507,6 +556,27 @@ mod tests {
     }
 
     #[test]
+    fn chirp_brackets_access_rates() {
+        // (size, slowest rate at most, fastest rate at least), bit/s.
+        for (size, lo, hi) in [(1500u32, 6.0e6, 1.2e9), (1280, 5.2e6, 1.0e9)] {
+            let mut s = spec(CHIRP);
+            s.size = size;
+            let mut g = Gen::new(s, 0);
+            let chirp: Vec<Due> = (0..26).map(|_| g.take().unwrap()).collect();
+            assert!(chirp[25].last_of_train && !chirp[24].last_of_train);
+            let rate =
+                |w: &[Due]| f64::from(size * 8) * 1e9 / (w[1].t_intended - w[0].t_intended) as f64;
+            let rates: Vec<f64> = chirp.windows(2).map(rate).collect();
+            assert!(rates.windows(2).all(|r| r[1] > r[0]), "{size}: rates rise");
+            assert!(rates[0] <= lo, "{size}: slowest {}", rates[0]);
+            assert!(rates[24] >= hi, "{size}: fastest {}", rates[24]);
+            // Short against the period, so the two directions (200 ms apart) never overlap.
+            assert!(chirp[25].t_intended < 11 * MS);
+            assert_eq!(g.take().unwrap().t_intended, 500 * MS);
+        }
+    }
+
+    #[test]
     fn ladder_and_tos_cycle() {
         let mut g = Gen::new(
             spec(Pattern::Ladder {
@@ -521,5 +591,116 @@ mod tests {
         assert_eq!(TOS_CYCLE[0], 0);
         assert_eq!(TOS_CYCLE[3], 3);
         assert_eq!(TOS_CYCLE[15], (46 << 2) | 3);
+    }
+
+    const MS: u64 = 1_000_000;
+
+    #[test]
+    fn stalled_stream_skips_overdue_packets_and_keeps_its_phase() {
+        let mut g = Gen::new(
+            spec(Pattern::Iso {
+                interval_ns: 20 * MS,
+            }),
+            0,
+        );
+        g.take().unwrap();
+        // Woken 101 ms after the deadline at 20 ms: the packets due at 20 … 120 ms are overdue.
+        let c = g.skip_overdue(121 * MS, 2 * MS).unwrap();
+        assert_eq!(
+            c,
+            Catchup {
+                late_ns: 101 * MS,
+                skipped: 6,
+                shifted_ns: 0
+            }
+        );
+        let d = g.take().unwrap();
+        assert_eq!((d.seq, d.t_intended), (7, 140 * MS));
+    }
+
+    #[test]
+    fn small_lateness_is_left_to_catch_up() {
+        let mut g = Gen::new(
+            spec(Pattern::Iso {
+                interval_ns: 20 * MS,
+            }),
+            0,
+        );
+        assert_eq!(g.skip_overdue(2 * MS, 2 * MS), None);
+        assert_eq!(g.take().unwrap().seq, 0);
+    }
+
+    #[test]
+    fn mid_train_stall_skips_the_rest_of_the_train() {
+        let mut g = Gen::new(
+            spec(Pattern::Train {
+                count: 8,
+                period_ns: 500 * MS,
+            }),
+            0,
+        );
+        for _ in 0..3 {
+            g.take().unwrap();
+        }
+        let c = g.skip_overdue(10 * MS, 2 * MS).unwrap();
+        assert_eq!(c.skipped, 5);
+        let d = g.take().unwrap();
+        assert_eq!((d.train, d.train_idx, d.t_intended), (1, 0, 500 * MS));
+    }
+
+    #[test]
+    fn stall_past_the_end_finishes_the_flow() {
+        let mut g = Gen::new(
+            spec(Pattern::Iso {
+                interval_ns: 20 * MS,
+            }),
+            0,
+        );
+        let c = g.skip_overdue(5_000 * MS, 2 * MS).unwrap();
+        assert_eq!(c.skipped, 50);
+        assert!(g.take().is_none());
+        assert_eq!(g.skip_overdue(6_000 * MS, 2 * MS), None);
+    }
+
+    #[test]
+    fn counted_patterns_shift_and_lose_nothing() {
+        let mut g = Gen::new(
+            spec(Pattern::Ladder {
+                sizes: vec![1200, 1400],
+                reps: 2,
+                gap_ns: 20 * MS,
+            }),
+            0,
+        );
+        g.take().unwrap();
+        let c = g.skip_overdue(100 * MS, 2 * MS).unwrap();
+        assert_eq!(
+            c,
+            Catchup {
+                late_ns: 80 * MS,
+                skipped: 0,
+                shifted_ns: 80 * MS
+            }
+        );
+        let rest: Vec<(u32, u64)> =
+            std::iter::from_fn(|| g.take().map(|d| (d.size, d.t_intended))).collect();
+        assert_eq!(
+            rest,
+            vec![(1200, 100 * MS), (1400, 120 * MS), (1400, 140 * MS)]
+        );
+        let mut g = Gen::new(
+            spec(Pattern::Burst {
+                count: 3,
+                gap_ns: 100 * MS,
+            }),
+            0,
+        );
+        g.take().unwrap();
+        assert_eq!(
+            g.skip_overdue(300 * MS, 2 * MS).unwrap().shifted_ns,
+            200 * MS
+        );
+        let seqs: Vec<u64> = std::iter::from_fn(|| g.take().map(|d| d.seq)).collect();
+        assert_eq!(seqs, vec![1, 2]);
     }
 }

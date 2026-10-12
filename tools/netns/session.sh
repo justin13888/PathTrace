@@ -17,6 +17,8 @@
 #   PROBE_ARGS extra arguments for `pathtrace probe`
 #   SERVE_ARGS extra arguments for `pathtrace serve`
 #   RESP_ADDR  responder address the initiator uses (default 10.0.2.2; fd00:2::2 for IPv6)
+#   HOSTS      if non-empty, /etc/hosts lines bind-mounted over /etc/hosts for every namespace
+#              (e.g. a responder name with an address of each family)
 #   SCRIPT_PM  shell commands run in the middlebox namespace in the background during the probe
 #              (e.g. scripted `tc qdisc change` for time-varying capacity)
 #   PROBE_SIGNAL_AFTER  send SIGINT to the probe after this many seconds (interruption tests)
@@ -46,9 +48,15 @@ SERVE_SIGNAL=${SERVE_SIGNAL:-TERM}
 SERVE_RESTART=${SERVE_RESTART:-}
 POST_PA=${POST_PA:-}
 RESP_ADDR=${RESP_ADDR:-10.0.2.2}
+HOSTS=${HOSTS:-}
 IP=ip
 
 mount -t tmpfs none /run
+if [ -n "$HOSTS" ]; then
+  mkdir -p "$OUT"
+  printf '%s\n' "$HOSTS" >"$OUT/hosts"
+  mount --bind "$OUT/hosts" /etc/hosts
+fi
 for n in pa pm pb; do $IP netns add "$n"; done
 $IP link add name va type veth peer name ma0
 $IP link set va netns pa
