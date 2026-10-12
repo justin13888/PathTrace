@@ -203,6 +203,70 @@ fn read_governors() -> (String, Vec<String>) {
     (driver, govs)
 }
 
+/// Offloads the `offloads` check reports, in this order (docs/design/cli.md, R-0016).
+const OFFLOADS: [&str; 9] = [
+    "rx-gro",
+    "rx-gro-hw",
+    "rx-gro-list",
+    "rx-lro",
+    "rx-udp-gro-forwarding",
+    "tx-generic-segmentation",
+    "tx-tcp-segmentation",
+    "tx-tcp6-segmentation",
+    "tx-udp-segmentation",
+];
+
+/// Offloads that change what the probe records on this host, and why: fraglist GRO coalesces
+/// the probe's UDP datagrams under one RX timestamp, and LRO merges TCP segments without
+/// keeping their headers.
+const HARMFUL_OFFLOADS: [(&str, &str); 2] = [
+    ("rx-gro-list", "probe datagrams share one RX timestamp"),
+    ("rx-lro", "the NIC rewrites received TCP segments"),
+];
+
+/// The `offloads` check over the features of `iface`.
+fn offloads(
+    iface: &str,
+    features: &std::io::Result<Vec<pt_sys::ethtool::Feature>>,
+) -> (bool, String) {
+    let f = match features {
+        Ok(f) => f,
+        Err(e) => return (false, format!("{iface}: not read: {e}")),
+    };
+    let on = |name: &str| f.iter().find(|x| x.name == name).map(|x| x.active);
+    let state: Vec<String> = OFFLOADS
+        .iter()
+        .filter_map(|&n| on(n).map(|a| format!("{n} {}", if a { "on" } else { "off" })))
+        .collect();
+    let mut d = format!("{iface}: {}", state.join(", "));
+    let bad: Vec<(&str, &str)> = HARMFUL_OFFLOADS
+        .iter()
+        .copied()
+        .filter(|(n, _)| on(n) == Some(true))
+        .collect();
+    if bad.is_empty() {
+        return (true, d);
+    }
+    for (n, why) in &bad {
+        d.push_str(&format!("; {n} is on: {why}"));
+    }
+    let names: Vec<String> = bad.iter().map(|(n, _)| format!("{n} off")).collect();
+    d.push_str(&format!(
+        "; turn off with `sudo ethtool -K {iface} {}`",
+        names.join(" ")
+    ));
+    (false, d)
+}
+
+/// Interface of the default route, IPv4 first (a route lookup only: nothing is sent to the
+/// documentation addresses).
+fn default_iface() -> Option<String> {
+    ["192.0.2.1:9", "[2001:db8::1]:9"].iter().find_map(|a| {
+        let ip = pt_sys::netif::local_addr_for(a.parse().expect("addr")).ok()?;
+        pt_sys::netif::iface_with_addr(ip).ok().flatten()
+    })
+}
+
 /// What an empty UDP datagram to a port provoked.
 #[derive(Debug, PartialEq, Eq)]
 enum Udp {
@@ -349,6 +413,8 @@ fn family_checks(c: &mut Vec<Check>, dst: SocketAddr, suffix: &str) -> bool {
             ),
             false,
         );
+        let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
+        check(c, &format!("offloads{suffix}"), ok, d, false);
         check(
             c,
             &format!("metered{suffix}"),
@@ -524,6 +590,9 @@ pub fn run(cfg: &Path, responder: Option<&Responder>, json: bool) -> ExitCode {
     check(&mut c, "cpu governor", ok, d, false);
     if let Some(r) = responder {
         responder_checks(&mut c, r);
+    } else if let Some(iface) = default_iface() {
+        let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
+        check(&mut c, "offloads", ok, d, false);
     }
     let failed = c.iter().any(|x| !x.ok && x.fatal);
     if json {
@@ -621,6 +690,56 @@ mod tests {
         assert!(governor("acpi-cpufreq", &["schedutil".into()]).0);
         assert!(!governor("acpi-cpufreq", &["powersave".into()]).0);
         assert!(!governor("intel_cpufreq", &["performance".into(), "powersave".into()]).0);
+    }
+
+    fn feature(name: &str, active: bool) -> pt_sys::ethtool::Feature {
+        pt_sys::ethtool::Feature {
+            name: name.into(),
+            available: true,
+            requested: active,
+            active,
+            never_changed: false,
+        }
+    }
+
+    #[test]
+    fn offload_warnings() {
+        // GRO and TSO on, as on most hosts: reported, not warned.
+        let common = vec![
+            feature("rx-gro", true),
+            feature("rx-lro", false),
+            feature("rx-gro-list", false),
+            feature("tx-tcp-segmentation", true),
+            feature("rx-checksum", true),
+        ];
+        let (ok, d) = offloads("eth0", &Ok(common.clone()));
+        assert!(ok, "{d}");
+        assert_eq!(
+            d,
+            "eth0: rx-gro on, rx-gro-list off, rx-lro off, tx-tcp-segmentation on"
+        );
+        let mut bad = common;
+        bad[1].active = true;
+        bad[2].active = true;
+        let (ok, d) = offloads("eth0", &Ok(bad));
+        assert!(!ok);
+        assert!(
+            d.contains("rx-gro-list is on: probe datagrams share one RX timestamp"),
+            "{d}"
+        );
+        assert!(d.contains("rx-lro is on"), "{d}");
+        assert!(
+            d.ends_with("`sudo ethtool -K eth0 rx-gro-list off rx-lro off`"),
+            "{d}"
+        );
+        let (ok, d) = offloads("wg0", &Err(std::io::Error::from(ErrorKind::Unsupported)));
+        assert!(!ok && d.starts_with("wg0: not read: "), "{d}");
+    }
+
+    #[test]
+    fn loopback_offloads_read() {
+        let (_, d) = offloads("lo", &pt_sys::ethtool::features("lo"));
+        assert!(d.starts_with("lo: rx-gro on"), "{d}");
     }
 
     #[test]
