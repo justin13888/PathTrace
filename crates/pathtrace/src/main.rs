@@ -349,7 +349,7 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                 }
             };
             let r = find_responder(&cfg, &name)?;
-            let (dst, _) = session::resolve(&r.addr, false).map_err(|e| e.to_string())?;
+            let (dst, _) = session::route(&r.addr, false).map_err(|e| e.to_string())?;
             let n = session::fetch_with_retry(dst, &cert, sid, &tok, &out, true)
                 .map_err(|e| e.to_string())?;
             println!("{} ({n} bytes)", out.display());
@@ -417,8 +417,11 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
 fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
     let responder = find_responder(&cfg, &a.responder)?;
     let profile_name = if a.profile == "auto" {
-        let (dst, _) = session::resolve(&responder.addr, a.ipv6).map_err(|e| e.to_string())?;
-        let ip = pt_sys::netif::local_addr_for(dst).map_err(|e| e.to_string())?;
+        // The first family this host routes (the preferred one if it can). The session may
+        // still end on the other family when this one gives no UDP handshake reply
+        // (probe.md §3.1); the profile is chosen before the handshake because `hello` carries
+        // its data cap, so it then reflects this family's interface.
+        let (_, ip) = session::route(&responder.addr, a.ipv6).map_err(|e| e.to_string())?;
         let iface = pt_sys::netif::iface_with_addr(ip)
             .ok()
             .flatten()

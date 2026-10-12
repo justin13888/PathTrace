@@ -34,6 +34,8 @@ pub struct CtrlIn {
     pub src: SocketAddr,
     /// Local MONO_RAW at receipt.
     pub mono: u64,
+    /// Index of the UDP socket it arrived on; `None` over the TCP fallback stream.
+    pub sock: Option<usize>,
 }
 
 /// Per-flow receive statistics used for feedback.
@@ -851,6 +853,7 @@ fn receiver_loop(
                             frame,
                             src: m.src,
                             mono,
+                            sock: Some(si),
                         });
                     }
                     continue;

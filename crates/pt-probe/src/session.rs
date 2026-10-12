@@ -56,6 +56,8 @@ pub struct NetTags {
 pub const TCP_KEY_CONTEXT: &str = "pathtrace tcp header v1";
 pub const FETCH_KEY_CONTEXT: &str = "pathtrace fetch v1";
 pub const TCP_CONTROL_MAGIC: &[u8; 4] = b"PTC1";
+/// `welcome.error` of a responder that is running another session (docs/design/probe.md §8).
+pub const BUSY: &str = "busy";
 
 fn utc_now() -> String {
     let secs = realtime() / 1_000_000_000;
@@ -326,6 +328,9 @@ struct Ctx {
     budget: Budget,
     /// A stop signal was received and recorded (docs/design/probe.md §8).
     interrupted: bool,
+    /// UDP reaches the responder; false in a TCP-fallback session, which defines no UDP flow
+    /// (docs/design/probe.md §3.1).
+    udp: bool,
 }
 
 impl Ctx {
@@ -383,6 +388,23 @@ impl Ctx {
         }
         self.budget.enter(id);
         self.log_phase(id, name);
+        true
+    }
+
+    /// In a TCP-fallback session, record that phase `id` sends none of its UDP flows (`what`)
+    /// and return true (docs/design/probe.md §3.1); false when UDP reaches the responder.
+    fn udp_blocked(&self, id: u16, what: &str) -> bool {
+        if self.udp {
+            return false;
+        }
+        self.rec.event(
+            "phase_skipped",
+            Value::map()
+                .with("phase", id)
+                .with("what", what)
+                .with("reason", "udp_blocked"),
+        );
+        self.say(&format!("skipping {what} (P{id}): UDP is blocked"));
         true
     }
 
@@ -637,6 +659,165 @@ pub fn resolve(addr: &str, prefer_v6: bool) -> io::Result<(SocketAddr, Vec<Socke
     Ok((primary, all))
 }
 
+/// The responder addresses the initiator tries, in order (docs/design/probe.md §3.1): the
+/// first of the preferred family, then the first of the other.
+fn family_order(all: &[SocketAddr], prefer_v6: bool) -> Vec<SocketAddr> {
+    [prefer_v6, !prefer_v6]
+        .iter()
+        .filter_map(|v6| all.iter().find(|a| a.is_ipv6() == *v6).copied())
+        .collect()
+}
+
+fn family_name(a: &SocketAddr) -> &'static str {
+    if a.is_ipv6() { "ipv6" } else { "ipv4" }
+}
+
+/// The responder address to use and the local address that reaches it: the first address in
+/// [`family_order`] this host has a route to (docs/design/probe.md §3.1).
+pub fn route(addr: &str, prefer_v6: bool) -> io::Result<(SocketAddr, IpAddr)> {
+    let (_, all) = resolve(addr, prefer_v6)?;
+    let mut errs = Vec::new();
+    for c in family_order(&all, prefer_v6) {
+        match pt_sys::netif::local_addr_for(c) {
+            Ok(ip) => return Ok((c, ip)),
+            Err(e) => errs.push(format!("{c}: {e}")),
+        }
+    }
+    Err(no_route(addr, &errs))
+}
+
+fn no_route(addr: &str, errs: &[String]) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::NetworkUnreachable,
+        format!("no route to responder {addr} ({})", errs.join("; ")),
+    )
+}
+
+/// A responder address this host can reach: its local address and the main socket bound for it.
+struct Candidate {
+    dst: SocketAddr,
+    local_ip: IpAddr,
+    sock: Arc<UdpSock>,
+}
+
+/// How the handshake went: the candidate it succeeded on, the reply, the TCP control stream
+/// (fallback), and why every family before it was not used.
+struct Handshake {
+    cand: Candidate,
+    session: u32,
+    noise: Vec<u8>,
+    tcp: Option<TcpStream>,
+    /// The preferred family and why it was not used, when the session runs on the other family.
+    fallback: Option<(&'static str, String)>,
+}
+
+/// The `family_fallback` a session on `used` records (docs/design/probe.md §3.1): the
+/// preferred family and why it was not used, or `None` when `used` is of the preferred family.
+/// `why` holds the reason each tried address was given up; a responder without an address of
+/// the preferred family was never tried, and that is the reason.
+fn family_fallback(
+    used: &SocketAddr,
+    prefer_v6: bool,
+    why: &[(SocketAddr, String)],
+) -> Option<(&'static str, String)> {
+    if used.is_ipv6() == prefer_v6 {
+        return None;
+    }
+    let requested = if prefer_v6 { "ipv6" } else { "ipv4" };
+    let reason = why
+        .iter()
+        .find(|(a, _)| a.is_ipv6() == prefer_v6)
+        .map_or_else(
+            || format!("responder has no {requested} address"),
+            |(_, w)| w.clone(),
+        );
+    Some((requested, reason))
+}
+
+/// Try the UDP handshake on every reachable family, then the TCP fallback on each
+/// (docs/design/probe.md §3.1).
+fn handshake(
+    addr: &str,
+    all: &[SocketAddr],
+    prefer_v6: bool,
+    sopts: SockOpts,
+    init: &[u8],
+    verbose: bool,
+) -> io::Result<Handshake> {
+    let order = family_order(all, prefer_v6);
+    let mut why: Vec<(SocketAddr, String)> = Vec::new();
+    let mut cands = Vec::new();
+    for dst in &order {
+        let c = pt_sys::netif::local_addr_for(*dst).and_then(|local_ip| {
+            Ok(Candidate {
+                dst: *dst,
+                local_ip,
+                sock: Arc::new(bind_any(dst.is_ipv6(), 0, sopts)?),
+            })
+        });
+        match c {
+            Ok(c) => cands.push(c),
+            Err(e) => {
+                if verbose {
+                    eprintln!(
+                        "[pathtrace] {} unusable: no route to {dst} ({e})",
+                        family_name(dst)
+                    );
+                }
+                why.push((*dst, format!("no route: {e}")));
+            }
+        }
+    }
+    if cands.is_empty() {
+        let errs: Vec<String> = why.iter().map(|(a, w)| format!("{a}: {w}")).collect();
+        return Err(no_route(addr, &errs));
+    }
+    let done = |cand: Candidate,
+                session: u32,
+                noise: Vec<u8>,
+                tcp: Option<TcpStream>,
+                why: &[(SocketAddr, String)]| {
+        let fallback = family_fallback(&cand.dst, prefer_v6, why);
+        Handshake {
+            cand,
+            session,
+            noise,
+            tcp,
+            fallback,
+        }
+    };
+    let mut udp_failed = Vec::new();
+    for c in cands {
+        match handshake_udp(&c.sock, c.dst, init, verbose) {
+            Some((session, noise)) => return Ok(done(c, session, noise, None, &why)),
+            None => {
+                why.push((c.dst, "no handshake reply over UDP".into()));
+                udp_failed.push(c);
+            }
+        }
+    }
+    if verbose {
+        eprintln!("[pathtrace] no UDP handshake reply; trying TCP fallback");
+    }
+    for c in udp_failed {
+        if let Some((s, session, noise)) = handshake_tcp(c.dst.ip(), init) {
+            return Ok(done(c, session, noise, Some(s), &why));
+        }
+        if let Some(w) = why.iter_mut().find(|(a, _)| *a == c.dst) {
+            w.1 = "no handshake reply over UDP or TCP".into();
+        }
+    }
+    let tried: Vec<String> = order.iter().map(SocketAddr::to_string).collect();
+    Err(io::Error::new(
+        io::ErrorKind::TimedOut,
+        format!(
+            "responder {} unreachable over UDP {} and TCP 443/4433",
+            tried.join(" and "),
+            order.first().map_or(4433, SocketAddr::port)
+        ),
+    ))
+}
+
 fn handshake_udp(
     sock: &UdpSock,
     dst: SocketAddr,
@@ -718,15 +899,8 @@ fn handshake_tcp(ip: IpAddr, init: &[u8]) -> Option<(TcpStream, u32, Vec<u8>)> {
 /// session was established, even if phases failed (REQ-PRB-020).
 pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let kp: Keypair = config::load_keypair(&opts.config_dir)?;
-    let (dst, all) = resolve(&opts.responder.addr, opts.prefer_v6)?;
-    let v6 = dst.is_ipv6();
+    let (_, all) = resolve(&opts.responder.addr, opts.prefer_v6)?;
     let sopts = sock_opts();
-    let main = Arc::new(bind_any(v6, 0, sopts)?);
-    let local_ip = pt_sys::netif::local_addr_for(dst)?;
-    let iface = pt_sys::netif::iface_with_addr(local_ip)?.unwrap_or_default();
-    let iface_info = pt_sys::netif::iface_info(&iface);
-    let mtu = iface_info.mtu.unwrap_or(1500).min(1500);
-    let metered = context::metered(&iface);
     let trace_id = uuid::Uuid::now_v7().to_string();
 
     let hello = Envelope::new(
@@ -742,25 +916,31 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     );
     let (ih, init) =
         noise::initiator_start(&kp, &opts.responder.public, &opts.responder.psk, &hello)?;
-    let mut tcp_ctrl: Option<TcpStream> = None;
     let mut notes = Vec::new();
-    let (session, noise2) = match handshake_udp(&main, dst, &init, opts.verbose) {
-        Some(r) => r,
-        None => {
-            if opts.verbose {
-                eprintln!("[pathtrace] no UDP handshake reply; trying TCP fallback");
-            }
-            let (s, sess, n) = handshake_tcp(dst.ip(), &init).ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    format!("responder {dst} unreachable over UDP 4433 and TCP 443/4433"),
-                )
-            })?;
-            notes.push("UDP control blocked; session ran over TCP fallback (UDP classes recorded as blocked)".into());
-            tcp_ctrl = Some(s);
-            (sess, n)
-        }
-    };
+    let hs = handshake(
+        &opts.responder.addr,
+        &all,
+        opts.prefer_v6,
+        sopts,
+        &init,
+        opts.verbose,
+    )?;
+    let Handshake {
+        cand,
+        session,
+        noise: noise2,
+        tcp: mut tcp_ctrl,
+        fallback,
+    } = hs;
+    let (dst, local_ip, main) = (cand.dst, cand.local_ip, cand.sock);
+    let v6 = dst.is_ipv6();
+    let udp = tcp_ctrl.is_none();
+    if !udp {
+        notes.push(
+            "UDP control blocked; session ran over TCP fallback (UDP classes recorded as blocked)"
+                .into(),
+        );
+    }
     let (transport, welcome) = ih.finish(&noise2, session)?;
     let wb = &welcome.body;
     let peer_major = wb.u64_or("wire_major", 0);
@@ -770,10 +950,26 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         )));
     }
     if let Some(err) = wb.get("error").and_then(Value::as_str) {
+        if err == BUSY {
+            return Err(io::Error::other(format!(
+                "responder busy: {}; try again when it has finished",
+                wb.str_or("error_text", "it is running another session")
+            )));
+        }
         return Err(io::Error::other(format!(
             "responder refused the session: {err}"
         )));
     }
+    if let Some((from, why)) = &fallback {
+        eprintln!(
+            "[pathtrace] {from} unusable ({why}); session runs over {} to {dst}",
+            family_name(&dst)
+        );
+    }
+    let iface = pt_sys::netif::iface_with_addr(local_ip)?.unwrap_or_default();
+    let iface_info = pt_sys::netif::iface_info(&iface);
+    let mtu = iface_info.mtu.unwrap_or(1500).min(1500);
+    let metered = context::metered(&iface);
     let transport = Arc::new(transport);
     let cert = match wb.get("tls_cert") {
         Some(Value::Bytes(b)) => b.clone(),
@@ -871,6 +1067,15 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
             .with("session", session)
             .with("control", if tcp_ctrl.is_some() { "tcp" } else { "udp" }),
     );
+    if let Some((from, why)) = &fallback {
+        rec.event(
+            "family_fallback",
+            Value::map()
+                .with("requested", *from)
+                .with("used", family_name(&dst))
+                .with("reason", why.as_str()),
+        );
+    }
 
     // Endpoint.
     let shared = Shared::new(Role::A, opts.profile.data_cap, opts.rate_cap_bps);
@@ -937,13 +1142,18 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
             p.saturation_s(Role::A, track_s),
             p.saturation_s(Role::B, track_s),
         ],
-        bg_bps: crate::plan::background_bps(p, mtu),
+        // A TCP-fallback session sends no UDP background and runs no NAT probes.
+        bg_bps: if udp {
+            crate::plan::background_bps(p, mtu)
+        } else {
+            0.0
+        },
         ref_bytes: [ref_bytes(cap[0]), ref_bytes(cap[1])],
         plan: p.phase_plan(track_s),
         cur_s: 0.0,
         rest_s: 0.0,
         phase_start: started,
-        nat_end: started + Duration::from_secs_f64(p.nat_s()),
+        nat_end: started + Duration::from_secs_f64(if udp { p.nat_s() } else { 0.0 }),
     };
     budget.enter(0);
     let mut ctx = Ctx {
@@ -957,6 +1167,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         notes,
         budget,
         interrupted: false,
+        udp,
     };
     let tcp_key = transport.session_key(TCP_KEY_CONTEXT);
     run_phases(&mut ctx, opts, dst, &all, &cert, &tcp_key, session);
@@ -971,7 +1182,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         .unwrap_or(0) as f64
         + 2.0;
     let el = started.elapsed().as_secs_f64();
-    if el < max_nat {
+    if udp && el < max_nat {
         ctx.say(&format!(
             "waiting {:.0} s for NAT binding probes",
             max_nat - el
@@ -979,7 +1190,9 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         ctx.sleep(max_nat - el);
     }
     ctx.log_phase(9, "end");
-    ctx.stop(&[ids::LIGHT_A, ids::LIGHT_B, ids::TRAIN_A, ids::TRAIN_B]);
+    if ctx.udp {
+        ctx.stop(&[ids::LIGHT_A, ids::LIGHT_B, ids::TRAIN_A, ids::TRAIN_B]);
+    }
     let _ = ctx.ep.cmd.send(PacerCmd::StopAll);
     std::thread::sleep(Duration::from_secs(1));
     let bye_ok = ctx
@@ -1130,120 +1343,124 @@ fn run_phases(
     if !ctx.phase(0, "background") {
         return;
     }
-    let mut bg = Vec::new();
-    for (id, sender) in [(ids::LIGHT_A, Role::A), (ids::LIGHT_B, Role::B)] {
-        let mut s = ctx.mk(
-            id,
-            "light",
-            sender,
-            Sock::Main,
-            128,
-            Pattern::Iso {
-                interval_ns: 20_000_000,
-            },
-            0,
-            0.0,
-        );
-        s.tos = Tos::Cycle;
-        bg.push(s);
-    }
-    for (id, sender) in [(ids::TRAIN_A, Role::A), (ids::TRAIN_B, Role::B)] {
+    if !ctx.udp_blocked(0, "background") {
+        let mut bg = Vec::new();
+        for (id, sender) in [(ids::LIGHT_A, Role::A), (ids::LIGHT_B, Role::B)] {
+            let mut s = ctx.mk(
+                id,
+                "light",
+                sender,
+                Sock::Main,
+                128,
+                Pattern::Iso {
+                    interval_ns: 20_000_000,
+                },
+                0,
+                0.0,
+            );
+            s.tos = Tos::Cycle;
+            bg.push(s);
+        }
+        for (id, sender) in [(ids::TRAIN_A, Role::A), (ids::TRAIN_B, Role::B)] {
+            bg.push(ctx.mk(
+                id,
+                "train",
+                sender,
+                Sock::Main,
+                mtu,
+                Pattern::Train {
+                    count: p.train_count,
+                    period_ns: p.train_period_ms * 1_000_000,
+                },
+                0,
+                0.0,
+            ));
+        }
+        for (k, t) in p.nat_timeouts_s.iter().enumerate() {
+            let mut s = ctx.mk(
+                ids::NAT0 + k as u8,
+                "nat",
+                Role::A,
+                Sock::Spare(k as u8),
+                128,
+                Pattern::Burst {
+                    count: 1,
+                    gap_ns: 1,
+                },
+                0,
+                0.0,
+            );
+            s.echo = true;
+            s.echo_delay_ns = t * 1_000_000_000;
+            bg.push(s);
+        }
+        let ladder = pmtu_ladder(dst.is_ipv6(), mtu.max(1280));
+        let ladder_ns = ladder.len() as u64 * 3 * 20_000_000;
         bg.push(ctx.mk(
-            id,
-            "train",
-            sender,
+            ids::PMTU_A,
+            "pmtu",
+            Role::A,
             Sock::Main,
-            mtu,
-            Pattern::Train {
-                count: p.train_count,
-                period_ns: p.train_period_ms * 1_000_000,
-            },
             0,
+            Pattern::Ladder {
+                sizes: ladder.clone(),
+                reps: 3,
+                gap_ns: 20_000_000,
+            },
+            1,
             0.0,
         ));
-    }
-    for (k, t) in p.nat_timeouts_s.iter().enumerate() {
-        let mut s = ctx.mk(
-            ids::NAT0 + k as u8,
-            "nat",
-            Role::A,
-            Sock::Spare(k as u8),
-            128,
-            Pattern::Burst {
-                count: 1,
-                gap_ns: 1,
-            },
+        ctx.start(bg, 50);
+        // B's ladder after A's, so ICMP and losses are attributable.
+        ctx.sleep(ladder_ns as f64 / 1e9 + 0.2);
+        let lb = ctx.mk(
+            ids::PMTU_B,
+            "pmtu",
+            Role::B,
+            Sock::Main,
             0,
+            Pattern::Ladder {
+                sizes: ladder,
+                reps: 3,
+                gap_ns: 20_000_000,
+            },
+            1,
             0.0,
         );
-        s.echo = true;
-        s.echo_delay_ns = t * 1_000_000_000;
-        bg.push(s);
+        ctx.start(vec![lb], 50);
     }
-    let ladder = pmtu_ladder(dst.is_ipv6(), mtu.max(1280));
-    let ladder_ns = ladder.len() as u64 * 3 * 20_000_000;
-    bg.push(ctx.mk(
-        ids::PMTU_A,
-        "pmtu",
-        Role::A,
-        Sock::Main,
-        0,
-        Pattern::Ladder {
-            sizes: ladder.clone(),
-            reps: 3,
-            gap_ns: 20_000_000,
-        },
-        1,
-        0.0,
-    ));
-    ctx.start(bg, 50);
-    // B's ladder after A's, so ICMP and losses are attributable.
-    ctx.sleep(ladder_ns as f64 / 1e9 + 0.2);
-    let lb = ctx.mk(
-        ids::PMTU_B,
-        "pmtu",
-        Role::B,
-        Sock::Main,
-        0,
-        Pattern::Ladder {
-            sizes: ladder,
-            reps: 3,
-            gap_ns: 20_000_000,
-        },
-        1,
-        0.0,
-    );
-    ctx.start(vec![lb], 50);
 
     // P1 reachability: UDP classes (echoed) and TCP classes.
     if !ctx.phase(1, "reachability") {
         return;
     }
-    let mut cls = Vec::new();
-    for (id, sock, quic, class) in [
-        (ids::CLASS_MAIN, Sock::Main, false, "udp/high-port"),
-        (ids::CLASS_443, Sock::Udp443, false, "udp/443"),
-        (ids::CLASS_QUIC, Sock::Udp443, true, "udp/443-quic"),
-    ] {
-        let mut s = ctx.mk(
-            id,
-            "class",
-            Role::A,
-            sock,
-            200,
-            Pattern::Burst {
-                count: 5,
-                gap_ns: 100_000_000,
-            },
-            1,
-            0.0,
-        );
-        s.echo = true;
-        s.quic = quic;
-        s.class = class.to_string();
-        cls.push(s);
+    if !ctx.udp_blocked(1, "udp classes") {
+        let mut cls = Vec::new();
+        for (id, sock, quic, class) in [
+            (ids::CLASS_MAIN, Sock::Main, false, "udp/high-port"),
+            (ids::CLASS_443, Sock::Udp443, false, "udp/443"),
+            (ids::CLASS_QUIC, Sock::Udp443, true, "udp/443-quic"),
+        ] {
+            let mut s = ctx.mk(
+                id,
+                "class",
+                Role::A,
+                sock,
+                200,
+                Pattern::Burst {
+                    count: 5,
+                    gap_ns: 100_000_000,
+                },
+                1,
+                0.0,
+            );
+            s.echo = true;
+            s.quic = quic;
+            s.class = class.to_string();
+            cls.push(s);
+        }
+        ctx.start(cls, 50);
     }
-    ctx.start(cls, 50);
     for addr in std::iter::once(dst).chain(all.iter().copied().filter(|a| a.ip() != dst.ip())) {
         for (id, port, use_tls) in [
             (ids::TCP_PROBE80, 80u16, false),
@@ -1283,81 +1500,85 @@ fn run_phases(
         }
     }
     ctx.sleep(1.0);
-    let udp443_ok = ctx
-        .ep
-        .shared
-        .fb
-        .lock()
-        .expect("lock")
-        .contains_key(&ids::CLASS_443);
-    let quic_ok = ctx
-        .ep
-        .shared
-        .fb
-        .lock()
-        .expect("lock")
-        .contains_key(&ids::CLASS_QUIC);
-    ctx.rec.event(
-        "udp_reachability",
-        Value::map().with("udp443", udp443_ok).with("quic", quic_ok),
+    let reached = |id: u8| ctx.ep.shared.fb.lock().expect("lock").contains_key(&id);
+    let (high_ok, udp443_ok, quic_ok) = (
+        reached(ids::CLASS_MAIN),
+        reached(ids::CLASS_443),
+        reached(ids::CLASS_QUIC),
     );
+    let mut reach = Value::map()
+        .with("udp443", udp443_ok)
+        .with("quic", quic_ok)
+        .with("high_port", high_ok);
+    if !ctx.udp {
+        reach = reach.with("reason", "udp_blocked");
+    }
+    ctx.rec.event("udp_reachability", reach);
 
     if !ctx.phase(2, "quiet") {
         return;
     }
-    ctx.sleep(p.quiet_s);
+    if !ctx.udp_blocked(2, "quiet") {
+        ctx.sleep(p.quiet_s);
+    }
 
     if p.chirp_s > 0.0 {
         if !ctx.phase(3, "chirps") {
             return;
         }
-        let a = ctx.mk(
-            ids::CHIRP_A,
-            "chirp",
-            Role::A,
-            Sock::Main,
-            mtu,
-            Pattern::Chirp {
-                count: 20,
-                gap0_ns: 1_000_000,
-                factor: 0.85,
-                period_ns: 500_000_000,
-            },
-            3,
-            p.chirp_s,
-        );
-        ctx.start(vec![a], 50);
-        let b = ctx.mk(
-            ids::CHIRP_B,
-            "chirp",
-            Role::B,
-            Sock::Main,
-            mtu,
-            Pattern::Chirp {
-                count: 20,
-                gap0_ns: 1_000_000,
-                factor: 0.85,
-                period_ns: 500_000_000,
-            },
-            3,
-            p.chirp_s,
-        );
-        ctx.start(vec![b], 250);
-        ctx.sleep(p.chirp_s + 0.5);
+        if !ctx.udp_blocked(3, "chirps") {
+            let a = ctx.mk(
+                ids::CHIRP_A,
+                "chirp",
+                Role::A,
+                Sock::Main,
+                mtu,
+                Pattern::Chirp {
+                    count: 20,
+                    gap0_ns: 1_000_000,
+                    factor: 0.85,
+                    period_ns: 500_000_000,
+                },
+                3,
+                p.chirp_s,
+            );
+            ctx.start(vec![a], 50);
+            let b = ctx.mk(
+                ids::CHIRP_B,
+                "chirp",
+                Role::B,
+                Sock::Main,
+                mtu,
+                Pattern::Chirp {
+                    count: 20,
+                    gap0_ns: 1_000_000,
+                    factor: 0.85,
+                    period_ns: 500_000_000,
+                },
+                3,
+                p.chirp_s,
+            );
+            ctx.start(vec![b], 250);
+            ctx.sleep(p.chirp_s + 0.5);
+        }
     }
 
     if p.sat_s > 0.0 {
         if !ctx.phase(4, "saturate a_to_b") {
             return;
         }
-        if let Some(s) = ctx.heavy(ids::HEAVY_A, Role::A, 4, p.sat_s) {
+        if !ctx.udp_blocked(4, "saturation")
+            && let Some(s) = ctx.heavy(ids::HEAVY_A, Role::A, 4, p.sat_s)
+        {
             ctx.start(vec![s], 50);
             ctx.sleep(p.sat_s + 1.0);
         }
         if !ctx.phase(5, "saturate b_to_a") {
             return;
         }
-        if let Some(s) = ctx.heavy(ids::HEAVY_B, Role::B, 5, p.sat_s) {
+        if !ctx.udp_blocked(5, "saturation")
+            && let Some(s) = ctx.heavy(ids::HEAVY_B, Role::B, 5, p.sat_s)
+        {
             ctx.start(vec![s], 50);
             ctx.sleep(p.sat_s + 1.0);
         }
@@ -1366,27 +1587,34 @@ fn run_phases(
         if !ctx.phase(6, "saturate both") {
             return;
         }
-        let both: Vec<FlowSpec> = [
-            ctx.heavy(ids::BOTH_A, Role::A, 6, p.both_s),
-            ctx.heavy(ids::BOTH_B, Role::B, 6, p.both_s),
-        ]
-        .into_iter()
-        .flatten()
-        .collect();
-        if !both.is_empty() {
-            ctx.start(both, 50);
-            ctx.sleep(p.both_s + 1.0);
+        if !ctx.udp_blocked(6, "saturation") {
+            let both: Vec<FlowSpec> = [
+                ctx.heavy(ids::BOTH_A, Role::A, 6, p.both_s),
+                ctx.heavy(ids::BOTH_B, Role::B, 6, p.both_s),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if !both.is_empty() {
+                ctx.start(both, 50);
+                ctx.sleep(p.both_s + 1.0);
+            }
         }
     }
     if p.class_sat_s > 0.0 {
         if !ctx.phase(7, "class differential") {
             return;
         }
-        for (id, sock, quic, class, ok) in [
-            (ids::CSAT_MAIN, Sock::Main, false, "udp/high-port", true),
-            (ids::CSAT_443, Sock::Udp443, false, "udp/443", udp443_ok),
-            (ids::CSAT_QUIC, Sock::Udp443, true, "udp/443-quic", quic_ok),
-        ] {
+        let classes = if ctx.udp_blocked(7, "class saturations") {
+            Vec::new()
+        } else {
+            vec![
+                (ids::CSAT_MAIN, Sock::Main, false, "udp/high-port", true),
+                (ids::CSAT_443, Sock::Udp443, false, "udp/443", udp443_ok),
+                (ids::CSAT_QUIC, Sock::Udp443, true, "udp/443-quic", quic_ok),
+            ]
+        };
+        for (id, sock, quic, class, ok) in classes {
             if !ok {
                 ctx.rec.event(
                     "class_skipped",
@@ -1504,7 +1732,12 @@ fn run_phases(
                 .with("elapsed_ns", r.elapsed_ns)
                 .with("error", r.error.clone()),
         );
-        for (id, sender) in [(ids::CBR_A, Role::A), (ids::CBR_B, Role::B)] {
+        let cbr = if ctx.udp_blocked(8, "cbr") {
+            Vec::new()
+        } else {
+            vec![(ids::CBR_A, Role::A), (ids::CBR_B, Role::B)]
+        };
+        for (id, sender) in cbr {
             let s = ctx.mk(
                 id,
                 "cbr",
@@ -1526,7 +1759,7 @@ fn run_phases(
     }
     let track = opts.track_s.unwrap_or(p.track_s);
     if track > 0 {
-        if !ctx.phase(10, "tracking") {
+        if !ctx.phase(10, "tracking") || ctx.udp_blocked(10, "tracking saturations") {
             return;
         }
         let rounds = track / 60;
@@ -1569,6 +1802,15 @@ struct Active {
     session: u32,
     tcp_key: [u8; 32],
     rec: Recorder,
+    /// The Noise handshake message that opened the session.
+    init: Vec<u8>,
+}
+
+/// What the responder needs to refuse a handshake while a session runs.
+struct Refuser {
+    kp: Keypair,
+    config_dir: PathBuf,
+    tool: ToolInfo,
 }
 
 #[derive(Default)]
@@ -1577,6 +1819,91 @@ struct RespState {
     /// Finished sessions: id → (log path, fetch token).
     finished: Mutex<HashMap<u32, (PathBuf, [u8; 32])>>,
     control_tcp: Mutex<Option<Sender<TcpStream>>>,
+    refuser: std::sync::OnceLock<Refuser>,
+}
+
+impl RespState {
+    /// The sealed `welcome {error: "busy"}` reply (session 0) to handshake message `noise`, or
+    /// `None` when it does not authenticate: strangers get no answer (docs/design/probe.md §8).
+    fn refuse(&self, noise: &[u8]) -> Option<Vec<u8>> {
+        let r = self.refuser.get()?;
+        let authorized = config::load_authorized(&r.config_dir).ok()?;
+        let acc = noise::responder_accept(&r.kp, &authorized, noise).ok()?;
+        let body = Value::map()
+            .with("wire_major", WIRE_MAJOR)
+            .with("wire_minor", WIRE_MINOR)
+            .with("session", 0u32)
+            .with("tool", r.tool.to_value())
+            .with("error", BUSY)
+            .with("error_text", "the responder is running another session");
+        acc.respond(0, &Envelope::new("welcome", body))
+            .ok()
+            .map(|(_, m)| m)
+    }
+
+    /// The running session's recorder, unless `noise` is the handshake that opened it (which
+    /// is answered by the session itself, never refused).
+    fn other_than_active(&self, noise: &[u8]) -> Option<Recorder> {
+        let a = self.active.lock().expect("lock");
+        a.as_ref()
+            .filter(|a| a.init.as_slice() != noise)
+            .map(|a| a.rec.clone())
+    }
+}
+
+fn refused_event(src: SocketAddr, via: &str) -> Value {
+    Value::map()
+        .with("reason", "busy")
+        .with("via", via)
+        .with("addr", pii(src.to_string(), "id"))
+}
+
+/// Refuse the handshakes waiting on main sockets the running session does not use (the other
+/// family's). Nothing else sends on them while the session runs.
+fn refuse_idle(state: &RespState, idle: &[Arc<UdpSock>]) {
+    for s in idle {
+        if !matches!(s.poll(0), Ok((true, _))) {
+            continue;
+        }
+        let mut bufs = vec![[0u8; MAX_DATAGRAM]; 8];
+        let mut out = Vec::new();
+        let _ = s.recv_batch(&mut bufs, &mut out);
+        for (k, m) in out.iter().enumerate() {
+            let Some(Frame::Init { noise }) = Frame::decode(&bufs[k][..m.len]) else {
+                continue;
+            };
+            let Some(rec) = state.other_than_active(&noise) else {
+                continue;
+            };
+            if let Some(reply) = state.refuse(&noise) {
+                let _ = s.send_batch(&[OutMsg {
+                    dst: m.src,
+                    payload: &reply,
+                    tos: 0,
+                }]);
+                rec.event("handshake_refused", refused_event(m.src, "udp"));
+            }
+        }
+    }
+}
+
+/// Refuse a TCP control connection's handshake while a session runs.
+fn refuse_tcp(state: &RespState, mut s: TcpStream) {
+    let Ok(b) = read_framed(&mut s) else { return };
+    let Some(Frame::Init { noise }) = Frame::decode(&b) else {
+        return;
+    };
+    let Some(rec) = state.other_than_active(&noise) else {
+        return;
+    };
+    if let Some(reply) = state.refuse(&noise)
+        && write_framed(&mut s, &reply).is_ok()
+    {
+        let src = s
+            .peer_addr()
+            .unwrap_or_else(|_| "0.0.0.0:0".parse().expect("addr"));
+        rec.event("handshake_refused", refused_event(src, "tcp"));
+    }
 }
 
 impl ServerCtx for RespState {
@@ -1685,9 +2012,16 @@ fn spawn_tcp_listener(
                     use std::io::Read;
                     let mut s = s;
                     let mut m = [0u8; 4];
-                    if s.read_exact(&mut m).is_ok()
-                        && let Some(tx) = state.control_tcp.lock().expect("lock").as_ref()
-                    {
+                    if s.read_exact(&mut m).is_err() {
+                        return;
+                    }
+                    // The responder runs one session at a time: answer `busy` now rather
+                    // than leave the initiator waiting (docs/design/probe.md §8).
+                    if state.active.lock().expect("lock").is_some() {
+                        refuse_tcp(&state, s);
+                        return;
+                    }
+                    if let Some(tx) = state.control_tcp.lock().expect("lock").as_ref() {
                         let _ = tx.send(s);
                     }
                     return;
@@ -1725,6 +2059,11 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
     });
     let (ctl_tx, ctl_rx) = channel::<TcpStream>();
     *state.control_tcp.lock().expect("lock") = Some(ctl_tx);
+    let _ = state.refuser.set(Refuser {
+        kp: kp.clone(),
+        config_dir: opts.config_dir.clone(),
+        tool: opts.tool.clone(),
+    });
 
     let sopts = sock_opts();
     let main4 = Arc::new(bind_any(false, opts.main_port, sopts)?);
@@ -1820,20 +2159,27 @@ pub fn serve(opts: &ServeOpts) -> io::Result<()> {
         } else {
             u443_6.clone()
         };
-        let ran = match responder_session(opts, &kp, &state, &cert, main, u443, &data, src, tcp) {
-            Ok(Some(id)) => {
-                done += 1;
-                if opts.verbose {
-                    eprintln!("[pathtrace] session {id:08x} complete");
-                }
-                true
-            }
-            Ok(None) => false,
-            Err(e) => {
-                eprintln!("[pathtrace] session error: {e}");
-                false
-            }
+        // The other family's main socket, where other initiators are refused meanwhile.
+        let idle: Vec<Arc<UdpSock>> = if mi == 0 {
+            main6.iter().cloned().collect()
+        } else {
+            vec![main4.clone()]
         };
+        let ran =
+            match responder_session(opts, &kp, &state, &cert, main, u443, &idle, &data, src, tcp) {
+                Ok(Some(id)) => {
+                    done += 1;
+                    if opts.verbose {
+                        eprintln!("[pathtrace] session {id:08x} complete");
+                    }
+                    true
+                }
+                Ok(None) => false,
+                Err(e) => {
+                    eprintln!("[pathtrace] session error: {e}");
+                    false
+                }
+            };
         if pt_sys::signal::stop_requested().is_some() {
             if ran {
                 // The session was ended by the signal: give the initiator time to fetch the
@@ -1858,6 +2204,7 @@ fn responder_session(
     cert: &[u8],
     main: Arc<UdpSock>,
     u443: Option<Arc<UdpSock>>,
+    idle: &[Arc<UdpSock>],
     data: &[u8],
     src: SocketAddr,
     tcp: Option<TcpStream>,
@@ -1986,8 +2333,13 @@ fn responder_session(
     shared.session.store(session, Ordering::Relaxed);
     *shared.tagger.write().expect("lock") = Some(Tagger::new(&transport.handshake_hash));
     *shared.peer_ip.write().expect("lock") = Some(src.ip());
-    *shared.ctrl_dst.write().expect("lock") = Some(src);
-    shared.peer_by_sock.lock().expect("lock").insert(0, src);
+    // Over the TCP fallback `src` is the initiator's TCP source port, where it receives no
+    // UDP: the UDP peer is then only learnt from authenticated probe packets that arrive
+    // (docs/design/probe.md §3.1).
+    if tcp.is_none() {
+        *shared.ctrl_dst.write().expect("lock") = Some(src);
+        shared.peer_by_sock.lock().expect("lock").insert(0, src);
+    }
     let (frames_tx, frames_rx) = channel::<CtrlIn>();
     *shared.ctrl_in.lock().expect("lock") = Some(frames_tx.clone());
     let ep = Endpoint::start(shared.clone(), socks, rec.clone())?;
@@ -2023,13 +2375,15 @@ fn responder_session(
     );
     // A repeat of the handshake that opened this session means our reply was lost: resend it
     // (docs/design/probe.md §3.1).
-    if let Some(Frame::Init { noise }) = Frame::decode(data) {
-        ctl.set_handshake_replay(noise, msg2.clone());
-    }
+    ctl.set_handshake_replay(noise.clone(), msg2.clone());
+    // Other initiators' handshakes reaching this session's sockets are refused (§8).
+    let st = state.clone();
+    ctl.set_busy(Box::new(move |n| st.refuse(n)), ep.cmd.clone());
     *state.active.lock().expect("lock") = Some(Active {
         session,
         tcp_key: transport.session_key(TCP_KEY_CONTEXT),
         rec: rec.clone(),
+        init: noise,
     });
     let sampler = Sampler::start(Some(iface), rec.clone(), false);
     for c in crate::plan::control_specs(opts.main_port) {
@@ -2056,6 +2410,7 @@ fn responder_session(
             }
             break;
         }
+        refuse_idle(state, idle);
         let Some(env) = ctl.recv(Duration::from_millis(500)) else {
             if mono_raw().saturating_sub(shared.last_ctrl.load(Ordering::Relaxed)) > 30_000_000_000
             {
@@ -2198,6 +2553,116 @@ mod tests {
         let r = fetch_routes(dst, &[]).unwrap();
         let r: Vec<(u16, bool)> = r.into_iter().map(|(p, c)| (p, c.is_some())).collect();
         assert_eq!(r, vec![(4433, false)]);
+    }
+
+    #[test]
+    fn family_order_tries_one_address_per_family_preferred_first() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let all = [
+            a("192.0.2.1:4433"),
+            a("[2001:db8::1]:4433"),
+            a("192.0.2.2:4433"),
+            a("[2001:db8::2]:4433"),
+        ];
+        assert_eq!(
+            family_order(&all, true),
+            vec![a("[2001:db8::1]:4433"), a("192.0.2.1:4433")]
+        );
+        assert_eq!(
+            family_order(&all, false),
+            vec![a("192.0.2.1:4433"), a("[2001:db8::1]:4433")]
+        );
+        // One family only: that family, whatever is preferred.
+        assert_eq!(family_order(&all[..1], true), vec![a("192.0.2.1:4433")]);
+        assert!(family_order(&[], false).is_empty());
+    }
+
+    #[test]
+    fn family_fallback_names_the_preferred_family_and_why() {
+        let a = |s: &str| s.parse::<SocketAddr>().unwrap();
+        let (v4, v6) = (a("192.0.2.1:4433"), a("[2001:db8::1]:4433"));
+        // On the preferred family: no fallback.
+        assert_eq!(family_fallback(&v6, true, &[]), None);
+        assert_eq!(family_fallback(&v4, false, &[(v6, "x".into())]), None);
+        // The preferred family was tried and given up: its reason.
+        let why = [(v6, "no handshake reply over UDP".to_string())];
+        assert_eq!(
+            family_fallback(&v4, true, &why),
+            Some(("ipv6", "no handshake reply over UDP".into()))
+        );
+        // The responder has no address of the preferred family (an IPv4 literal with
+        // `--ipv6`): still a fallback, never a silent switch.
+        assert_eq!(
+            family_fallback(&v4, true, &[]),
+            Some(("ipv6", "responder has no ipv6 address".into()))
+        );
+        assert_eq!(
+            family_fallback(&v6, false, &[]),
+            Some(("ipv4", "responder has no ipv4 address".into()))
+        );
+    }
+
+    #[test]
+    fn busy_refusal_is_sealed_for_authorized_initiators_only() {
+        let dir = std::env::temp_dir().join(format!("pt-busy-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (rk, _) = config::keygen(&dir, false).unwrap();
+        let ik = config::generate_keypair();
+        let pairing = config::authorize(&dir, &ik.public, "other").unwrap();
+        let (_, psk) = config::parse_pairing(&pairing).unwrap();
+        let state = RespState::default();
+        let hello = Envelope::new("hello", Value::map());
+        let (ih, m1) = noise::initiator_start(&ik, &rk.public, &psk, &hello).unwrap();
+        let Some(Frame::Init { noise: n1 }) = Frame::decode(&m1) else {
+            panic!()
+        };
+        // Without a refuser (no `serve`), nothing is answered.
+        assert!(state.refuse(&n1).is_none());
+        let tool = ToolInfo {
+            version: "t".into(),
+            git_commit: "c".into(),
+            git_dirty: false,
+        };
+        let _ = state.refuser.set(Refuser {
+            kp: rk.clone(),
+            config_dir: dir.clone(),
+            tool,
+        });
+        let reply = state.refuse(&n1).expect("authorized initiator is answered");
+        let Some(Frame::Resp { session, noise: n2 }) = Frame::decode(&reply) else {
+            panic!()
+        };
+        assert_eq!(session, 0);
+        let (_, welcome) = ih.finish(&n2, session).unwrap();
+        assert_eq!(welcome.body.str_or("error", ""), BUSY);
+        assert_eq!(welcome.body.u64_or("wire_major", 0), WIRE_MAJOR);
+        // Anti-amplification (REQ-PRB-004): no larger than three times what was received.
+        assert!(
+            reply.len() <= 3 * m1.len(),
+            "{} vs {}",
+            reply.len(),
+            m1.len()
+        );
+        // A stranger gets no answer.
+        let stranger = config::generate_keypair();
+        let (_, m) = noise::initiator_start(&stranger, &rk.public, &[9; 32], &hello).unwrap();
+        let Some(Frame::Init { noise: ns }) = Frame::decode(&m) else {
+            panic!()
+        };
+        assert!(state.refuse(&ns).is_none());
+        // The handshake that opened the running session is never refused.
+        let (rec, _join) = record::start(&dir.join("b.ptflog"), Map::new(), Role::B).unwrap();
+        *state.active.lock().unwrap() = Some(Active {
+            session: 1,
+            tcp_key: [0; 32],
+            rec,
+            init: n1.clone(),
+        });
+        assert!(state.other_than_active(&n1).is_none());
+        assert!(state.other_than_active(&ns).is_some());
+        *state.active.lock().unwrap() = None;
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
