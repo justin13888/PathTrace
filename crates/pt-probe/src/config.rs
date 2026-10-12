@@ -107,6 +107,12 @@ pub fn write_secret(path: &Path, content: &str) -> io::Result<()> {
 
 /// Read a secret file, refusing group- or world-accessible permissions.
 pub fn read_private(path: &Path) -> io::Result<String> {
+    check_private(path)?;
+    fs::read_to_string(path)
+}
+
+/// Refuse a secret file that group or other can access.
+pub fn check_private(path: &Path) -> io::Result<()> {
     let meta = fs::metadata(path)?;
     if meta.permissions().mode() & 0o077 != 0 {
         return Err(io::Error::new(
@@ -118,7 +124,7 @@ pub fn read_private(path: &Path) -> io::Result<String> {
             ),
         ));
     }
-    fs::read_to_string(path)
+    Ok(())
 }
 
 pub fn generate_keypair() -> Keypair {
