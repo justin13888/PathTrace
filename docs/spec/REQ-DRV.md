@@ -11,21 +11,21 @@ Derivation is a deterministic, pure function of the raw layer. `pathtrace derive
 ### REQ-DRV-002: Clock model
 - status: met
 - spec: §6.3, §8
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Clock offset uses a minimum filter over exchanges and skew a lower-envelope fit. The model is stored with its uncertainty, bounded by half the minimum round-trip time.
 
 ### REQ-DRV-003: Base delay
 - status: met
 - spec: §8, §4
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Base delay is a piecewise sliding-window minimum of light-flow delay. The split between directions is stored with its method (`symmetric_assumed` unless clocks are verified synchronised).
 
 ### REQ-DRV-004: Capacity
 - status: met
 - spec: §8, §7.4
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Heavy-flow arrivals during valid saturation become delivery opportunities (`saturated`). Chirp estimates fill other periods (`estimated`), and everything else is `unknown`.
 
@@ -33,49 +33,49 @@ Heavy-flow arrivals during valid saturation become delivery opportunities (`satu
 - status: met
 - spec: §7.4
 - adr: 0010
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Per-train arrival offsets of the light trains are stored as the light-workload view of the path (`capacity_light`), with train parameters and workload context, for dual-workload replay.
 
 ### REQ-DRV-006: Queue depth and discipline
 - status: met
 - spec: §8
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Queue depth (bytes and time) comes from peak queueing delay before loss onset, cross-checked against drain time. The discipline hint is `droptail`, `aqm_suspected`, `policer` or `unknown`.
 
 ### REQ-DRV-007: Policer
 - status: met
 - spec: §8, §7.4
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 A token-bucket policer (rate, burst) is detected per class: loss without delay growth, with an initial burst followed by a plateau.
 
 ### REQ-DRV-008: Loss model
 - status: met
 - spec: §8
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Intrinsic (non-congestive) loss events are kept. A Gilbert-Elliott model is fitted from run lengths, with confidence intervals.
 
 ### REQ-DRV-009: Jitter model
 - status: met
 - spec: §8, §7.4
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Jitter is the light-flow delay residual over base delay in quiet periods, stored as the series plus an empirical distribution and autocorrelation.
 
 ### REQ-DRV-010: Reordering and duplication
 - status: met
 - spec: §7.4
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Reordering rate with its displacement distribution, and duplication rate, per direction.
 
 ### REQ-DRV-011: MTU, ECN, DSCP, policy matrix
 - status: met
 - spec: §8, §6.6
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Path MTU with the black-hole flag, ECN and DSCP handling, and the per-class policy matrix derived from class probes.
 
@@ -90,7 +90,7 @@ Every derivation method has a stable name and version (`capacity.saturated-arriv
 - status: met
 - spec: §11.1, §11.2
 - design: docs/design/simulator-requirements.md
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 Captured through namespaces with known kernel-imposed impairments, derivation recovers the truth within these tolerances: capacity series NRMSE ≤ 10%, base delay within 1 ms, queue depth within 15%, loss-model intervals covering the truth, policy matrix identical.
 
@@ -98,7 +98,7 @@ Captured through namespaces with known kernel-imposed impairments, derivation re
 - status: met
 - spec: §11.2
 - design: docs/design/simulator-requirements.md
-- evidence: EXP-0002-r10
+- evidence: EXP-0002-r11
 
 A trace derived from ground truth, exported to netem, re-imposed and re-probed yields a trace matching the original within the REQ-DRV-013 tolerances (static parameters).
 
