@@ -176,7 +176,7 @@ The `tcp/443` class runs a real TLS 1.3 session. The responder certificate is pi
 - status: met
 - spec: new
 - design: docs/design/cli.md
-- evidence: EXP-0007-r6
+- evidence: EXP-0007-r8
 
 `pathtrace doctor` checks local prerequisites (timestamping support, clocks, offloads, keys) and reachability of the responder on every class port before a field session.
 
