@@ -108,7 +108,7 @@ In `standard` and `deep` sessions, where the volume is, the raw per-packet layer
 ### REQ-FMT-016: Safe parsing of untrusted files
 - status: met
 - spec: §2.3, §13.3
-- evidence: EXP-0005-r3
+- evidence: EXP-0005-r5
 
 The reader never panics, never recurses without bound and keeps memory bounded on arbitrary input. It is fuzzed continuously.
 
