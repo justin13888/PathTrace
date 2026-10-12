@@ -223,7 +223,7 @@ fn run(iface: Option<String>, rec: Recorder, wifi: bool, stop: Arc<AtomicBool>) 
             qdisc_rows.push(vec![
                 Some(t as i64),
                 v(q.bytes),
-                v(u64::from(q.packets)),
+                v(q.packets),
                 v(u64::from(q.drops)),
                 v(u64::from(q.requeues)),
                 v(u64::from(q.overlimits)),

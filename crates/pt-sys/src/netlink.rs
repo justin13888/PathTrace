@@ -300,6 +300,9 @@ const TCA_KIND: u16 = 1;
 const TCA_STATS2: u16 = 7;
 const TCA_STATS_BASIC: u16 = 1;
 const TCA_STATS_QUEUE: u16 = 3;
+/// Full 64-bit packet count, sent after `TCA_STATS_BASIC` (whose u32 count then wraps) once
+/// the count exceeds 2^32 - 1 (R-0015).
+const TCA_STATS_PKT64: u16 = 8;
 const TC_H_ROOT: u32 = 0xFFFF_FFFF;
 const TCMSG_LEN: usize = 20;
 
@@ -309,7 +312,7 @@ pub struct QdiscStats {
     pub kind: String,
     pub handle: u32,
     pub bytes: u64,
-    pub packets: u32,
+    pub packets: u64,
     pub qlen: u32,
     pub backlog: u32,
     pub drops: u32,
@@ -360,12 +363,16 @@ fn parse_qdisc(body: &[u8]) -> Option<(u32, u32, QdiscStats)> {
                     .into_owned();
             }
             TCA_STATS2 => {
+                let mut pkt64 = None;
                 for (st, sd) in attrs(d) {
                     match st {
                         // struct gnet_stats_basic { u64 bytes; u32 packets; }
                         TCA_STATS_BASIC => {
                             q.bytes = u64::from_ne_bytes(sd.get(..8)?.try_into().ok()?);
-                            q.packets = u32_of(sd.get(8..12)?)?;
+                            q.packets = u64::from(u32_of(sd.get(8..12)?)?);
+                        }
+                        TCA_STATS_PKT64 => {
+                            pkt64 = Some(u64::from_ne_bytes(sd.get(..8)?.try_into().ok()?));
                         }
                         // struct gnet_stats_queue { qlen, backlog, drops, requeues, overlimits }
                         TCA_STATS_QUEUE => {
@@ -377,6 +384,9 @@ fn parse_qdisc(body: &[u8]) -> Option<(u32, u32, QdiscStats)> {
                         }
                         _ => {}
                     }
+                }
+                if let Some(p) = pkt64 {
+                    q.packets = p;
                 }
             }
             _ => {}
@@ -573,6 +583,16 @@ mod tests {
             (q.qlen, q.backlog, q.drops, q.requeues, q.overlimits),
             (2, 3000, 5, 1, 9)
         );
+        // Past 2^32 - 1 packets the basic count wraps and TCA_STATS_PKT64 has the full count.
+        let full = (5u64 << 32) + 7;
+        let mut basic = 1_000_000u64.to_ne_bytes().to_vec();
+        basic.extend((full as u32).to_ne_bytes());
+        basic.extend(0u32.to_ne_bytes());
+        let mut st = attr(TCA_STATS_BASIC, &basic);
+        st.extend(attr(TCA_STATS_PKT64, &full.to_ne_bytes()));
+        let mut body = body[..TCMSG_LEN].to_vec();
+        body.extend(attr(TCA_STATS2, &st));
+        assert_eq!(parse_qdisc(&body).unwrap().2.packets, full);
     }
 
     #[test]
