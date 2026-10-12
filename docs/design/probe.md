@@ -63,7 +63,7 @@ UDP payload = 32-byte header + random padding + 8-byte tag.
 
 Tag = first 8 bytes of keyed BLAKE3 over everything before the tag. The key is `blake3::derive_key("pathtrace probe tag v1", noise_handshake_hash)`. Padding comes from a ChaCha stream so that packets do not compress (REQ-PRB-006). Packets with bad tags are counted (`bad` table, per second) and never logged as observations.
 
-For `udp/443 QUIC-shaped`, the same payload is carried after a QUIC v1 header: the first packet of a flow uses a long header of type Initial, and the rest use short headers with the fixed bit set and an 8-byte DCID derived from the session (ADR 0006, `quic_shape = "header/1"`).
+For `udp/443 QUIC-shaped`, the same payload is carried after a QUIC v1 header: the first packet of a flow uses a long header of type Initial, and the rest use short headers with the fixed bit set and an 8-byte DCID derived from the session (ADR 0006, `quic_shape = "header/1"`). A receiver strips that header before verifying the tag, and the `icmp` event strips it from the quoted datagram before reading the quoted flow and seq. Both tell a QUIC header from a probe header by its first byte: the fixed bit (0x40) set and a high nibble other than the probe version.
 
 ## 4. Clocks and timestamps (ADR 0012)
 
@@ -137,7 +137,7 @@ Per endpoint, in its observation log (`META.kind = "obslog"`, `META.role = "a" |
 
 UDP class, NAT and PMTU probes are ordinary flows in `tx`/`rx` (their echoes are logged by the endpoint that sent them). TCP class probes are `tcp_probe` events.
 
-Control datagrams are observations too: the sender logs each sealed control datagram in `tx` as flow 250 (sent by a) or 251 (sent by b) with seq = Noise nonce, and the receiver logs it in `rx`. Every packet the probe puts on the path is therefore observed, which loss-model estimation requires (EXP-0002). Feedback runs at 50 Hz while a controlled flow arrives and at 5 Hz otherwise.
+Control datagrams are observations too: the sender logs each sealed control datagram in `tx` as flow 250 (sent by a) or 251 (sent by b) with seq = Noise nonce, and the receiver logs it in `rx` with `src` set like a probe's (a control datagram from a source tuple not seen before records its `peer_addr` event). Every packet the probe puts on the path is therefore observed, which loss-model estimation requires (EXP-0002). Feedback runs at 50 Hz while a controlled flow arrives and at 5 Hz otherwise.
 
 `merge` joins `tx` with `txts` by (sock, OPT_ID), which gives `tx_sched` (real) and `tx_snd_lag` (SND minus SCHED). It then joins the result with the peer's `rx` per direction, keyed by (flow, seq), to form the trace's `pkt` table. Duplicates go to `dup`, unmatched arrivals to `unmatched`, stamps that match no transmission to `txts_unmatched`, and log tables merge does not know are copied unchanged. Nothing is dropped (P1).
 
@@ -154,13 +154,15 @@ Standard profile (about 90 s of data phases):
 | P0 | ≤ 2 s | handshake, 5 clock exchanges, capabilities |
 | P1 | ≤ 5 s | reachability of every class × family (UDP: 3 class probes echoed; TCP: connect, plus a TLS handshake on 443), SYN as seen by the responder (`TCP_SAVED_SYN`) |
 | P2 | 10 s | quiet: light flow and trains only |
-| P3 | 5 s | chirps: 20-packet trains with exponentially shrinking gaps, alternating direction every 250 ms → capacity estimate per direction |
+| P3 | 5 s | chirps: 26-packet trains with exponentially shrinking gaps (below), alternating direction every 250 ms → capacity estimate per direction |
 | P4 | ≤ 10 s | saturate a→b: ramp 0.5× → 2× the estimate over 2 s, then hold a standing queue, then stop and watch the drain for 1 s |
 | P5 | ≤ 10 s | saturate b→a, same |
 | P6 | ≤ 5 s | saturate both directions |
 | P7 | ≤ 3 s per class | short saturation on udp/443 opaque and QUIC-shaped (UDP); TCP classes covered by P8 |
 | P8 | about 20 s | reference flows: TCP bulk each direction (≤ 5 s or the byte budget), TCP request/response 1 KiB × up to 200, UDP CBR 2 Mbit/s 5 s each direction |
 | background | whole session | NAT binding timeouts (15, 30, 60 s; deep adds 120, 300), PMTU ladder in both directions (`PMTUDISC_PROBE` + ICMP), ECN/DSCP via the TOS cycle |
+
+**Chirps** (issue #35). *Problem:* a chirp brackets the capacity between the rates its first and last gaps imply at its packet size. With 20 packets and gaps of 1 ms × 0.85^k it spanned about 12–224 Mbit/s at 1500 bytes, so a path above 224 Mbit/s (well inside the 1 Gbit/s access-network scope) or below 12 Mbit/s queued at every gap or at none, and its `estimated` capacity was only a bound. *Constraints:* the upper end reaches 1 Gbit/s at the smallest packet a chirp uses (the IPv6 minimum MTU, 1280 bytes); a chirp stays short against its 500 ms period so the two directions, 200 ms apart, do not overlap; the average rate stays negligible. *Choice:* 26 packets, gaps 2 ms × 0.8^k for k = 0 … 24: 6 Mbit/s – 1.27 Gbit/s at 1500 bytes and 5.1 Mbit/s – 1.08 Gbit/s at 1280 bytes, in steps of 25 %, lasting about 10 ms and averaging 0.6 Mbit/s. Instantaneous rates above the 500 Mbit/s rate cap are within that cap's meaning, which bounds sustained sending: trains already go back to back at line rate. *Alternatives rejected:* keeping factor 0.85 and adding packets, which needs 34 packets for the same span; a larger start gap, which buys rates below 5 Mbit/s that saturation (whose controller goes down to 100 kbit/s) measures anyway, at the cost of a longer chirp. *Validated by:* `flows::tests::chirp_brackets_access_rates` (the generated schedule's first and last gaps at 1280 and 1500 bytes).
 
 **PMTU ladder** (non-adaptive, so derivation can be re-run): IP sizes 1200 (IPv6: 1280), 1350, 1400, 1420, 1440, 1460, 1472, 1480, 1492 and 1500 (or the local interface MTU if smaller). Each size is sent 3 times per direction with DF set and `IP_PMTUDISC_PROBE`. What arrives, which ICMP errors come back, and what is lost silently together give the path MTU and the black-hole flag.
 
