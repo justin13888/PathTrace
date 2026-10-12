@@ -317,6 +317,34 @@ pub fn quiet_intervals(raw: &Raw, tb: &TimeBase) -> Vec<(i64, i64)> {
     out
 }
 
+/// `qdisc.drop-count/2`: the cumulative `drops` counter restarts at each `iface_change` (the
+/// sampler follows a new interface) and decreases at a qdisc replacement. Rows `(t, drops)`, in
+/// the sender's mono clock like the switch times, are cut into segments at each switch and each
+/// decrease; the result is the sum of last minus first per segment and the segment count.
+fn segmented_drops(rows: &[(i64, i64)], switches: &[i64]) -> Option<(i64, usize)> {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|r| r.0);
+    let (mut total, mut segments) = (0i64, 0usize);
+    let mut start: Option<(i64, i64)> = None; // (first drops, last drops) of the open segment
+    let mut prev_t = i64::MIN;
+    for &(t, d) in &rows {
+        let switched = switches.iter().any(|&s| s > prev_t && s <= t);
+        match start {
+            Some((a, b)) if !switched && d >= b => start = Some((a, d)),
+            _ => {
+                if let Some((a, b)) = start {
+                    total += b - a;
+                }
+                segments += 1;
+                start = Some((d, d));
+            }
+        }
+        prev_t = t;
+    }
+    let (a, b) = start?;
+    Some((total + b - a, segments))
+}
+
 pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i64)]) -> DirOut {
     let (pkts, ts_src, marks) = packets_marked(raw, tb, dir);
     let mut out = DirOut::default();
@@ -357,15 +385,26 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
         "local_qdisc_drops",
         match raw.table(&format!("qdisc[{sender}]")) {
             Some(q) => {
-                let d: Vec<i64> = q.col("drops").iter().flatten().copied().collect();
-                match (d.first(), d.last()) {
-                    (Some(a), Some(b)) => field("known", "qdisc.drop-count/1", 1.0)
-                        .with("drops", b - a)
+                let rows: Vec<(i64, i64)> = q
+                    .col("t")
+                    .iter()
+                    .zip(q.col("drops"))
+                    .filter_map(|(t, d)| Some(((*t)?, (*d)?)))
+                    .collect();
+                let switches: Vec<i64> = raw
+                    .events_of("iface_change")
+                    .filter(|e| e.get("endpoint").and_then(Value::as_str) == Some(sender))
+                    .filter_map(|e| Some(e.get("t")?.as_u64()? as i64))
+                    .collect();
+                match segmented_drops(&rows, &switches) {
+                    Some((drops, segments)) => field("known", "qdisc.drop-count/2", 1.0)
+                        .with("drops", drops)
+                        .with("segments", segments)
                         .with("source", Value::Array(vec![Value::from("qdisc")])),
-                    _ => field("unknown", "qdisc.drop-count/1", 0.0),
+                    None => field("unknown", "qdisc.drop-count/2", 0.0),
                 }
             }
-            None => field("unknown", "qdisc.drop-count/1", 0.0),
+            None => field("unknown", "qdisc.drop-count/2", 0.0),
         },
     );
     let loaded = loaded_intervals(&pkts);
@@ -1337,6 +1376,34 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn qdisc_drops_segment_at_iface_change_and_reset() {
+        // No rows with a drops value: unknown.
+        assert_eq!(segmented_drops(&[], &[]), None);
+        // One interface: last minus first.
+        assert_eq!(
+            segmented_drops(&[(0, 5), (10, 7), (20, 9)], &[]),
+            Some((4, 1))
+        );
+        // Switch at t = 15 to an interface whose counter stands at 100: 2 + 3, never 103 - 5.
+        assert_eq!(
+            segmented_drops(&[(0, 5), (10, 7), (20, 100), (30, 103)], &[15]),
+            Some((5, 2))
+        );
+        // Switch to an interface with a lower counter: no negative count.
+        assert_eq!(
+            segmented_drops(&[(0, 50), (10, 60), (20, 1), (30, 4)], &[15]),
+            Some((13, 2))
+        );
+        // A decrease without a switch (qdisc replaced) also starts a segment.
+        assert_eq!(
+            segmented_drops(&[(0, 50), (10, 60), (20, 0), (30, 2)], &[]),
+            Some((12, 2))
+        );
+        // A switch before the first row or after the last changes nothing.
+        assert_eq!(segmented_drops(&[(10, 1), (20, 3)], &[5, 25]), Some((2, 1)));
+    }
 
     fn pk(flow: i64, seq: i64, tx: i64, rx: Option<i64>, drops: Option<i64>) -> Pkt {
         Pkt {
