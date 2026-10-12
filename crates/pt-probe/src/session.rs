@@ -779,12 +779,12 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         log_b: log_b.clone(),
     }
     .write(&session_file)?;
-    if opts.verbose {
-        eprintln!(
-            "[pathtrace] session {session:08x}, trace {trace_id}; session file {}",
-            session_file.display()
-        );
-    }
+    // Printed even with -q: it is what retrieves the responder's half if this process dies
+    // (docs/design/cli.md, "probe prints the session before measuring").
+    eprintln!(
+        "session: {session:08x} (trace {trace_id}; session file {})",
+        session_file.display()
+    );
     rec.event(
         "handshake",
         Value::map()
