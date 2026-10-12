@@ -424,15 +424,11 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
             .flatten()
             .unwrap_or_default();
         let m = pt_probe::context::metered(&iface);
-        let chosen = pt_probe::plan::auto_profile(&m);
-        if chosen == "light" {
-            eprintln!(
-                "[pathtrace] {iface} is metered ({m}); using the light profile (override with --profile)"
-            );
-            chosen.to_string()
-        } else {
-            chosen.to_string()
-        }
+        eprintln!(
+            "[pathtrace] {}",
+            pt_probe::plan::auto_profile_notice(&iface, &m)
+        );
+        pt_probe::plan::auto_profile(&m).to_string()
     } else {
         a.profile.clone()
     };
