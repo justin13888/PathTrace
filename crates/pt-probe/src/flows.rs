@@ -92,6 +92,15 @@ pub enum Pattern {
     Burst { count: u32, gap_ns: u64 },
 }
 
+/// The P3 chirp: 26 packets, gaps 2 ms × 0.8^k (k = 0 … 24), every 500 ms. At 1280–1500 bytes
+/// it spans about 5–6 Mbit/s to 1.08–1.27 Gbit/s (docs/design/probe.md §6, Chirps).
+pub const CHIRP: Pattern = Pattern::Chirp {
+    count: 26,
+    gap0_ns: 2_000_000,
+    factor: 0.8,
+    period_ns: 500_000_000,
+};
+
 /// TOS byte policy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Tos {
@@ -544,6 +553,27 @@ mod tests {
         assert!(first[7].last_of_train);
         assert_eq!(first[8].t_intended, 500_000_000);
         assert_eq!(first[8].train, 1);
+    }
+
+    #[test]
+    fn chirp_brackets_access_rates() {
+        // (size, slowest rate at most, fastest rate at least), bit/s.
+        for (size, lo, hi) in [(1500u32, 6.0e6, 1.2e9), (1280, 5.2e6, 1.0e9)] {
+            let mut s = spec(CHIRP);
+            s.size = size;
+            let mut g = Gen::new(s, 0);
+            let chirp: Vec<Due> = (0..26).map(|_| g.take().unwrap()).collect();
+            assert!(chirp[25].last_of_train && !chirp[24].last_of_train);
+            let rate =
+                |w: &[Due]| f64::from(size * 8) * 1e9 / (w[1].t_intended - w[0].t_intended) as f64;
+            let rates: Vec<f64> = chirp.windows(2).map(rate).collect();
+            assert!(rates.windows(2).all(|r| r[1] > r[0]), "{size}: rates rise");
+            assert!(rates[0] <= lo, "{size}: slowest {}", rates[0]);
+            assert!(rates[24] >= hi, "{size}: fastest {}", rates[24]);
+            // Short against the period, so the two directions (200 ms apart) never overlap.
+            assert!(chirp[25].t_intended < 11 * MS);
+            assert_eq!(g.take().unwrap().t_intended, 500 * MS);
+        }
     }
 
     #[test]

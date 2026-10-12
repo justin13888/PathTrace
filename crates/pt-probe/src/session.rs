@@ -19,7 +19,7 @@ use pt_wire::probe::Tagger;
 use crate::config::{self, Keypair, Responder};
 use crate::context::{self, Sampler};
 use crate::control::{Control, Wire, tcp_reader};
-use crate::flows::{FlowSpec, Pattern, Role, Sock, Tos};
+use crate::flows::{self, FlowSpec, Pattern, Role, Sock, Tos};
 use crate::io::{CtrlIn, Endpoint, PacerCmd, Shared, is_controlled};
 use crate::noise;
 use crate::plan::{Controller, Profile, ids, pmtu_ladder, spec};
@@ -1533,12 +1533,7 @@ fn run_phases(
                 Role::A,
                 Sock::Main,
                 mtu,
-                Pattern::Chirp {
-                    count: 20,
-                    gap0_ns: 1_000_000,
-                    factor: 0.85,
-                    period_ns: 500_000_000,
-                },
+                flows::CHIRP,
                 3,
                 p.chirp_s,
             );
@@ -1549,12 +1544,7 @@ fn run_phases(
                 Role::B,
                 Sock::Main,
                 mtu,
-                Pattern::Chirp {
-                    count: 20,
-                    gap0_ns: 1_000_000,
-                    factor: 0.85,
-                    period_ns: 500_000_000,
-                },
+                flows::CHIRP,
                 3,
                 p.chirp_s,
             );
