@@ -10,8 +10,9 @@ use std::sync::atomic::{AtomicI32, Ordering};
 static STOP: AtomicI32 = AtomicI32::new(0);
 
 extern "C" fn on_signal(sig: libc::c_int) {
-    // Only an atomic store: async-signal-safe.
-    STOP.store(sig, Ordering::SeqCst);
+    // Only an atomic compare-and-swap: async-signal-safe. The first signal wins, so a SIGINT
+    // followed by a SIGTERM records SIGINT.
+    let _ = STOP.compare_exchange(0, sig, Ordering::SeqCst, Ordering::SeqCst);
 }
 
 /// Install the stop handler for SIGINT and SIGTERM.
@@ -61,6 +62,11 @@ mod tests {
         assert_eq!(name(libc::SIGTERM), "SIGTERM");
         // SA_RESETHAND restored the default disposition for the next one: put ours back so the
         // test process is not killed by a stray signal.
+        install_stop_handler().unwrap();
+        // A later, different signal does not replace the first one.
+        // SAFETY: raising a signal whose handler we just installed.
+        unsafe { libc::raise(libc::SIGINT) };
+        assert_eq!(stop_requested(), Some(libc::SIGTERM));
         install_stop_handler().unwrap();
     }
 }
