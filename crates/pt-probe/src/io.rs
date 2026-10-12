@@ -69,6 +69,11 @@ impl FlowBytes {
     pub fn add(&self, flow: u8, bytes: u64) {
         self.0[usize::from(flow)].fetch_add(bytes, Ordering::Relaxed);
     }
+    /// Start counting a new flow on `flow`: ids are reused (tracking rounds wrap), and an
+    /// allowance applies to one flow, not to every flow that ever had the id.
+    pub fn reset(&self, flow: u8) {
+        self.0[usize::from(flow)].store(0, Ordering::Relaxed);
+    }
 }
 
 /// State shared between the pacer, receiver, control layer and session logic.
@@ -330,6 +335,7 @@ fn pacer_loop(
         match c {
             PacerCmd::Start(spec, at) => {
                 gens.retain(|g| g.spec.id != spec.id);
+                shared.flow_bytes.reset(spec.id);
                 gens.push(Gen::new(spec, at.max(mono_raw())));
             }
             PacerCmd::Stop(id) => gens.retain(|g| g.spec.id != id),
