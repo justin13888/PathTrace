@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a0490e565b6b8486f/target/groundtruth/udp443-throttle/01a13217-5f98-7534-8401-d9f430070f87.ptf
+content_digest: 66eb82e79c0d02ec591390b5613a88aa1c4043d09c8eed0aa8ec9ad15a624abd
+packets a_to_b: 38684
+packets b_to_a: 33230
+session: b8954af3

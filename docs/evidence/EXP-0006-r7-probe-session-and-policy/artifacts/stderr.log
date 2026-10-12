@@ -1,0 +1,19 @@
+   Compiling pathtrace v1.0.1 (/var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/crates/pathtrace)
+    Finished `release` profile [optimized + debuginfo] target(s) in 2.82s
+────────────
+ Nextest run ID 7ee99686-556b-4178-8685-fa85307fd20c with nextest profile: default
+    Starting 12 tests across 2 binaries (12 tests skipped)
+        PASS [  29.481s] ( 1/12) pathtrace::netns tcp_fallback_session_sends_no_udp
+        PASS [  39.010s] ( 2/12) pathtrace::netns responder_signal_ends_the_session_for_both
+        PASS [  39.099s] ( 3/12) pathtrace::netns interrupted_session_ends_gracefully_and_stays_fetchable
+        PASS [  43.968s] ( 4/12) pathtrace::netns ipv6_without_a_route_falls_back_to_ipv4
+        PASS [  43.973s] ( 5/12) pathtrace::netns second_initiator_is_told_busy
+        PASS [  44.673s] ( 6/12) pathtrace::netns smoke_session_through_netem
+        PASS [  44.820s] ( 7/12) pathtrace::netns forced_predicted_ids_join_exactly
+        PASS [  44.841s] ( 8/12) pathtrace::netns responder_log_fetchable_after_responder_killed_mid_session
+        PASS [  44.969s] ( 9/12) pathtrace::netns lost_handshake_reply_is_resent
+        PASS [  47.238s] (10/12) pathtrace::netns ipv6_udp_timeout_falls_back_to_ipv4_udp
+        PASS [  47.509s] (11/12) pathtrace::netns tcp_fallback_tries_each_family
+        PASS [  55.972s] (12/12) pathtrace::netns fetch_resume_uses_pinned_tls_and_falls_back_to_443
+────────────
+     Summary [  55.975s] 12 tests run: 12 passed, 12 skipped

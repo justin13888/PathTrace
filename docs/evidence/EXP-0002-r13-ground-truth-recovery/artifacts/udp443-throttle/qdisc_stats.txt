@@ -1,0 +1,18 @@
+qdisc noqueue 0: dev lo root refcnt 2 
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 854a: dev ma0 root refcnt 17 limit 100 delay 10ms rate 20Mbit seed 3633901600041013419
+ Sent 53365180 bytes 44884 pkt (dropped 1898, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc prio 1: dev mb0 root refcnt 17 bands 3 priomap 1 2 2 2 1 2 0 0 1 1 1 1 1 1 1 1
+ Sent 61605512 bytes 50145 pkt (dropped 1919, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 30: dev mb0 parent 1:3 limit 100 delay 10ms rate 20Mbit seed 8576972003226667730
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc tbf 10: dev mb0 parent 1:1 rate 2Mbit burst 16Kb lat 50ms 
+ Sent 1542388 bytes 1030 pkt (dropped 13, overlimits 4471 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 20: dev mb0 parent 1:2 limit 100 delay 10ms rate 20Mbit seed 9274419370961008621
+ Sent 60063124 bytes 49115 pkt (dropped 1906, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0

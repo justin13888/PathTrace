@@ -1,0 +1,34 @@
+[pathtrace] handshake attempt 1 over UDP to 10.0.2.2:4433
+[pathtrace] handshake attempt 2 over UDP to 10.0.2.2:4433
+session: 28107580 (trace 01a131d3-42a6-7232-8a6c-8c3e8664a760; session file /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/target/groundtruth/loss-gemodel/01a131d3-42a6-7232-8a6c-8c3e8664a760.session)
+[pathtrace] phase P0 background
+[pathtrace] phase P1 reachability
+[pathtrace] phase P2 quiet
+[pathtrace] phase P3 chirps
+[pathtrace] phase P4 saturate a_to_b
+[pathtrace] phase P5 saturate b_to_a
+[pathtrace] phase P6 saturate both
+[pathtrace] phase P7 class differential
+[pathtrace] phase P8 reference flows
+[pathtrace] phase P9 end
+[pathtrace] fetch attempt 1 via tcp/4433: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetch attempt 1 via tcp/443: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetch attempt 2 via tcp/4433: unexpected end of file
+[pathtrace] fetch attempt 2 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 3 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 3 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 4 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 4 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 5 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 5 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 6 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 6 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 7 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 7 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 8 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 8 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 9 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 9 via tcp/443: Connection refused (os error 111)
+[pathtrace] fetch attempt 10 via tcp/4433: Connection refused (os error 111)
+[pathtrace] fetch attempt 10 via tcp/443: Connection refused (os error 111)
+note: could not fetch responder log yet (Connection refused (os error 111)); later run: pathtrace fetch --resume /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/target/groundtruth/loss-gemodel/01a131d3-42a6-7232-8a6c-8c3e8664a760.session

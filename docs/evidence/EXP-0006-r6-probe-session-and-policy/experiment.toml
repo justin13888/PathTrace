@@ -1,0 +1,19 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0006-r6"
+title = "Probe, wire, syscall and derive tests, end-to-end and interruption namespace sessions, unsafe and dependency policy"
+hypothesis = """Unit tests of pt-sys, pt-wire, pt-probe and pt-derive pass (Noise IKpsk2 auth, replay rejection, \
+anti-amplification bound, pairing and 0600 key refusal, metered auto-profile, tag verification, TLS pinning, TCP \
+header auth, controller, recorder, Mahimahi round trip; host-side losses: socket drops, send failures and \
+exact or predicted transmit ids, excluded from path loss); the netns sessions pass: an end-to-end session \
+produces a complete trace with every raw table, an interrupted initiator or responder ends the session \
+gracefully with a partial trace whose responder log stays fetchable (also after the responder is killed and \
+restarted), a lost handshake reply is resent, and fetch uses the pinned TLS certificate and falls back to 443; \
+`unsafe` appears only in pt-sys with every block documented (clippy -D warnings); cargo-deny passes."""
+command = "cargo test --release --locked -q -p pt-sys -p pt-wire -p pt-probe -p pt-derive && mise exec -- cargo nextest run --release --locked -p pathtrace --run-ignored ignored-only && cargo clippy --workspace --all-targets --locked -q -- -D warnings && ! grep -rln --include='*.rs' 'unsafe' crates xtask bench | grep -v '^crates/pt-sys/' && mise exec -- cargo deny --log-level error check"
+covers = ["crates/pt-sys/src", "crates/pt-wire/src", "crates/pt-probe/src", "crates/pt-derive/src", "crates/pathtrace", "tools/netns", "deny.toml"]
+requirements = [
+  "REQ-PRB-001", "REQ-PRB-002", "REQ-PRB-004", "REQ-PRB-006", "REQ-PRB-007", "REQ-PRB-008", "REQ-PRB-009",
+  "REQ-PRB-012", "REQ-PRB-016", "REQ-PRB-017", "REQ-PRB-018", "REQ-PRB-024", "REQ-PRB-030", "REQ-PRB-031",
+  "REQ-SEC-002", "REQ-SEC-003", "REQ-SEC-005", "REQ-SCOPE-007", "REQ-FMT-021",
+]
+supersedes = ["EXP-0006-r5"]

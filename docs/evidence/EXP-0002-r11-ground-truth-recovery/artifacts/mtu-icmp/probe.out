@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a122b429ea2a6ae7d/target/groundtruth/mtu-icmp/01a131b9-9e0f-7290-82de-8c5ef1d00b00.ptf
+content_digest: 755f48faeb719a2bf72ecc8e541eeafe04968952bdc9b9097c597807e6250a02
+packets a_to_b: 2580
+packets b_to_a: 28909
+session: 2ac72c1a

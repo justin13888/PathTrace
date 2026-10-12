@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-a0490e565b6b8486f/target/groundtruth/light/01a1324a-6cc3-754c-a93b-36ab9e59e12f.ptf
+content_digest: d1117fa86978ecca6eb3bd1d012f6abc626a9f4f7eb237e5b5e2850cc57e5055
+packets a_to_b: 2231
+packets b_to_a: 2217
+session: 66a4ac83

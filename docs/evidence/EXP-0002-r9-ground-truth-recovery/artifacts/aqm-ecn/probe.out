@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golemite/dev/justin13888/PathTrace/.claude/worktrees/agent-aa87c57c9dd06258f/target/groundtruth/aqm-ecn/01a130e1-5719-7642-ab04-c2447ec7a6a7.ptf
+content_digest: 4d67ec5e84ac267845aff5e28591709fc1c48edeb9e856928bf230fc98d1312d
+packets a_to_b: 47989
+packets b_to_a: 121408
+session: e34bbff2

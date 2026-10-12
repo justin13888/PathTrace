@@ -1,0 +1,3 @@
+[fuzz] $ cd fuzz
+cp: will not overwrite just-created 'corpus/ptf_read/valid-minimal.ptf' with '../conformance/v1.1/valid-minimal.ptf'
+[fuzz] ERROR task failed

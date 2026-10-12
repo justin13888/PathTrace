@@ -1,4 +1,5 @@
-//! Conformance corpus generator (REQ-FMT-018): `conformance/v1.0/*.ptf` + `expected.json`.
+//! Conformance corpus generator (REQ-FMT-018): `conformance/<version>/*.ptf` + `expected.json`
+//! for v1.0 and v1.1.
 //!
 //! Each case is a file plus its expected verdict: valid (with content digest) or invalid with an
 //! error kind (`pt_format::Error::kind`). Invalid files keep correct CRCs wherever the intended
@@ -151,10 +152,20 @@ fn all_encodings() -> Table {
         .with_attrs(Value::map().with("note", "every type/encoding combination"))
 }
 
+/// Corpus cases: file name → (bytes, expected error kind; `None` = valid).
+type Cases = BTreeMap<String, (Vec<u8>, Option<&'static str>)>;
+
+/// Writes every release's corpus. Existing directories must come out byte-identical
+/// (REQ-FMT-010): a release adds a directory and never changes an earlier one.
 pub fn generate(root: &Path) -> Result<()> {
-    let dir = root.join("conformance/v1.0");
-    std::fs::create_dir_all(&dir)?;
-    let mut cases: BTreeMap<String, (Vec<u8>, Option<&str>)> = BTreeMap::new();
+    emit(&root.join("conformance/v1.0"), v1_0()?)?;
+    emit(&root.join("conformance/v1.1"), v1_1())?;
+    Ok(())
+}
+
+/// The PTF 1.0 corpus: every encoding, compression, recovery-relevant and invalid case.
+fn v1_0() -> Result<Cases> {
+    let mut cases = Cases::new();
     let canon = WriteOptions::canonical();
 
     // ---- valid ----
@@ -375,9 +386,13 @@ pub fn generate(root: &Path) -> Result<()> {
     f2.truncate(16 + meta_rec.len());
     f2.extend(record(b"INDX", 0, 0, &idx.encode_payload()?));
     cases.insert("invalid-index-hash.ptf".into(), (f2, Some("schema")));
+    Ok(cases)
+}
 
-    // Write files and expected verdicts (computed with the Rust reader for valid digests;
-    // invalid kinds are asserted, not computed).
+/// Writes a corpus directory: the files and their expected verdicts (computed with the Rust
+/// reader for valid digests; invalid kinds are asserted, not computed).
+fn emit(dir: &Path, cases: Cases) -> Result<()> {
+    std::fs::create_dir_all(dir)?;
     let mut expected = serde_like::Obj::default();
     for (name, (bytes, kind)) in &cases {
         std::fs::write(dir.join(name), bytes)?;
@@ -402,6 +417,498 @@ pub fn generate(root: &Path) -> Result<()> {
     std::fs::write(dir.join("expected.json"), expected.finish())?;
     println!("wrote {} cases to {}", cases.len(), dir.display());
     Ok(())
+}
+
+/// The PTF 1.1 corpus (header minor 1): every 1.1 addition of ptf-format.md's Versions table,
+/// with the types, canonical encodings, units and clocks of its Part III.
+fn v1_1() -> Cases {
+    let canon = WriteOptions::canonical();
+    let v11 = |sections| PtfFile {
+        major: 1,
+        minor: 1,
+        sections,
+    };
+    let mut cases = Cases::new();
+    cases.insert(
+        "valid-minimal.ptf".into(),
+        (write(&v11(vec![meta(Value::map())]), &canon), None),
+    );
+    cases.insert(
+        "valid-1-1-additions.ptf".into(),
+        (write(&v11(additions_1_1()), &canon), None),
+    );
+    cases.insert(
+        "valid-1-1-additions-uncompressed-no-index.ptf".into(),
+        (
+            write(
+                &v11(additions_1_1()),
+                &WriteOptions {
+                    zstd_level: None,
+                    compress_threshold: 0,
+                    index: false,
+                },
+            ),
+            None,
+        ),
+    );
+    cases
+}
+
+/// Nullable u64 column with a unit.
+fn nu(name: &str, enc: Enc, unit: &str, rows: &[Option<u64>]) -> Column {
+    Column::nullable_u64(name, enc, rows).unit(unit)
+}
+
+/// Nullable i64 column with a unit.
+fn ni(name: &str, enc: Enc, unit: &str, rows: &[Option<i64>]) -> Column {
+    Column {
+        name: name.into(),
+        data: pt_format::Data::Known {
+            enc,
+            values: Values::I64(rows.iter().flatten().copied().collect()),
+        },
+        validity: Some(rows.iter().map(Option::is_some).collect()),
+        meta: Map::new(),
+    }
+    .unit(unit)
+}
+
+fn all(n: usize, v: u64) -> Vec<Option<u64>> {
+    vec![Some(v); n]
+}
+
+/// A small merged trace carrying the PTF 1.1 additions: META `endpoints.<ep>.sockets`, `qdisc`,
+/// `txqueuelen`, `session.<ep>.t0_boot` and `merge_checks`; FLOW `max_bytes`; CLOK `pairs.boot`
+/// and `exchange.req_nonce`/`resp_nonce`; OBSV `pkt.rxq_drops`, `dup` with `rx_src`, `size` and
+/// `rxq_drops`, and `txts_unmatched`; CTXS `netstack` and `qdisc`. Twelve packets a → b, two of
+/// them dropped by the receiving socket (its `rxq_drops` rises by 2 across the gap).
+fn additions_1_1() -> Vec<Section> {
+    let socket = |name: &str, rxq_ovfl: bool, tx_ids: &str| {
+        Value::map()
+            .with("name", name)
+            .with("kernel_rx", true)
+            .with("kernel_tx", true)
+            .with("recv_buf", 212_992u64)
+            .with("send_buf", 212_992u64)
+            .with("rxq_ovfl", rxq_ovfl)
+            .with("tx_ids", tx_ids)
+    };
+    let session = |t0: u64| {
+        Value::map()
+            .with("id", "00112233445566778899aabbccddeeff")
+            .with("profile", "smoke")
+            .with("t0_mono", t0)
+            .with("t0_real", 1_000_000_000_000_000_000u64 + t0)
+            .with("t0_boot", t0 + 5_000_000_000)
+    };
+    let clocks = ["a", "b"].iter().fold(Value::map(), |m, ep| {
+        m.with(
+            &format!("{ep}.mono"),
+            Value::map()
+                .with("kind", "monotonic_raw")
+                .with("endpoint", *ep),
+        )
+        .with(
+            &format!("{ep}.real"),
+            Value::map()
+                .with("kind", "realtime")
+                .with("endpoint", *ep)
+                .with("pii", "quasi"),
+        )
+    });
+    let m = meta(
+        Value::map()
+            .with(
+                "session",
+                Value::map()
+                    .with("a", session(1_000_000_000))
+                    .with("b", session(2_000_000_000)),
+            )
+            .with(
+                "endpoints",
+                Value::map()
+                    .with(
+                        "a",
+                        Value::map()
+                            .with(
+                                "sockets",
+                                Value::Array(vec![
+                                    socket("main", true, "explicit"),
+                                    socket("ctrl", true, "explicit"),
+                                ]),
+                            )
+                            .with(
+                                "qdisc",
+                                Value::map().with("kind", "fq_codel").with("handle", 0u64),
+                            )
+                            .with("txqueuelen", 1000u64),
+                    )
+                    .with(
+                        "b",
+                        Value::map()
+                            .with(
+                                "sockets",
+                                Value::Array(vec![
+                                    socket("main", true, "predicted"),
+                                    socket("ctrl", false, "none"),
+                                ]),
+                            )
+                            .with("qdisc", Value::Null)
+                            .with("txqueuelen", Value::Null),
+                    ),
+            )
+            .with("clocks", clocks)
+            .with(
+                "merge_checks",
+                Value::map()
+                    .with(
+                        "a_to_b",
+                        Value::map()
+                            .with("txts_joined", 12u64)
+                            .with("txts_implausible", 0u64),
+                    )
+                    .with(
+                        "b_to_a",
+                        Value::map()
+                            .with("txts_joined", 0u64)
+                            .with("txts_implausible", 0u64),
+                    )
+                    .with("txts_unmatched_a", 2u64)
+                    .with("txts_unmatched_b", 0u64)
+                    .with("tx_unstamped_a", 0u64)
+                    .with("tx_unstamped_b", 0u64)
+                    .with("txts_unexplained_a", 0u64)
+                    .with("txts_unexplained_b", 0u64),
+            ),
+    );
+
+    let flow = Value::map()
+        .with("id", 3u64)
+        .with("kind", "train")
+        .with("sender", "a")
+        .with("sock", "main")
+        .with("dst_port", 4433u64)
+        .with("class", "udp/high-port")
+        .with("quic_shape", Value::Null)
+        .with("phase", 4u64)
+        .with("size", 1200u64)
+        .with(
+            "pattern",
+            Value::map().with("type", "rate").with("bps", 10_000_000u64),
+        )
+        .with("tos", 0u64)
+        .with("duration_ns", 10_000_000u64)
+        .with("echo", false)
+        .with("echo_delay_ns", 0u64)
+        .with("max_bytes", 14_400u64);
+    let flows = Section::new(
+        b"FLOW",
+        0,
+        Value::map()
+            .with("flows", Value::Array(vec![flow]))
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+
+    let ep = |e: &str| Value::map().with("endpoint", e);
+    let dir = Value::map().with("dir", "a_to_b");
+    let pairs = Table::new("pairs", 3)
+        .with(
+            Column::new(
+                "mono",
+                Enc::Delta2,
+                Values::U64(vec![1_000_000_000, 1_500_000_000, 2_000_000_000]),
+            )
+            .unit("ns")
+            .clock("a.mono"),
+        )
+        .with(
+            Column::new(
+                "real",
+                Enc::Delta2,
+                Values::U64(vec![
+                    1_000_000_001_000_000_000,
+                    1_000_000_001_500_000_150,
+                    1_000_000_002_000_000_310,
+                ]),
+            )
+            .unit("ns")
+            .clock("a.real"),
+        )
+        .with(Column::new("width", Enc::Varint, Values::U64(vec![41, 38, 44])).unit("ns"))
+        .with(nu(
+            "boot",
+            Enc::Delta2,
+            "ns",
+            &[Some(6_000_000_020), None, Some(7_000_000_021)],
+        ))
+        .with_attrs(ep("a"));
+    let exchange = Table::new("exchange", 2)
+        .with(
+            Column::new(
+                "t1",
+                Enc::Delta2,
+                Values::U64(vec![1_100_000_000, 1_600_000_000]),
+            )
+            .unit("ns")
+            .clock("a.mono"),
+        )
+        .with(
+            Column::new(
+                "t2",
+                Enc::Delta2,
+                Values::U64(vec![2_105_000_300, 2_605_000_310]),
+            )
+            .unit("ns")
+            .clock("b.mono"),
+        )
+        .with(
+            Column::new(
+                "t3",
+                Enc::Delta2,
+                Values::U64(vec![2_105_020_300, 2_605_020_290]),
+            )
+            .unit("ns")
+            .clock("b.mono"),
+        )
+        .with(
+            Column::new(
+                "t4",
+                Enc::Delta2,
+                Values::U64(vec![1_110_020_000, 1_610_020_050]),
+            )
+            .unit("ns")
+            .clock("a.mono"),
+        )
+        .with(nu("req_nonce", Enc::Delta, "id", &[Some(7), Some(8)]))
+        .with(nu("resp_nonce", Enc::Delta, "id", &[Some(5), None]))
+        .with_attrs(ep("a"));
+
+    // Twelve packets, seq 5 and 6 dropped by the receiving socket (rxq_drops 0 → 2).
+    let n = 12usize;
+    let lost = |i: usize| i == 5 || i == 6;
+    let rx = |i: usize, v: u64| (!lost(i)).then_some(v);
+    let tx: Vec<u64> = (0..n as u64).map(|i| 1_200_000_000 + i * 960_000).collect();
+    let pkt = Table::new("pkt", n)
+        .with(nu("flow", Enc::Rle, "id", &all(n, 3)))
+        .with(nu(
+            "seq",
+            Enc::Delta,
+            "count",
+            &(0..n as u64).map(Some).collect::<Vec<_>>(),
+        ))
+        .with(nu("size", Enc::Rle, "B", &all(n, 1228)))
+        .with(nu("phase", Enc::Rle, "id", &all(n, 4)))
+        .with(nu("train", Enc::Rle, "id", &all(n, 0)))
+        .with(nu("train_idx", Enc::Rle, "count", &all(n, 0)))
+        .with(nu("tos_tx", Enc::Rle, "tos", &all(n, 0)))
+        .with(nu("tx_sock", Enc::Rle, "id", &all(n, 0)))
+        .with(
+            nu(
+                "tx_intended",
+                Enc::Delta2,
+                "ns",
+                &tx.iter().map(|&t| Some(t)).collect::<Vec<_>>(),
+            )
+            .clock("a.mono"),
+        )
+        .with(ni(
+            "tx_user_lag",
+            Enc::Varint,
+            "ns",
+            &(0..n as i64)
+                .map(|i| Some(2_000 + (i * 37) % 500))
+                .collect::<Vec<_>>(),
+        ))
+        .with(
+            nu(
+                "tx_sched",
+                Enc::Delta2,
+                "ns",
+                &tx.iter()
+                    .map(|&t| Some(1_000_000_000_000_000_000 + t + 4_000))
+                    .collect::<Vec<_>>(),
+            )
+            .clock("a.real"),
+        )
+        .with(ni(
+            "tx_snd_lag",
+            Enc::Varint,
+            "ns",
+            &(0..n as i64)
+                .map(|i| (i != 9).then_some(11_000 + (i * 53) % 900))
+                .collect::<Vec<_>>(),
+        ))
+        .with(
+            nu(
+                "rx",
+                Enc::Delta2,
+                "ns",
+                &(0..n)
+                    .map(|i| {
+                        rx(
+                            i,
+                            1_000_000_000_000_000_000
+                                + tx[i]
+                                + 10_000_000
+                                + (i as u64 * 7919) % 50_000,
+                        )
+                    })
+                    .collect::<Vec<_>>(),
+            )
+            .clock("b.real"),
+        )
+        .with(
+            nu(
+                "rx_src",
+                Enc::Rle,
+                "enum",
+                &(0..n).map(|i| rx(i, 0)).collect::<Vec<_>>(),
+            )
+            .with_meta(
+                "enum",
+                Value::Array(vec![Value::from("kernel"), Value::from("user")]),
+            ),
+        )
+        .with(nu(
+            "tos_rx",
+            Enc::Rle,
+            "tos",
+            &(0..n).map(|i| rx(i, 0)).collect::<Vec<_>>(),
+        ))
+        .with(nu(
+            "ttl_rx",
+            Enc::Rle,
+            "hops",
+            &(0..n).map(|i| rx(i, 63)).collect::<Vec<_>>(),
+        ))
+        .with(nu(
+            "src",
+            Enc::Rle,
+            "id",
+            &(0..n).map(|i| rx(i, 0)).collect::<Vec<_>>(),
+        ))
+        .with(nu(
+            "rx_sock",
+            Enc::Rle,
+            "id",
+            &(0..n).map(|i| rx(i, 0)).collect::<Vec<_>>(),
+        ))
+        .with(nu(
+            "rx_size",
+            Enc::Rle,
+            "B",
+            &(0..n).map(|i| rx(i, 1228)).collect::<Vec<_>>(),
+        ))
+        .with(nu(
+            "rxq_drops",
+            Enc::Rle,
+            "count",
+            &(0..n)
+                .map(|i| rx(i, if i < 5 { 0 } else { 2 }))
+                .collect::<Vec<_>>(),
+        ))
+        .with_attrs(dir.clone());
+    let dup = Table::new("dup", 1)
+        .with(nu("flow", Enc::Rle, "id", &[Some(3)]))
+        .with(nu("seq", Enc::Delta, "count", &[Some(8)]))
+        .with(nu("rx", Enc::Delta2, "ns", &[Some(1_000_000_001_217_690_000)]).clock("b.real"))
+        .with(nu("tos_rx", Enc::Rle, "id", &[Some(0)]))
+        .with(nu("ttl_rx", Enc::Rle, "id", &[Some(63)]))
+        .with(nu("src", Enc::Rle, "id", &[Some(0)]))
+        .with(nu("rx_sock", Enc::Rle, "id", &[Some(0)]))
+        .with(nu("rx_src", Enc::Rle, "enum", &[Some(1)]).with_meta(
+            "enum",
+            Value::Array(vec![Value::from("kernel"), Value::from("user")]),
+        ))
+        .with(nu("size", Enc::Rle, "B", &[Some(1228)]))
+        .with(nu("rxq_drops", Enc::Rle, "count", &[None]))
+        .with_attrs(dir);
+    let txts_unmatched = Table::new("txts_unmatched", 2)
+        .with(Column::new("sock", Enc::Rle, Values::U64(vec![1, 1])).unit("id"))
+        .with(Column::new("id", Enc::Delta, Values::U64(vec![40, 40])).unit("id"))
+        .with(
+            Column::new("kind", Enc::Rle, Values::U64(vec![0, 1]))
+                .unit("enum")
+                .with_meta(
+                    "enum",
+                    Value::Array(vec![Value::from("sched"), Value::from("snd")]),
+                ),
+        )
+        .with(
+            Column::new(
+                "real",
+                Enc::Delta2,
+                Values::U64(vec![1_000_000_001_400_000_000, 1_000_000_001_400_012_000]),
+            )
+            .unit("ns")
+            .clock("a.real"),
+        )
+        .with_attrs(ep("a"));
+
+    let t = |i: u64| 1_000_000_000 + i * 1_000_000_000;
+    let netstack = [
+        "udp_in_errors",
+        "udp_rcvbuf_errors",
+        "udp_sndbuf_errors",
+        "udp_in_csum_errors",
+        "udp6_in_errors",
+        "udp6_rcvbuf_errors",
+        "udp6_sndbuf_errors",
+        "udp6_in_csum_errors",
+        "softnet_dropped",
+        "softnet_squeezed",
+    ]
+    .iter()
+    .fold(
+        Table::new("netstack", 2).with(
+            Column::new("t", Enc::Delta2, Values::U64(vec![t(0), t(1)]))
+                .unit("ns")
+                .clock("b.mono"),
+        ),
+        |tb, name| {
+            let rows = match *name {
+                "udp_in_errors" | "udp_rcvbuf_errors" => [Some(10), Some(12)],
+                n if n.starts_with("udp6") => [None, None],
+                _ => [Some(0), Some(0)],
+            };
+            tb.with(nu(name, Enc::Delta, "count", &rows))
+        },
+    )
+    .with_attrs(ep("b"));
+    let qdisc = Table::new("qdisc", 2)
+        .with(
+            Column::new("t", Enc::Delta2, Values::U64(vec![t(0), t(1)]))
+                .unit("ns")
+                .clock("a.mono"),
+        )
+        .with(nu(
+            "bytes",
+            Enc::Delta,
+            "B",
+            &[Some(1_000_000), Some(1_014_736)],
+        ))
+        .with(nu("packets", Enc::Delta, "count", &[Some(900), Some(912)]))
+        .with(nu("drops", Enc::Delta, "count", &[Some(0), Some(0)]))
+        .with(nu("requeues", Enc::Delta, "count", &[Some(0), Some(0)]))
+        .with(nu("overlimits", Enc::Delta, "count", &[Some(0), Some(0)]))
+        .with(nu("qlen", Enc::Rle, "count", &[Some(0), Some(0)]))
+        .with(nu("backlog", Enc::Rle, "B", &[Some(0), None]))
+        .with_attrs(ep("a"));
+
+    let s = |kind: &[u8; 4], t: Table| Section::new(kind, 0, Map::new()).with_table(t);
+    vec![
+        m,
+        flows,
+        s(b"CLOK", pairs),
+        s(b"CLOK", exchange),
+        s(b"OBSV", pkt),
+        s(b"OBSV", dup),
+        s(b"OBSV", txts_unmatched),
+        s(b"CTXS", netstack),
+        s(b"CTXS", qdisc),
+    ]
 }
 
 /// Tiny ordered JSON object writer (avoids a serde_json dependency in xtask).
