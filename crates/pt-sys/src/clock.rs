@@ -4,6 +4,7 @@
 //! CLOCK_REALTIME, so [`pair`] samples both clocks with a minimum-width sandwich to map between
 //! them at derivation time.
 
+use std::io;
 use std::time::Duration;
 
 fn now(clock: libc::clockid_t) -> u64 {
@@ -74,6 +75,35 @@ pub fn pair(tries: usize) -> ClockPair {
     best
 }
 
+/// The kernel's NTP discipline state, as an NTP daemon (chrony, ntpd, systemd-timesyncd) sets it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NtpState {
+    /// The kernel considers CLOCK_REALTIME synchronised: the clock state is not `TIME_ERROR`
+    /// and `STA_UNSYNC` is clear.
+    pub synced: bool,
+    /// Estimated error, µs.
+    pub esterror_us: i64,
+    /// Maximum error, µs.
+    pub maxerror_us: i64,
+}
+
+/// Read the kernel NTP state with `adjtimex(2)` without changing anything (`modes = 0`, which
+/// needs no privilege).
+pub fn ntp_state() -> io::Result<NtpState> {
+    // SAFETY: `timex` is plain old data, for which all-zero bytes are a valid value.
+    let mut tx: libc::timex = unsafe { std::mem::zeroed() };
+    // SAFETY: `tx` is a valid, writable timex; `modes` is 0, so the call only reads state.
+    let state = unsafe { libc::adjtimex(&mut tx) };
+    if state < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(NtpState {
+        synced: state != libc::TIME_ERROR && tx.status & libc::STA_UNSYNC == 0,
+        esterror_us: tx.esterror as i64,
+        maxerror_us: tx.maxerror as i64,
+    })
+}
+
 /// Sleep until MONO_RAW reaches `deadline`: coarse sleep until `spin` before it, then spin.
 /// Returns the lateness (ns) at wakeup.
 pub fn sleep_until(deadline: u64, spin: Duration) -> u64 {
@@ -107,6 +137,12 @@ mod tests {
         // BOOTTIME ≥ the monotonic clocks' origin and advances with them while awake.
         let q = pair(8);
         assert!(q.boot >= p.boot && q.boot - p.boot < 1_000_000_000);
+    }
+
+    #[test]
+    fn ntp_state_reads_without_privilege() {
+        let s = ntp_state().expect("adjtimex read-only");
+        assert!(s.esterror_us >= 0 && s.maxerror_us >= 0, "{s:?}");
     }
 
     #[test]
