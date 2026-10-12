@@ -24,6 +24,28 @@ pub fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02x}")).collect()
 }
 
+/// Decode hex of any even length. Refuses an odd length or any non-hex character (including
+/// non-ASCII text, which is never sliced).
+pub fn unhex(s: &str) -> io::Result<Vec<u8>> {
+    let bad = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("expected an even number of hex chars, got {s:?}"),
+        )
+    };
+    let b = s.as_bytes();
+    if !b.len().is_multiple_of(2) {
+        return Err(bad());
+    }
+    let nib = |c: u8| (c as char).to_digit(16).map(|d| d as u8);
+    b.as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| Some(nib(p[0])? << 4 | nib(p[1])?))
+        .collect::<Option<Vec<u8>>>()
+        .ok_or_else(bad)
+}
+
 pub fn unhex32(s: &str) -> io::Result<[u8; 32]> {
     let bad = || {
         io::Error::new(
@@ -31,14 +53,10 @@ pub fn unhex32(s: &str) -> io::Result<[u8; 32]> {
             format!("expected 64 hex chars, got {s:?}"),
         )
     };
-    if s.len() != 64 {
-        return Err(bad());
-    }
-    let mut out = [0u8; 32];
-    for (i, o) in out.iter_mut().enumerate() {
-        *o = u8::from_str_radix(&s[2 * i..2 * i + 2], 16).map_err(|_| bad())?;
-    }
-    Ok(out)
+    unhex(s)
+        .ok()
+        .and_then(|v| <[u8; 32]>::try_from(v).ok())
+        .ok_or_else(bad)
 }
 
 /// Default configuration directory: `$XDG_CONFIG_HOME/pathtrace` or `~/.config/pathtrace`.
@@ -278,5 +296,18 @@ mod tests {
         fs::set_permissions(r.join("key"), fs::Permissions::from_mode(0o644)).unwrap();
         assert!(load_keypair(&r).is_err());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn unhex_validates() {
+        assert_eq!(unhex("").unwrap(), Vec::<u8>::new());
+        assert_eq!(unhex("00Ff10").unwrap(), vec![0x00, 0xff, 0x10]);
+        assert_eq!(unhex(&hex(&[1, 2, 254])).unwrap(), vec![1, 2, 254]);
+        for bad in ["0", "abc", "zz", "é0", "0é", "+1"] {
+            assert!(unhex(bad).is_err(), "{bad:?}");
+        }
+        assert!(unhex32(&"ab".repeat(32)).is_ok());
+        assert!(unhex32(&"ab".repeat(31)).is_err());
+        assert!(unhex32(&format!("{}é", "a".repeat(62))).is_err());
     }
 }

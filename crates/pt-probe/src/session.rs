@@ -524,11 +524,8 @@ impl SessionFile {
                 })
         };
         let bad = |e: String| io::Error::new(io::ErrorKind::InvalidData, e);
-        let cert_hex = field("cert")?;
-        let cert = (0..cert_hex.len() / 2)
-            .map(|i| u8::from_str_radix(&cert_hex[2 * i..2 * i + 2], 16))
-            .collect::<Result<Vec<u8>, _>>()
-            .map_err(|e| bad(e.to_string()))?;
+        let cert = config::unhex(field("cert")?)
+            .map_err(|e| bad(format!("{}: cert: {e}", path.display())))?;
         Ok(SessionFile {
             responder: field("responder")?.to_string(),
             session: u32::from_str_radix(field("session")?, 16).map_err(|e| bad(e.to_string()))?,
@@ -2005,6 +2002,13 @@ mod tests {
             0o600
         );
         assert_eq!(SessionFile::read(&path).unwrap(), f);
+        // A damaged cert line is an error, never a panic or a silently shortened cert.
+        let text = std::fs::read_to_string(&path).unwrap();
+        for bad in ["30820\n", "3082é1ff\n", "30zz\n"] {
+            let damaged = text.replace("308201ff\n", bad);
+            config::write_secret(&path, &damaged).unwrap();
+            assert!(SessionFile::read(&path).is_err(), "{bad:?}");
+        }
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
