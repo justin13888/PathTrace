@@ -23,6 +23,7 @@ Which release to use: for every field session, both machines run the first relea
    - `udp/<port> not refused` warns `refused`: this network (or the responder) rejects that UDP port. The session still runs and records the UDP classes on that port as blocked (all of them, over a TCP-only session, when the responder port itself is refused). `not refused` does not prove that UDP arrives: only a session can, so the probe's own result is the final word.
    - `clock sync` warns: start an NTP daemon (chrony, or `timedatectl set-ntp true`) and wait until `doctor` reports it synchronised. Check the responder the same way once, with `pathtrace doctor` on it.
    - `power` warns: the laptop is on battery (step 3). `cpu governor` warns: the governor pins the lowest frequency; switch to `schedutil` or `performance` for the session.
+   - `offloads` warns: `rx-gro-list` or `rx-lro` is on for the egress interface, which changes what the probe records on this host. Run the `sudo ethtool -K …` command the warning prints (it lasts until reboot or until the interface is recreated), then run `doctor` again. Run `pathtrace doctor` on the responder too: its default-route interface is checked the same way. `rx-gro` and the segmentation offloads are listed but do not warn.
    - `ipv6` warns: the network or the responder has no IPv6, so only IPv4 is tested (and the probe uses IPv4). Checks with an ` (ipv6)` suffix cover the second family when both exist.
 
 ## Run
