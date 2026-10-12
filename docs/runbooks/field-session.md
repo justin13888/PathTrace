@@ -32,6 +32,10 @@ pathtrace probe vm --class <class> --label "<venue / notes>" [--mobility walking
 
 Don't use the laptop's network during the session. Moving is fine: set `--mobility`, and address changes are recorded. The light trains and the PMTU ladder pause through short outages and continue afterwards.
 
+If the responder's name has both an IPv4 and an IPv6 address, the probe uses IPv4 unless you pass `--ipv6`. When the preferred family does not work from where you are (no IPv6 on the hotel Wi-Fi, or no IPv4 on an IPv6-only or NAT64 cellular network), the probe uses the other family and prints `[pathtrace] ipv6 unusable (…); session runs over ipv4 …` (or the reverse). The trace is still complete; it records the family it ran on.
+
+If UDP is blocked, the probe falls back to TCP (port 443, then 4433). It then measures only TCP reachability and the TCP reference flows, skips every UDP phase, and exits 3 with `note: UDP control blocked; session ran over TCP fallback`. That is a finding about the network: keep the trace.
+
 Right after connecting, the probe prints the session id and writes `<id>.session` next to the logs. **Keep it until the trace is complete**: it is what fetches the responder's half later. Ctrl-C ends the session early but cleanly (the probe still fetches and merges, exit 3); a second Ctrl-C quits at once.
 
 ## Results
@@ -39,8 +43,9 @@ Right after connecting, the probe prints the session id and writes `<id>.session
 | Exit code | Meaning | Action |
 |---|---|---|
 | 0 | Complete trace | Nothing |
-| 3 | Partial trace (for example, the responder log could not be fetched, phases failed, or you pressed Ctrl-C) | Keep it. If the responder log is missing, run `pathtrace fetch --resume <id>.session` later from any network (TLS on the responder's port, else 443), then `pathtrace merge <id>.a.ptflog <id>.b.ptflog -o <id>.ptf` and delete `<id>.session` |
+| 3 | Partial trace (for example, the responder log could not be fetched, phases failed, UDP was blocked so only TCP was measured, or you pressed Ctrl-C) | Keep it. If the responder log is missing, run `pathtrace fetch --resume <id>.session` later from any network (TLS on the responder's port, else 443), then `pathtrace merge <id>.a.ptflog <id>.b.ptflog -o <id>.ptf` and delete `<id>.session` |
 | 1 | No session (responder unreachable, keys) | `pathtrace doctor vm` |
+| 1 with `error: responder busy` | The responder is running another initiator's session (it runs one at a time) | Wait for that session to finish (about 2 minutes for `standard`; `deep` runs longer) and run the probe again |
 
 Each session leaves `<id>.a.ptflog` (laptop raw log), `<id>.b.ptflog` (responder raw log) and `<id>.ptf` (merged and derived trace). **Keep all three.** The logs are the raw evidence, and the trace can always be rebuilt from them. `<id>.session` is deleted automatically once the trace is complete.
 
