@@ -1,8 +1,8 @@
 # Probe and responder design
 
-- requirements: REQ-PRB-001 … REQ-PRB-025, REQ-SEC-001, REQ-SEC-002
-- adr: 0006, 0007, 0010, 0012
-- research: R-0010 … R-0015 (Linux APIs)
+- requirements: REQ-PRB-001 … REQ-PRB-025, REQ-PRB-033, REQ-SCOPE-009, REQ-SEC-001, REQ-SEC-002
+- adr: 0006, 0007, 0010, 0012, 0014
+- research: R-0010 … R-0015 (Linux APIs), R-0017 (macOS APIs)
 
 The probe records everything observable about the path, in both directions, into crash-safe observation logs. It then merges them into one PTF trace. It never computes a path model while capturing: derivation runs afterwards and can be re-run.
 
@@ -18,6 +18,8 @@ The probe records everything observable about the path, in both directions, into
 | logger | Turns records into table chunks and appends an OBSV/CLOK/CTXS/EVNT section about once per second (`fsync`) | Disk I/O never stalls the data path |
 | context (both endpoints; Wi-Fi on the initiator only) | Interface counters, UDP/softnet stack counters and egress qdisc counters at 10 Hz; nl80211 station info and clock pairs at 1 Hz; rtnetlink events; follows the interface that carries the route to the peer (§4.4) | Slow syscalls kept off the data path |
 | tcp | Reference flows and TCP class probes; `TCP_INFO` sampling every 10 ms on both ends | Kernel TCP blocks |
+
+The table describes Linux. A macOS initiator (ADR 0014) runs the same threads with the differences in §9: one `sendmsg`/`recvmsg` per datagram, no error queue, no qdisc, nl80211 or `/proc` counters, and `TCP_CONNECTION_INFO` in place of `TCP_INFO`.
 
 Records and events flow to the logger over one bounded `std::sync::mpsc` channel. The pacer and receiver never block on it: if it is full, their record or event is counted (rows per table, events per type), and the logger writes a `channel_overflow {rows: {table: n}, events: n, event_types: {type: n}}` event with the new counts at its next flush and at the end. Events from the session, control and sampler threads (`phase_start`, `session_end`, `interrupted`, …) wait for the logger instead, so they are never lost and derivation can rely on the phase timeline. Records are never silently lost, and backpressure never stalls pacing.
 
@@ -72,6 +74,7 @@ For `udp/443 QUIC-shaped`, the same payload is carried after a QUIC v1 header: t
 - Kernel software stamps are CLOCK_REALTIME (R-0010). Each side therefore logs a **clock pair** about once per second: the minimum-width sandwich of MONO_RAW, REALTIME, MONO_RAW over 8 tries (~30 ns uncertainty). NTP slews and steps can be undone at derivation time.
 - TX stamps: SND (driver, after the local qdisc) where the driver provides it, SCHED (qdisc enqueue) always on supporting kernels. Wi-Fi drivers commonly give SCHED only (R-0010). Both are logged when present, plus the user-space time just before `sendmmsg`. Hardware stamps are not used in 1.x.
 - Every clock pair also reads CLOCK_BOOTTIME inside the same sandwich, so a suspend shows directly as a jump of BOOTTIME − MONO_RAW.
+- On macOS the same roles are played by other clocks and stamps (§9.1 to §9.3).
 
 ### 4.1 Transmit ids and failed sends (R-0015)
 
@@ -207,3 +210,149 @@ The controller only decides what to send. Whether an arrival counts as a deliver
 - One session at a time per responder. While a session runs, an authenticated handshake from another initiator (over UDP on either family's main socket, or over a TCP control connection) is answered with a `welcome` that carries `error: "busy"` and `error_text`, and session id 0; it starts nothing, and the running session records `handshake_refused {reason: "busy", addr}`. The initiator reports "responder busy" and exits 1 without retrying. A handshake that fails authentication is not answered, so the responder stays silent to strangers, and a repeat of the handshake that opened the running session is still answered by resending its reply (§3.1), never by `busy`. The refusal is a sealed Noise reply, so it is no larger than an ordinary handshake reply (REQ-PRB-004) and cannot be forged by an on-path stranger. An initiator older than this change reports it as "responder refused the session: busy".
 
   *Alternatives rejected:* staying silent, which an initiator cannot tell from a blocked path (it tries the TCP fallback and then reports the responder unreachable); and an unauthenticated plain-text busy datagram, which anyone could send to make a responder look busy, and which would tell a scanner that a responder listens.
+
+## 9. macOS initiator (ADR 0014, R-0017)
+
+ADR 0014 lets the initiator roles run on macOS 15 or newer (aarch64) against a Linux responder (REQ-SCOPE-009, REQ-PRB-033). This section states what a macOS initiator does and records where it differs from Linux; everything it does not name is as in §1 to §8. Platform code lives only in the macOS backend of `pt-sys`, which reports capabilities (kernel TX stamps, error queue, batched I/O, per-socket receive drops, qdisc and stack counters, Wi-Fi link state, TCP state kind). `pt-probe` and `pt-derive` branch on those capabilities and on what the trace records, never on `cfg`, so a Linux socket that lacks a facility (for example one that fell back to `SO_TIMESTAMPNS`) takes the same path. The format additions this needs are PTF 1.2 (ptf-format.md, Versions), all additive. Derivation rules introduced here are listed in §9.10.
+
+### 9.1 Clocks
+
+*Problem:* the Linux design rests on three clocks: MONO_RAW (not slewed, stops during suspend) for scheduling and intended times, REALTIME for kernel stamps, and BOOTTIME (counts suspend) for the suspend detector (§4.3). macOS has clocks with the same names and other meanings: its `CLOCK_MONOTONIC_RAW` counts sleep, and `CLOCK_UPTIME_RAW` (`mach_absolute_time`) is the one that stops (R-0017).
+
+*Constraints:* the `<ep>.mono` domain keeps its meaning on both platforms, because the pacer's schedule must resume after a suspend without a burst and derivation interpolates it against `<ep>.real` with clock pairs (ADR 0012); the suspend detector needs a clock that counts sleep read inside the same sandwich; no privileges.
+
+*Alternatives rejected:* `CLOCK_MONOTONIC_RAW` (equal to `mach_continuous_time`) for `.mono`: it counts sleep, so after a lid close every flow would be late by the whole sleep, the pacer would record `stall {cause: "late"}` and skip, and BOOTTIME − MONO would never jump, so the suspend would not be recorded as one; `CLOCK_MONOTONIC`: also counts sleep.
+
+*Choice:* `a.mono` is `mach_absolute_time` (`CLOCK_UPTIME_RAW`): not slewed, stops while the system sleeps, ticking at 24 MHz on Apple silicon (41.67 ns, converted to ns with `mach_timebase_info`). The `boot` column of `pairs` is `mach_continuous_time` (counts sleep), read inside the same sandwich, so a sleep shows as a jump of boot − mono exactly as on Linux. `a.real` is `CLOCK_REALTIME`, the clock `SO_TIMESTAMP` reads (§9.3). The clock domain keeps the kind `monotonic_raw`, whose meaning PTF 1.2 states without naming a Linux clock, and 1.2 records each domain's `source` (ptf-format.md §6). Clock sync is read with `ntp_adjtime` (`modes = 0`, unprivileged, R-0017) by `doctor` (cli.md), as `adjtimex` is on Linux.
+
+*Rationale:* `CLOCK_UPTIME_RAW` has every property the Linux design uses MONO_RAW for, and `mach_continuous_time` every property it uses BOOTTIME for; matching properties rather than names keeps §4.3, the clock model and the `t_intended_ns` header field unchanged.
+
+*Validated by:* `pt-sys` unit tests on macOS (#61): mono and boot are monotonic, boot − mono stays constant within 1 ms over 1 s awake, and a clock pair's width is under 1 µs; the suspend path by the macOS evidence (#66), which closes the lid during a session and expects `stall {cause: "suspend"}`.
+
+### 9.2 Transmit times
+
+*Problem:* macOS has no kernel TX stamps and no error queue (R-0017), so there is no `txts` table, no OPT_ID and no `tx_sched` or `tx_snd_lag`. The user-space time is the only transmit time.
+
+*Constraints:* every packet the probe sends is still observed; P1 (no correction in the raw layer); derivation must say which transmit times are user-space; a Linux socket without TX stamps already behaves this way.
+
+*Choice:* a macOS probe socket records `kernel_tx: false` and `tx_ids: "none"` in META, like a Linux socket without TX stamps. The pacer reads `a.mono` immediately before each `sendmsg` (one call per datagram, §9.4), so `tx_user_lag` is that read minus `tx_intended`, per datagram. `merge` finds no stamps to join: the trace's `tx_sched` and `tx_snd_lag` are null for every packet a sent, `tx_unstamped_a` counts nothing (it counts only sockets that have stamps), and no re-anchoring applies. Derivation already takes the transmit time as SND, else SCHED, else user (`tx_intended + tx_user_lag`, mapped from `a.mono`), and counts the choice per direction in `PATH.<dir>.timestamps.counts` (`user` for every a→b packet of a macOS trace); `trace info` shows those counts (cli.md). `policy.matrix` uses the same fallback (§9.10).
+
+*Error bound:* the user stamp is taken before the datagram leaves the host, never after, so the error is one-sided: the send-path latency from the clock read to the wire (the system call, UDP/IP output, the interface's output queue, and on Wi-Fi the driver, firmware and channel access). It is expected to be tens of µs on an idle host and wired link and up to milliseconds on Wi-Fi under contention or when the interface queue holds packets, as during an a→b saturation. Its effects: a→b one-way delays are overestimated by it, so `base_delay` (a minimum) carries the minimum send latency and `jitter` carries its variation; a→b inter-departure times include host scheduling; a queue in the Mac's own interface queue appears as path queueing delay, which on Linux `tx_snd_lag` and SND stamps would have separated. Capacity and loss rest on arrivals at the Linux responder and are unaffected. The b→a direction keeps the responder's kernel TX stamps. The bound is not knowable per packet; the macOS evidence (#66) measures it on a wired LAN, where the path is symmetric, as the difference between a→b and b→a base delay.
+
+*Alternatives rejected:* reading the time after `sendmsg` returns, which adds the system call's own duration to an error that is already one-sided in the other direction and mixes the two; `SO_TIMESTAMP` on the sending side, which stamps receives only (R-0017).
+
+*Validated by:* derive unit tests on a macOS-shaped trace (#63): every a→b packet counts as `user`, and delay and loss are derived from it.
+
+### 9.3 Receive times
+
+*Problem:* Linux stamps arrivals in software at the driver in ns (`SOF_TIMESTAMPING_RX_SOFTWARE`); macOS offers `SO_TIMESTAMP` (wall clock, `struct timeval`, µs) and `SO_TIMESTAMP_MONOTONIC` (`mach_absolute_time` ticks), both taken at socket enqueue in `udp_input` (R-0017).
+
+*Constraints:* `rx` is declared in `<receiver>.real` (ptf-format.md, Raw tables) and cannot change domain; a kernel stamp beats a user-space one, which includes the receiver thread's wakeup.
+
+*Choice:* probe sockets enable `SO_TIMESTAMP`; `rx` = `tv_sec × 10⁹ + tv_usec × 10³` in `a.real`, `rx_src = kernel`. The kernel fills the stamp with `microtime` (Kernel.framework `sys/time.h`: `#define getmicrotime(a) microtime(a)`; XNU `kern_time.c`: `microtime` reads `clock_get_calendar_microtime`), the precise calendar clock, not a value cached at a tick. A datagram that arrives without the cmsg gets the user-space time after `recvmsg` and `rx_src = user`, as on Linux. `IP_RECVTOS`, `IP_RECVTTL`, `IPV6_RECVTCLASS` and `IPV6_RECVHOPLIMIT` fill `tos_rx` and `ttl_rx` as on Linux.
+
+*Resolution loss:* stamps are whole µs, truncated, so each b→a arrival time is 0–1 µs early (0.5 µs on average) against ns on Linux. That is below one 1500-byte packet time at 1 Gbit/s (12 µs) and far below Wi-Fi and scheduling noise, so 100 ms capacity bins, delay and loss are unaffected; the gaps of the fastest chirp packets (about 12 µs at 1.27 Gbit/s) carry up to ±1 µs. The stamp is also taken later than Linux's (after IP and UDP input rather than at the driver), which adds a near-constant few µs to b→a delays.
+
+*Alternatives rejected:* `SO_TIMESTAMP_MONOTONIC`, a finer stamp (41.67 ns) in `a.mono`, which `rx` cannot hold: it needs a new column in another domain that every consumer of arrival times would have to handle, for a gain that matters only at the top chirp rates. A later minor can add it if the macOS evidence (#66) shows the µs quantum matters. A user-space time after `recvmsg`, which includes the receiver's wakeup.
+
+*Validated by:* a `pt-sys` loopback test on macOS (#61) that every datagram carries the cmsg and that its time lies between a `CLOCK_REALTIME` read before the send and one after the receive.
+
+### 9.4 Sending and pacing
+
+*Problem:* macOS has no public `sendmmsg`/`recvmmsg` (R-0017), and it coalesces timers: it shifts a timer's expiry within a tolerance that depends on the thread's QoS class (R-0017). A laptop also idle-sleeps.
+
+*Constraints:* the pacer stays the only sender on each UDP socket and records every failed or skipped send (§4.1); STALL_NS (2 ms, §4.3) and the 200 µs control-queue drain stay; no shelling out; no new crate.
+
+*Choice:*
+- The pacer sends one `sendmsg` per datagram and the receiver reads one `recvmsg` per datagram; batching through the private `sendmsg_x`/`recvmsg_x` is deferred (#70). A send that fails is a `send_error {errno}` as on Linux, with `burned_id` null (`tx_ids: none`); there is no `send_partial`. `ENOBUFS` from a full interface output queue is therefore observed per datagram where the stack reports it; a datagram the interface's own queue management drops after the send returned is not (§9.6).
+- The pacer and receiver threads set `QOS_CLASS_USER_INTERACTIVE` (`pthread_set_qos_class_self_np`), the class with the least timer tolerance (R-0017).
+- The pacer sleeps with `mach_wait_until` until `SPIN_NS` before the next deadline and then spins on `mach_absolute_time`, still draining the control queue at least every 200 µs. `SPIN_NS` is a `pt-sys` platform constant: 200 µs on Linux (as in §1) and 500 µs on macOS, where a coalesced wakeup can be later. A wakeup late by more than STALL_NS is a stall, skipped and recorded (§4.3), never a burst.
+- For the whole session (from before P0 until the trace is written) the probe holds an IOKit power assertion of type `kIOPMAssertPreventUserIdleSystemSleep` named "pathtrace probe session" (`IOPMAssertionCreateWithName`, released with `IOPMAssertionRelease`), linked from `pt-sys` as the IOKit and CoreFoundation frameworks. It records `power_assertion {held, error}` once; a session continues without it. The assertion does not prevent sleep on lid close, the Apple menu or low battery (R-0017); such a sleep is a suspend (§4.3, §9.1).
+
+*Alternatives rejected:* spawning `caffeinate -i` (shelling out, and its lifetime is not the session's); no assertion, which lets an idle laptop sleep in the middle of a `deep` profile or a long `--track-secs`; a 200 µs spin on macOS, which a tolerance-shifted wakeup overshoots; spinning without sleeping, which holds a core for the whole session on battery.
+
+*Rationale:* at the 500 Mbit/s cap with 1500-byte packets the pacer has 24 µs per datagram, which one `sendmsg` per datagram is expected to fit; where it does not, the pacer falls behind visibly (`tx_user_lag`, `stall`) rather than silently. `SPIN_NS` trades CPU for accuracy only on the pacer thread.
+
+*Validated by:* the macOS evidence (#66): the p99 of `tx_user_lag` on an idle host stays below 50 µs and a `standard` session at the rate cap records no `stall {cause: "late"}`; otherwise `SPIN_NS` is raised by a design change.
+
+### 9.5 Path MTU and ICMP without an error queue
+
+*Problem:* on Linux the PMTU ladder sends with `IP_PMTUDISC_PROBE` (DF set, the route's cached PMTU ignored) and reads ICMP errors, including Packet Too Big, from the error queue (`icmp` events). macOS has `IP_DONTFRAG`/`IPV6_DONTFRAG` but no error queue (R-0017), so the initiator sees no ICMP error.
+
+*Constraints:* the ladder stays non-adaptive (§6); an unobservable fact is unknown, never "none happened" (REQ-PRB-033); the responder side keeps its Linux behaviour.
+
+*Choice:* macOS probe sockets set `IP_DONTFRAG` (IPv4) or `IPV6_DONTFRAG` (IPv6) to 1. A ladder size above the egress interface MTU is not scheduled (the ladder caps at that MTU, §6). A send rejected locally fails with `EMSGSIZE` and is a `send_error {errno: EMSGSIZE}` event, with no `tx` row, so it is never path loss; where XNU has lowered the route's MTU after an ICMP Packet Too Big, later sends of larger sizes fail the same way, and the event's size against `endpoint.iface.mtu` tells that case (a size at or below the interface MTU) from the local limit. The path MTU a→b is the largest ladder size the responder received (`mtu.ladder`), as on Linux. The initiator records no `icmp` or `local_error` events, and each of its sockets records `icmp_errors: false` in META (PTF 1.2; `true` on Linux, where `IP_RECVERR` is enabled). Since the absence of an ICMP error is then not evidence, the black-hole verdict for a direction whose sender recorded `icmp_errors: false` is unknown (`blackhole: null`, §9.10), while `path_mtu` stays known. The b→a direction is unchanged: the Linux responder reads its ICMP errors.
+
+*Alternatives rejected:* a raw ICMP socket to watch for Packet Too Big, which needs privileges; inferring black holes from silence alone, which would report every path whose ICMP errors the Mac cannot see as a black hole.
+
+*Validated by:* derive unit tests (#63): a trace whose sender has `icmp_errors: false` and loses the larger ladder sizes reports `path_mtu` and `blackhole: null`; a Linux trace keeps `blackhole: true`.
+
+### 9.6 Counters macOS cannot observe
+
+*Problem:* derivation separates host drops from path loss with per-socket receive drops (`SO_RXQ_OVFL`) and qdisc drops (§4.2). macOS has neither; it has a host-wide UDP counter `udps_fullsock` (datagrams not delivered because the receiving socket was full, read with sysctl `net.inet.udp.stats`) and no output-queue drop counter (`ifi_oqdrops` does not exist, R-0017).
+
+*Constraints:* REQ-PRB-033: a fact the platform cannot observe is recorded and derived as unknown, never as 0, so that derivation does not read it as "no loss"; a host-wide counter may be used only where its value can be attributed to the probe's sockets.
+
+| Fact | Linux | macOS initiator | Recorded as |
+|---|---|---|---|
+| Per-socket receive drops | `SO_RXQ_OVFL` → `rxq_drops` | none (#72) | `rxq_drops` null, socket `rxq_ovfl: false` |
+| Host-wide UDP socket-full drops | `netstack.udp_rcvbuf_errors` | `udps_fullsock` | `netstack.udp_fullsock` (PTF 1.2); the Linux columns null |
+| Softnet backlog drops | `/proc/net/softnet_stat` | none | `softnet_dropped`, `softnet_squeezed` null |
+| Egress qdisc and interface output-queue drops | `qdisc` table | none (no qdisc; the interface's queue management exposes no drop count) | no `qdisc` rows; META `endpoint.qdisc` and `txqueuelen` null |
+| Interface counters | `/proc/net/dev` → `ifstats` | `getifaddrs` `if_data` | `ifstats` (`rx_dropped` from `ifi_iqdrops`; `tx_dropped` null, the column declared nullable as PTF 1.2 allows) |
+| Wi-Fi link state | nl80211 → `wifi` | none (#68) | no `wifi` rows |
+| TCP state | `TCP_INFO` → `tcpinfo` | `TCP_CONNECTION_INFO` | `tcpinfo_darwin` (§9.7) |
+
+*Choice:* each unobservable value is null or absent, and the derived fields that would read it have status `unknown` with a `reason` and no counts:
+- `PATH.b_to_a.host_drops` (receiver a): with no `rxq_drops`, it falls back to the host-wide counter where that is conclusive. If the receiver's `udp_fullsock` did not increase over the session (last minus first within each `iface_change` segment, as for the qdisc), no UDP socket on the host was dropped into, so the probe's sockets dropped nothing: status `known`, `packets: 0`, method `hostdrop.host-fullsock/1`, `source: ["netstack"]`. If it increased, which socket dropped is unknown: status `unknown`, `reason: "host-wide counter rose"`, and `host_socket_drops` (the increase) as context. Without either counter: `unknown`, `reason: "no per-socket drop counts recorded"`. The 1.0 reason text ("no rxq_drops in this trace (PTF 1.0)") becomes this platform-neutral one.
+- `PATH.a_to_b.local_qdisc_drops` (sender a): no `qdisc` table, so status `unknown` with `reason: "no qdisc counters recorded"`. `udps_fullsock` is never used here, nor `ifi_oerrors`, which counts output errors, not queue drops.
+- Unknown values never enter an estimate as 0: the loss-based methods that exclude host drops (derivation.md, Host drops) exclude none when host drops are unknown, as for a PTF 1.0 trace, and the field says so.
+
+`trace info` shows the unknown status and its reason in place of counts (cli.md).
+
+*Alternatives rejected:* writing 0 for an unobservable counter, which derivation and readers cannot tell from "nothing dropped"; attributing every rise of `udps_fullsock` to the probe, which turns another application's drops into the path's host drops; leaving `udps_fullsock` out, which loses the one case (no rise) where it proves that nothing was dropped.
+
+*Validated by:* derive unit tests (#63) on macOS-shaped tables: no counter → `unknown`; a flat `udp_fullsock` → `known`, 0; a rising one → `unknown` with `host_socket_drops`; no `qdisc` table → `unknown`; and the Linux golden traces derive unchanged.
+
+### 9.7 TCP state
+
+*Problem:* `TCP_INFO` does not exist on macOS; `TCP_CONNECTION_INFO` returns `struct tcp_connection_info`, whose fields, units and layout differ (`tcpi_srtt` in ms, `tcpi_snd_cwnd` in bytes, R-0017). The `tcpinfo` columns mean Linux `struct tcp_info` fields.
+
+*Choice:* the tcp thread samples `TCP_CONNECTION_INFO` every 10 ms into a new table `tcpinfo_darwin` (PTF 1.2), never into `tcpinfo`. A trace has `tcpinfo[a]` or `tcpinfo_darwin[a]` depending on the initiator's platform; the responder's `tcpinfo[b]` is unchanged.
+
+*Alternatives rejected:* mapping Darwin fields onto `tcpinfo` columns of similar names, which gives a column a second meaning (forbidden by the compatibility contract) and silently mixes units.
+
+*Validated by:* a `pt-sys` loopback TCP test on macOS (#61) that `optlen` equals the struct size and `srtt` and `txbytes` are filled.
+
+### 9.8 Host identity
+
+META `endpoint` already has `os` (a display name such as "Ubuntu 24.04.1 LTS"), `kernel` (the kernel release) and `arch`. PTF 1.2 adds `os_family` (`linux` or `darwin`) and `os_version` (Linux: `VERSION_ID` from `/etc/os-release`; macOS: sysctl `kern.osproductversion`, e.g. `15.6`), so a consumer can branch on the platform without parsing `os`. On macOS `os` is "macOS " followed by `os_version`, `kernel` is sysctl `kern.osrelease` (the Darwin release, e.g. `24.6.0`), `cpu` is sysctl `machdep.cpu.brand_string`, and `clocksource` is absent.
+
+### 9.9 Overlay paths (both platforms)
+
+*Problem:* when the route to the peer leaves through a tunnel (Tailscale, WireGuard, another VPN), every packet the probe sends, of every class and transport, with every DSCP and ECN codepoint, is encapsulated into one UDP flow between the tunnel endpoints. The network between them then treats all classes alike and sees the tunnel's own header, so what PathTrace measures for per-transport treatment, port- or protocol-keyed policers, DSCP and ECN, and the MTU is the tunnel's behaviour, not the underlying network's. Delay, jitter, loss, capacity and reorder stay end-to-end measurements of the path the traffic takes, overlay included. This applies to Linux endpoints too (`tailscale0`, `wg0`).
+
+*Constraints:* the central rule: a trace records path behaviour, and an overlay is part of the path the user's traffic takes, so the probe does not refuse it; no shelling out (`tailscale status`, `wg`); additive format changes only; the verdicts must not be dropped, only qualified.
+
+*Choice:*
+- **Detection** (context sampler, at start and at every `iface_change`, §4.4): the egress interface toward the peer is a tunnel when, on Linux, its rtnetlink link kind (`IFLA_INFO_KIND`) is `wireguard`, `tun`, `ipip`, `sit`, `gre`, `ip6tnl`, `vti` or `xfrm`, and on macOS its name starts with `utun`, `ipsec`, `tun` or `tap` (NetworkExtension VPNs, Tailscale and the WireGuard app included, use `utun`). The provider hint is `tailscale` when the local address on that interface lies in 100.64.0.0/10 or fd7a:115c:a1e0::/48 (Tailscale's address ranges), else null.
+- **Record:** META `endpoint.iface.tunnel {kind, provider}` (PTF 1.2; absent when the interface is not a tunnel), with `kind` the link kind on Linux and the name prefix on macOS. `endpoint.iface.mtu` is already the tunnel's MTU. An `iface_change` event carries the same `tunnel` key inside its `iface` detail. The responder records its own egress interface the same way.
+- **Derive:** a new top-level field `PATH.overlay` (method `overlay.egress-iface/1`): `overlay` (true when either endpoint's egress toward the peer was a tunnel at any time in the session), `endpoints` (which), `kind`, `provider`, `mtu` (the smallest tunnel MTU) and `overlay_ns` (time under a tunnel). When `overlay` is true, the fields whose verdicts describe the tunnel carry `overlay_limited: true`: every PLCY class entry (per-transport treatment), and per direction `policer`, `mtu`, `ecn` and `dscp`. `capacity`, `base_delay`, `jitter`, `loss`, `reorder` and `queue` are not flagged. `trace info` shows `PATH.overlay` (cli.md), and `doctor` warns before a session (cli.md).
+
+*Alternatives rejected:* refusing to probe through a tunnel, which drops a path users really use; probing the underlay instead, which needs the responder's public address and bypasses the user's routing; guessing an overlay from the traffic (TTL, MTU, delay), which is unreliable where the interface states it directly; dropping the tunnel-limited verdicts, which loses what they do say about the tunnel.
+
+*Rationale:* the tunnel is a fact of the endpoint, observable without privileges, and the qualification is a key added to fields whose values do not change, so traces of non-overlay paths derive exactly as before.
+
+*Validated by:* `context::tests` (#63): classification of Linux link kinds, macOS interface names and Tailscale address ranges; derive unit tests: an overlay trace flags the five verdict groups and no others, and a non-overlay trace has `overlay: false`; the macOS evidence (#66) includes a session over Tailscale.
+
+### 9.10 Derivation changes
+
+These rules take effect with the implementation (#63), which moves them into derivation.md's method tables:
+
+| Method | Change |
+|---|---|
+| `policy.matrix/2` | An echo's transmit time follows the direction rule (SND, else SCHED, else user, §9.2). A UDP class is reachable when an echo arrived, whether or not its transmit time is known (`/1` read only `tx_sched`, so a trace without TX stamps reported every UDP class unreachable) |
+| `mtu.ladder/2` | `blackhole` is null when the direction's sender recorded `icmp_errors: false` (§9.5); otherwise as `/1` |
+| `hostdrop.host-fullsock/1` | New: host drops at a receiver without `rxq_drops`, from `netstack.udp_fullsock` (§9.6) |
+| `hostdrop.rxq-gap/1`, `qdisc.drop-count/2` | Unchanged results; an `unknown` status carries a `reason` (§9.6) |
+| `overlay.egress-iface/1` | New: `PATH.overlay` and the `overlay_limited` key (§9.9) |
