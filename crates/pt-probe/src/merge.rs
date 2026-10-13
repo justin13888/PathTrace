@@ -301,6 +301,9 @@ impl MonoToReal {
 /// Slack of the re-anchoring window (probe.md §4.1).
 const REANCHOR_SLACK_NS: i64 = 1_000;
 
+/// Longest run of failures whose offsets are chosen jointly (probe.md §4.1).
+const JOINT_MAX: usize = 8;
+
 /// How `merge` re-anchored one endpoint's predicted transmit ids (probe.md §4.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reanchor {
@@ -488,6 +491,11 @@ fn tx_ids(log: &Log) -> TxIds {
             {
                 g += 1;
             }
+            // Longer runs come from outages where every send fails before taking an id; the
+            // joint search grows with the square of the run, so they are scored one at a time.
+            if g - k > JOINT_MAX {
+                g = k + 1;
+            }
             let m = g - k;
             // Each failure's candidate positions; the rows scored run to the next failure.
             let span: Vec<(usize, usize)> = (k..g)
@@ -501,6 +509,8 @@ fn tx_ids(log: &Log) -> TxIds {
                 .iter()
                 .map(|x| x.1)
                 .fold(regions.get(g).map_or(n, |x| x.0), usize::max);
+            // Past the last candidate position every failure is decided.
+            let h = span.iter().map(|x| x.1).max().unwrap_or(a);
             // best[j][c + m]: the best way to have decided the run's first j failures with a
             // total offset change c, sweeping the rows in order: (rows that fit, failures that
             // changed the offset, last decision in `dec`). Ties keep the earlier.
@@ -519,7 +529,7 @@ fn tx_ids(log: &Log) -> TxIds {
                 }
                 better
             };
-            for i in a..=e {
+            for i in a..=h {
                 for j in 0..m {
                     for ci in 0..w {
                         let Some(p) = best[j][ci] else {
@@ -548,6 +558,12 @@ fn tx_ids(log: &Log) -> TxIds {
                             p.0 += usize::from(fits(i, x.0 + off + c));
                         }
                     }
+                }
+            }
+            for (ci, slot) in best[m].iter_mut().enumerate() {
+                if let Some(p) = slot {
+                    let c = ci as i64 - m as i64;
+                    p.0 += (h + 1..e).filter(|&i| fits(i, r[i].0 + off + c)).count();
                 }
             }
             // On a tie the total change closest to keeping the offset wins, −1 before +1.
@@ -1837,6 +1853,69 @@ mod tests {
         );
         assert_eq!(tx_ids(&log).steps[&0], vec![(3, 1), (4, 2)]);
         assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn three_unrecorded_burns_in_one_call_are_scored_jointly() {
+        // Two datagrams in call 0, five in call 1, two in call 2. In call 1 three datagrams fail
+        // with no burn recorded and each consumes an id (3, 5 and 7).
+        let user = |c: i64| 10 * MS + c * MS;
+        let calls = [0, 0, 1, 1, 1, 1, 1, 2, 2];
+        let rows: Vec<(i64, i64)> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (i as i64, user(c)))
+            .collect();
+        let truth = [0, 1, 2, 4, 6, 8, 9, 10, 11];
+        let stamps: Vec<(i64, i64)> = truth
+            .iter()
+            .zip(calls)
+            .enumerate()
+            .map(|(k, (&i, c))| (i, user(c) + R + (5 + k as i64) * US))
+            .collect();
+        let log = timed(
+            &rows,
+            &stamps,
+            (0..3)
+                .map(|k| {
+                    failure(
+                        "send_error",
+                        user(1) + (20 + 10 * k) * US,
+                        None,
+                        None,
+                        "predicted",
+                    )
+                })
+                .collect(),
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                truth.to_vec(),
+                Reanchor {
+                    anchors: 3,
+                    rows: 6
+                }
+            )
+        );
+        assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn an_outage_of_failures_is_scored_one_at_a_time() {
+        // One datagram per call, 1 ms apart. After call 1, a thousand sends fail before taking
+        // an id (as ENETUNREACH does), all placed in call 1; thousands of rows follow. Scored
+        // jointly, the run would cost rows × failures²; one at a time it keeps the logged ids.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows: Vec<(i64, i64)> = (0..5_000).map(|c| (c, user(c))).collect();
+        let stamps: Vec<(i64, i64)> = rows.iter().map(|r| (r.0, r.1 + R + 5 * US)).collect();
+        let events = (0..1_000)
+            .map(|k| failure("send_error", user(1) + 10 * US + k, None, None, "predicted"))
+            .collect();
+        let log = timed(&rows, &stamps, events);
+        let (ids, check) = corrected(&log);
+        assert_eq!(check, Reanchor::default());
+        assert!(ids.iter().copied().eq(0..5_000));
     }
 
     #[test]
