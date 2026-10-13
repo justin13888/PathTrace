@@ -65,9 +65,11 @@ macOS `SOL_SOCKET` is `0xffff`, `SO_BROADCAST 0x0020`, `SO_SNDBUF 0x1001`. Linux
 `getsockopt(SOL_SOCKET, SO_BROADCAST)` then reads 32: a Linux option number passed through enables broadcast.
 
 ## Implications for PTF / probe
-- TX times on macOS are user-space stamps next to the send call; RX times are kernel stamps in
-  `CLOCK_UPTIME_RAW`. Both are declared per column as distinct timestamp sources and clock domains; clock pairs
-  relate them to `CLOCK_REALTIME`. PTF already represents this (ptf-format.md §6), so no format change.
+- TX times on macOS are user-space stamps next to the send call; RX times are kernel stamps taken at socket
+  enqueue (`SO_TIMESTAMP` wall clock, or `SO_TIMESTAMP_MONOTONIC` in `CLOCK_UPTIME_RAW`). PTF already keeps the
+  user-space TX time (`tx_intended`, `tx_user_lag`) beside nullable kernel TX stamps (`tx_sched`), records the RX
+  stamp source per packet (`rx_src`) and declares each time column's clock domain (ptf-format.md §6), so the
+  per-packet timestamp columns need no format change.
 - Not observable on macOS, so recorded as unknown, never zero: kernel TX stamps, error-queue PMTU and send-error
   reports, per-socket receive drops (only host-wide `udps_fullsock`), egress qdisc and output-queue drops.
 - `pt-sys` must use the platform's own constants (from `libc`), never Linux numbers, behind `cfg(target_os)`.
