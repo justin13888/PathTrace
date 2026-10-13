@@ -312,7 +312,7 @@ ADR 0014 lets the initiator roles run on macOS 15 or newer (aarch64) against a L
 
 *Alternatives rejected:* writing 0 for an unobservable counter, which derivation and readers cannot tell from "nothing dropped"; attributing every rise of `udps_fullsock` to the probe, which turns another application's drops into the path's host drops; leaving `udps_fullsock` out, which loses the one case (no rise) where it proves that nothing was dropped.
 
-*Validated by:* derive unit tests (#63) on macOS-shaped tables: no counter → `unknown`; a flat `udp_fullsock` → `known`, 0; one that rises only across an `iface_change` → `unknown`; a rising one → `unknown` with `host_socket_drops`; no `qdisc` table → `unknown`; and the Linux golden traces derive unchanged.
+*Validated by:* derive unit tests (#63) on macOS-shaped tables: no counter → `unknown`; a flat `udp_fullsock` → `known`, 0; one that rises only across an `iface_change` → `unknown`; one that decreases between consecutive rows → `unknown` with `reason: "host-wide counter decreased"`; a rising one → `unknown` with `host_socket_drops`; no `qdisc` table → `unknown`; and the Linux golden traces derive unchanged.
 
 ### 9.7 TCP state
 
