@@ -301,6 +301,9 @@ impl MonoToReal {
 /// Slack of the re-anchoring window (probe.md §4.1).
 const REANCHOR_SLACK_NS: i64 = 1_000;
 
+/// Longest run of failures whose offsets are chosen jointly (probe.md §4.1).
+const JOINT_MAX: usize = 8;
+
 /// How `merge` re-anchored one endpoint's predicted transmit ids (probe.md §4.1).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Reanchor {
@@ -346,7 +349,8 @@ struct Failure {
 /// Re-anchor `log`'s transmit ids (probe.md §4.1): per `predicted` socket, at each recorded
 /// send failure, the id offset (−1, 0 or +1 relative to the current one) whose rows up to the
 /// next failure join the most SCHED stamps inside their call's window. A non-zero offset must
-/// score strictly higher than the current one.
+/// score strictly higher than the current one. Failures that can fall inside one call are
+/// scored jointly: their offsets are chosen together over the rows up to the next failure.
 fn tx_ids(log: &Log) -> TxIds {
     let empty = Tab::default();
     let tx = log.tables.get("tx").unwrap_or(&empty);
@@ -475,44 +479,134 @@ fn tx_ids(log: &Log) -> TxIds {
         let mut off = 0i64;
         let mut floor = 0usize;
         let mut steps = Vec::new();
-        for (k, f) in fs.iter().enumerate() {
-            if let Some(b) = f.burned {
-                out.burned.insert((s, b + off));
+        let mut k = 0;
+        while k < fs.len() {
+            // A run of failures scored jointly (issue #52): while a failure without a recorded
+            // id has a later one whose position can lie inside its call, scoring it alone would
+            // end its rows inside that call, where every stamp fits every row.
+            let mut g = k + 1;
+            while g < fs.len()
+                && g - k <= JOINT_MAX
+                && regions[g - 1].0 < regions[g - 1].1
+                && regions[g].0 < regions[g - 1].1
+            {
+                g += 1;
             }
-            if let Some(u) = f.unburned {
-                out.burned.remove(&(s, u + off));
+            // Longer runs come from outages where every send fails before taking an id; the
+            // joint search grows with the square of the run, so a failure that would start one is
+            // scored alone (the scan stops one past the bound to stay linear in the outage).
+            if g - k > JOINT_MAX {
+                g = k + 1;
             }
-            let a = regions[k].0.max(floor);
-            let b = regions[k].1.max(a);
-            let e = regions.get(k + 1).map_or(n, |x| x.0).max(b);
-            // prefix[d][i]: rows a..a+i that fit with offset off+d.
-            let prefix = |d: i64| -> Vec<usize> {
-                let mut p = vec![0; e - a + 1];
-                for i in a..e {
-                    p[i - a + 1] = p[i - a] + usize::from(fits(i, r[i].0 + off + d));
+            let m = g - k;
+            // Each failure's candidate positions; the rows scored run to the next failure.
+            let span: Vec<(usize, usize)> = (k..g)
+                .map(|j| {
+                    let a = regions[j].0.max(floor);
+                    (a, regions[j].1.max(a))
+                })
+                .collect();
+            let a = span.iter().map(|x| x.0).min().unwrap_or(floor);
+            let e = span
+                .iter()
+                .map(|x| x.1)
+                .fold(regions.get(g).map_or(n, |x| x.0), usize::max);
+            // Past the last candidate position every failure is decided.
+            let h = span.iter().map(|x| x.1).max().unwrap_or(a);
+            // best[j][c + m]: the best way to have decided the run's first j failures with a
+            // total offset change c, sweeping the rows in order: (rows that fit, failures that
+            // changed the offset, last decision in `dec`). Ties keep the earlier.
+            type Path = (usize, usize, usize);
+            // Decisions: (previous decision or usize::MAX, change, position).
+            let mut dec: Vec<(usize, i64, usize)> = Vec::new();
+            let w = 2 * m + 1;
+            let mut best: Vec<Vec<Option<Path>>> = vec![vec![None; w]; m + 1];
+            best[0][m] = Some((0, 0, usize::MAX));
+            let relax = |slot: &mut Option<Path>, cand: Path| -> bool {
+                let better = slot.is_none_or(|o| {
+                    (cand.0, std::cmp::Reverse(cand.1)) > (o.0, std::cmp::Reverse(o.1))
+                });
+                if better {
+                    *slot = Some(cand);
                 }
-                p
+                better
             };
-            let keep = prefix(0);
-            let mut best = (keep[e - a], 0i64, a);
-            for d in [-1, 1] {
-                let p = prefix(d);
-                for sp in a..=b {
-                    let score = keep[sp - a] + p[e - a] - p[sp - a];
-                    if score > best.0 {
-                        best = (score, d, sp);
+            for i in a..=h {
+                for j in 0..m {
+                    for ci in 0..w {
+                        let Some(p) = best[j][ci] else {
+                            continue;
+                        };
+                        for d in [0i64, -1, 1] {
+                            if d != 0 && !(span[j].0..=span[j].1).contains(&i) {
+                                continue;
+                            }
+                            let Some(cj) = ci.checked_add_signed(d as isize).filter(|&c| c < w)
+                            else {
+                                continue;
+                            };
+                            let q = (p.0, p.1 + usize::from(d != 0), dec.len());
+                            let slot = &mut best[j + 1][cj];
+                            if relax(slot, q) {
+                                dec.push((p.2, d, i));
+                            }
+                        }
+                    }
+                }
+                if let Some(x) = r.get(i).filter(|_| i < e) {
+                    for (ci, row) in best.iter_mut().flatten().enumerate() {
+                        if let Some(p) = row {
+                            let c = (ci % w) as i64 - m as i64;
+                            p.0 += usize::from(fits(i, x.0 + off + c));
+                        }
                     }
                 }
             }
-            // Only an anchor bounds later candidates (steps stay in id order). A failure that
-            // moved nothing does not: a burn's region lies after the row that reuses its id once
-            // the burn is undone, and that row belongs to the undo.
-            if best.1 != 0 {
-                off += best.1;
-                floor = best.2;
-                steps.push((r.get(best.2).map_or(i64::MAX, |x| x.0), off));
-                out.check.anchors += 1;
+            for (ci, slot) in best[m].iter_mut().enumerate() {
+                if let Some(p) = slot {
+                    let c = ci as i64 - m as i64;
+                    p.0 += (h + 1..e).filter(|&i| fits(i, r[i].0 + off + c)).count();
+                }
             }
+            // On a tie the total change closest to keeping the offset wins, −1 before +1.
+            let mut order: Vec<usize> = (0..w).collect();
+            order.sort_by_key(|&ci| {
+                let c = ci as i64 - m as i64;
+                (c.abs(), c)
+            });
+            let mut chosen: Option<Path> = None;
+            for ci in order {
+                if let Some(p) = best[m][ci].take() {
+                    relax(&mut chosen, p);
+                }
+            }
+            let mut at = chosen.map_or(usize::MAX, |p| p.2);
+            let mut chosen = vec![(0i64, a); m];
+            for c in chosen.iter_mut().rev() {
+                let Some(&(prev, d, i)) = dec.get(at) else {
+                    break;
+                };
+                *c = (d, i);
+                at = prev;
+            }
+            for (f, (d, sp)) in fs[k..g].iter().zip(chosen) {
+                if let Some(b) = f.burned {
+                    out.burned.insert((s, b + off));
+                }
+                if let Some(u) = f.unburned {
+                    out.burned.remove(&(s, u + off));
+                }
+                // Only an anchor bounds later candidates (steps stay in id order). A failure that
+                // moved nothing does not: a burn's region lies after the row that reuses its id
+                // once the burn is undone, and that row belongs to the undo.
+                if d != 0 {
+                    off += d;
+                    floor = sp;
+                    steps.push((r.get(sp).map_or(i64::MAX, |x| x.0), off));
+                    out.check.anchors += 1;
+                }
+            }
+            k = g;
         }
         if !steps.is_empty() {
             out.steps.insert(s, steps);
@@ -1710,6 +1804,120 @@ mod tests {
         );
         assert_eq!(tx_ids(&log).steps[&0], vec![(3, 1), (4, 2)]);
         assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn two_unrecorded_burns_in_a_four_datagram_call_are_scored_jointly() {
+        // Two datagrams in call 0, four in call 1, two in call 2. In call 1 two datagrams fail
+        // with no burn recorded and each consumes an id (3 and 5), so the call's rows took ids
+        // 2, 4, 6, 7. Both failures fall in call 1. Scored alone over that call's rows, where
+        // every stamp fits every row, the first failure's −1 step at logged id 3 (joining stamp
+        // 2 twice) scores as high as the true +1 and was taken; scored jointly up to call 2,
+        // only the kernel's ids join every stamp.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows = [
+            (0, user(0)),
+            (1, user(0)),
+            (2, user(1)),
+            (3, user(1)),
+            (4, user(1)),
+            (5, user(1)),
+            (6, user(2)),
+            (7, user(2)),
+        ];
+        let stamps = [
+            (0, user(0) + R + 5 * US),
+            (1, user(0) + R + 6 * US),
+            (2, user(1) + R + 5 * US),
+            (4, user(1) + R + 6 * US),
+            (6, user(1) + R + 7 * US),
+            (7, user(1) + R + 8 * US),
+            (8, user(2) + R + 5 * US),
+            (9, user(2) + R + 6 * US),
+        ];
+        let log = timed(
+            &rows,
+            &stamps,
+            vec![
+                failure("send_error", user(1) + 20 * US, None, None, "predicted"),
+                failure("send_error", user(1) + 30 * US, None, None, "predicted"),
+            ],
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                vec![0, 1, 2, 4, 6, 7, 8, 9],
+                Reanchor {
+                    anchors: 2,
+                    rows: 5
+                }
+            )
+        );
+        assert_eq!(tx_ids(&log).steps[&0], vec![(3, 1), (4, 2)]);
+        assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn three_unrecorded_burns_in_one_call_are_scored_jointly() {
+        // Two datagrams in call 0, five in call 1, two in call 2. In call 1 three datagrams fail
+        // with no burn recorded and each consumes an id (3, 5 and 7).
+        let user = |c: i64| 10 * MS + c * MS;
+        let calls = [0, 0, 1, 1, 1, 1, 1, 2, 2];
+        let rows: Vec<(i64, i64)> = calls
+            .iter()
+            .enumerate()
+            .map(|(i, &c)| (i as i64, user(c)))
+            .collect();
+        let truth = [0, 1, 2, 4, 6, 8, 9, 10, 11];
+        let stamps: Vec<(i64, i64)> = truth
+            .iter()
+            .zip(calls)
+            .enumerate()
+            .map(|(k, (&i, c))| (i, user(c) + R + (5 + k as i64) * US))
+            .collect();
+        let log = timed(
+            &rows,
+            &stamps,
+            (0..3)
+                .map(|k| {
+                    failure(
+                        "send_error",
+                        user(1) + (20 + 10 * k) * US,
+                        None,
+                        None,
+                        "predicted",
+                    )
+                })
+                .collect(),
+        );
+        assert_eq!(
+            corrected(&log),
+            (
+                truth.to_vec(),
+                Reanchor {
+                    anchors: 3,
+                    rows: 6
+                }
+            )
+        );
+        assert_eq!(id_check(&log, &tx_ids(&log)), IdCheck::default());
+    }
+
+    #[test]
+    fn an_outage_of_failures_is_scored_one_at_a_time() {
+        // One datagram per call, 1 ms apart. After call 1, a thousand sends fail before taking
+        // an id (as ENETUNREACH does), all placed in call 1; thousands of rows follow. Scored
+        // jointly, the run would cost rows × failures²; one at a time it keeps the logged ids.
+        let user = |c: i64| 10 * MS + c * MS;
+        let rows: Vec<(i64, i64)> = (0..5_000).map(|c| (c, user(c))).collect();
+        let stamps: Vec<(i64, i64)> = rows.iter().map(|r| (r.0, r.1 + R + 5 * US)).collect();
+        let events = (0..1_000)
+            .map(|k| failure("send_error", user(1) + 10 * US + k, None, None, "predicted"))
+            .collect();
+        let log = timed(&rows, &stamps, events);
+        let (ids, check) = corrected(&log);
+        assert_eq!(check, Reanchor::default());
+        assert!(ids.iter().copied().eq(0..5_000));
     }
 
     #[test]
