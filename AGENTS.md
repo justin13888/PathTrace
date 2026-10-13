@@ -18,7 +18,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 ## Crate map (details: crates/README.md)
 - pt-format: PTF read/write/validate, JSONL twin, import/export. forbid(unsafe).
 - pt-wire: probe header + control messages. forbid(unsafe).
-- pt-sys: Linux and macOS syscalls, one backend per OS (sockets, timestamping, mmsg, cmsg, TCP_INFO, clocks, netlink). ONLY crate allowing unsafe; every unsafe block needs `// SAFETY:`.
+- pt-sys: Linux and macOS syscalls, one backend per OS (sockets, timestamping, cmsg, clocks; on Linux mmsg, TCP_INFO, netlink; on macOS TCP_CONNECTION_INFO). ONLY crate allowing unsafe; every unsafe block needs `// SAFETY:`.
 - pt-probe: session, phases, responder, obslog. No async runtime; threads only.
 - pt-derive: raw -> PATH/SERS/PLCY/VALD model; netem/Mahimahi export, Mahimahi import. Pure (no I/O); methods versioned `name/N`.
 - pathtrace: CLI.

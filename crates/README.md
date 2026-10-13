@@ -6,7 +6,7 @@ Rust workspace members. Each crate owns one responsibility; dependencies flow do
 |---|---|---|---|
 | `pt-format` | Read, write, validate PTF files; JSON Lines twin; Mahimahi/netem import-export | forbidden | Fuzzed. No I/O beyond `Read`/`Write` |
 | `pt-wire` | Probe packet header and control-message encodings | forbidden | Fuzzed. Pure |
-| `pt-sys` | Linux and macOS syscalls, one backend per OS behind `cfg(target_os)`: sockets, timestamps (`SO_TIMESTAMPING` on Linux), `recvmmsg`/`sendmmsg`, cmsgs, `TCP_INFO`, clocks, netlink; exposes capabilities so no other crate needs `cfg` (ADR 0014) | **allowed** | Every `unsafe` block carries a `// SAFETY:` comment (clippy `undocumented_unsafe_blocks = deny`) |
+| `pt-sys` | Linux and macOS syscalls, one backend per OS behind `cfg(target_os)`: sockets, timestamps (`SO_TIMESTAMPING` on Linux), `recvmmsg`/`sendmmsg` on Linux, cmsgs, `TCP_INFO` on Linux (`TCP_CONNECTION_INFO` on macOS), clocks, netlink on Linux; exposes capabilities so no other crate needs `cfg` (ADR 0014) | **allowed** | Every `unsafe` block carries a `// SAFETY:` comment (clippy `undocumented_unsafe_blocks = deny`) |
 | `pt-probe` | Session, measurement phases, responder, observation logging | forbidden | Threads only; no async runtime |
 | `pt-derive` | Observations → path model | forbidden | Pure functions of the trace's raw layer |
 | `pathtrace` | CLI binary | forbidden | `clap`; thin layer over the crates above |
