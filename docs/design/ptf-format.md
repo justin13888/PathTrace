@@ -1,10 +1,10 @@
 # PTF: Path Trace Format, version 1.0
 
-- requirements: REQ-FMT-001 … REQ-FMT-022
-- adr: 0008, 0009, 0011
-- research: R-0001, R-0002, R-0005, R-0007
+- requirements: REQ-FMT-001 … REQ-FMT-022, REQ-PRB-033
+- adr: 0008, 0009, 0011, 0014
+- research: R-0001, R-0002, R-0005, R-0007, R-0017
 
-This document is the normative specification of PTF 1.x (currently 1.1). An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+This document is the normative specification of PTF 1.x (currently 1.1; 1.2 is specified below and written once #62 implements it). An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 ## Versions
 
@@ -12,10 +12,13 @@ This document is the normative specification of PTF 1.x (currently 1.1). An inde
 |---|---|---|
 | 1.0 | pathtrace 1.0.0 | Initial format |
 | 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and per endpoint `txts_unmatched_<ep>`, `tx_unstamped_<ep>`, `txts_unexplained_<ep>`, `tx_reanchors_<ep>`, `tx_reanchored_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
+| 1.2 | pathtrace 1.2.0 (planned, #62) | For the macOS initiator and overlay paths (ADR 0014, probe.md §9): META `endpoint.os_family`, `endpoint.os_version`, `endpoint.iface.tunnel`, `endpoint.sockets[].icmp_errors`, and a `source` key in each clock domain (§6); raw table `tcpinfo_darwin` (OBSV); raw column `udp_fullsock` (`netstack`); `ifstats` counters MAY be declared nullable; derived `PATH.overlay` and the `overlay_limited` key on the verdicts it qualifies; new EVNT type `power_assertion` |
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
-Golden files: `conformance/v1.0` holds the 1.0 corpus and `conformance/v1.1` the 1.1 corpus, both generated with `cargo xtask corpus`; the 1.1 corpus's `valid-1-1-additions*.ptf` carry the 1.1 columns, tables and META/FLOW keys of the table above (EVNT types are open strings and need no golden file), and `tools/ptf-py` reads every directory (EXP-0003-r4).
+Golden files: `conformance/v1.0` holds the 1.0 corpus and `conformance/v1.1` the 1.1 corpus, both generated with `cargo xtask corpus`; the 1.1 corpus's `valid-1-1-additions*.ptf` carry the 1.1 columns, tables and META/FLOW keys of the table above (EVNT types are open strings and need no golden file), and `tools/ptf-py` reads every directory (EXP-0003-r4). The 1.2 additions get a new `conformance/v1.2` directory with the implementation (#62); the existing directories never change.
+
+The 1.2 additions are all non-critical: a 1.1 reader skips the unknown table, column and keys of a 1.2 file and reads the rest, and a 1.2 reader reads a file without them as one recorded before they existed. No existing column or key changes meaning; in particular `tcpinfo` keeps meaning Linux `struct tcp_info` and the clock domain kinds keep their names.
 
 The header minor is the highest minor whose additions the file may contain, in any layer. Re-deriving (`derive`, `merge`, `trace redact`) a file of an older minor writes the derived layer with the current tool and raises the header minor to the tool's (a 1.0 file becomes 1.1), because the new derived sections may use 1.1 additions; its raw layer keeps what it had, so a 1.1 raw column or table can still be absent from such a file. The minor of the tool that captured the raw layer is not recorded separately: `META.tool` (or `captured_by`) names the capturing pathtrace version, which maps to the minor in the table above.
 
@@ -231,6 +234,8 @@ domain := { "kind": "monotonic_raw" / "realtime" / "tai" / "trace", ? "endpoint"
 - Raw time columns hold the domain's own nanosecond value (for `realtime`, nanoseconds since the Unix epoch).
 - The derived `trace` domain is defined by PATH's clock model: nanoseconds since session start on the initiator's monotonic clock (`a.mono` minus `META.session.t0_a_mono`).
 - Realtime values reveal when a capture happened, so `realtime` domains are `pii: "quasi"` (§9).
+- `monotonic_raw` is a monotonic clock that is not slewed or stepped by time synchronisation and does not advance while the host is suspended; `realtime` is the host's wall clock (slewed and stepped). Derivation relies on these properties, not on a particular OS clock.
+- 1.2: a domain MAY carry `source`, the OS clock it was read from: `CLOCK_MONOTONIC_RAW` and `CLOCK_REALTIME` on Linux, `mach_absolute_time` and `CLOCK_REALTIME` on macOS (probe.md §9.1). A domain without `source` (1.0, 1.1) was read from the Linux clocks.
 
 ## 7. Canonical writer
 
@@ -288,13 +293,14 @@ Every table has `attrs.dir` (`a_to_b` / `b_to_a`) or `attrs.endpoint` (`a` / `b`
 | `unmatched` (OBSV) | dir | arrivals with no matching transmission (receiver `rx` row columns) |
 | `echo` (OBSV) | endpoint | arrivals at an endpoint of probes it sent itself (class/NAT echoes): receiver `rx` row columns |
 | `tcpinfo` (OBSV) | endpoint | flow, t (`<ep>.mono`), optlen (bytes the kernel returned), then one nullable u64 per `struct tcp_info` field up to kernel 6.7 (null when the kernel struct is shorter) |
+| `tcpinfo_darwin` (OBSV, 1.2) | endpoint | macOS `TCP_CONNECTION_INFO` samples (probe.md §9.7): flow, t (`<ep>.mono`), optlen (bytes the kernel returned), then one nullable u64 per `struct tcp_connection_info` field, named without the `tcpi_` prefix, in struct order: state (enum), snd_wscale, rcv_wscale, options (bitmask `TCPCI_OPT_*`), flags (bitmask `TCPCI_FLAG_*`), rto (ms), maxseg (B), snd_ssthresh (B), snd_cwnd (B), snd_wnd (B), snd_sbbytes (B), rcv_wnd (B), rttcur (ms), srtt (ms), rttvar (as the kernel reports it, no unit declared), tfo (the 32-bit TFO flag word as is), txpackets, txbytes, txretransmitbytes, rxpackets, rxbytes, rxoutoforderbytes, txretransmitpackets (cumulative counts and B). Never mixed with `tcpinfo` |
 | `app` (OBSV) | endpoint | flow, t (`<ep>.mono`), event enum[connect_start, connected, tls_done, first_byte, progress, done, req_start, resp_done, error], bytes, value (i64) |
 | `bad` (OBSV) | endpoint | t, bad_tag, unknown (wrong session), truncated: per-second counters |
 | `txts_unmatched` (OBSV, 1.1) | endpoint | kernel TX stamps the join does not use: those that match no `tx` row (echoes, failed sends, mispredicted ids) and every repeat of a (sock, id, kind) after its first: sock, id, kind enum[sched, snd], real (`<ep>.real`) |
 | `pairs` (CLOK) | endpoint | mono (`<ep>.mono`), real (`<ep>.real`), width ns: min-width clock sandwich; boot u64? delta2 ns (CLOCK_BOOTTIME, read inside the sandwich; 1.1) |
 | `exchange` (CLOK) | endpoint=a | t1, t4 (`a.mono`), t2, t3 (`b.mono`); req_nonce, resp_nonce u64? delta (Noise nonces of the request and response datagrams, i.e. their seq as flows 250/251; 1.1) |
-| `ifstats` (CTXS) | endpoint | t, rx/tx bytes, packets, dropped, errors (cumulative counters) |
-| `netstack` (CTXS, 1.1) | endpoint | t; udp_in_errors, udp_rcvbuf_errors, udp_sndbuf_errors, udp_in_csum_errors, udp6_in_errors, udp6_rcvbuf_errors, udp6_sndbuf_errors, udp6_in_csum_errors, softnet_dropped, softnet_squeezed: u64? delta count, cumulative, from `/proc/net/snmp`, `/proc/net/snmp6`, `/proc/net/softnet_stat` (null = not readable) |
+| `ifstats` (CTXS) | endpoint | t, rx/tx bytes, packets, dropped, errors (cumulative counters). 1.2: a counter the platform does not provide (macOS `tx_dropped`) is declared nullable and null; readers already take nullability from the column (§5) |
+| `netstack` (CTXS, 1.1) | endpoint | t; udp_in_errors, udp_rcvbuf_errors, udp_sndbuf_errors, udp_in_csum_errors, udp6_in_errors, udp6_rcvbuf_errors, udp6_sndbuf_errors, udp6_in_csum_errors, softnet_dropped, softnet_squeezed: u64? delta count, cumulative, from `/proc/net/snmp`, `/proc/net/snmp6`, `/proc/net/softnet_stat` (null = not readable); 1.2: udp_fullsock u64? delta count, cumulative, macOS `udps_fullsock` from sysctl `net.inet.udp.stats` (host-wide datagrams not delivered because the receiving socket was full; null on Linux; on macOS the Linux columns are null) |
 | `qdisc` (CTXS, 1.1) | endpoint | t; bytes, packets, drops, requeues, overlimits u64? delta (cumulative); qlen, backlog (B) u64? rle: root qdisc of the egress interface (null = no root qdisc reported) |
 | `wifi` (CTXS) | endpoint=a | t, freq MHz, width enum (nl80211), signal dBm, beacon_signal dBm, tx/rx bitrate (100 kbit/s), tx_retries, tx_failed, bss (hash, pii quasi): all nullable |
 
@@ -303,6 +309,17 @@ FLOW lists every flow (kind, sender, socket, class, pattern, TOS policy, QUIC sh
 Observation logs (`META.kind = "obslog"`) carry the per-endpoint precursors: `tx` (sock, flow, seq, size, phase, train, train_idx, tos_tx, id = OPT_ID, tx_intended, tx_user_lag), `txts` (sock, id, kind enum[sched, snd], real) and `rx` (sock, flow, seq, size, rx, rx_src, tos_rx, ttl_rx, src, rxq_drops). Any non-META section may repeat in logs. `merge` joins `tx`+`txts` by (sock, OPT_ID) and then with the peer's `rx` by (flow, seq) into `pkt`, losslessly (`dup`, `unmatched`, `echo` and `txts_unmatched` keep everything else, and log tables merge does not know are copied unchanged into OBSV).
 
 `rxq_drops` is the receiving socket's cumulative drop count (`SO_RXQ_OVFL`) when the datagram was queued: it increases between two arrivals on a socket exactly when that socket dropped datagrams in between. It is null where the socket could not enable the option. How OPT_IDs were assigned is recorded per socket in `META.endpoints.<ep>.sockets[].tx_ids` (`explicit`: exact; `predicted`: inferred, failures recorded as events, and `merge` re-anchors the ids after each failure against the stamp times, counted in `merge_checks` as `tx_reanchors_<ep>` and `tx_reanchored_<ep>`; `none`: no TX stamps), probe.md §4.1.
+
+META keys added in 1.2 (probe.md §9), all optional; a reader that finds one absent treats the fact as not recorded, never as false or zero:
+
+| Key | Values | Meaning |
+|---|---|---|
+| `endpoints.<ep>.os_family` | `linux`, `darwin` (open string) | The endpoint's platform. `os` stays a display name and `kernel` the kernel release (on macOS the Darwin release) |
+| `endpoints.<ep>.os_version` | text | OS version: `VERSION_ID` of `/etc/os-release` on Linux, the macOS product version (e.g. `15.6`) on macOS |
+| `endpoints.<ep>.iface.tunnel` | `{kind: tstr, provider: tstr / null}`, absent when not a tunnel | The egress interface toward the peer is a tunnel: `kind` is the Linux link kind (`wireguard`, `tun`, …) or the macOS interface name prefix (`utun`, …); `provider` is a hint (`tailscale`) or null. `iface.mtu` is then the tunnel's MTU. `iface_change` events carry the same key in their `iface` detail |
+| `endpoints.<ep>.sockets[].icmp_errors` | bool | The socket can observe ICMP errors (Linux `IP_RECVERR`: `true`; macOS: `false`). When `false`, the absence of `icmp` events from that endpoint is not evidence that no ICMP error arrived |
+
+On macOS a socket also records `kernel_tx: false`, `tx_ids: "none"` and `rxq_ovfl: false`, values 1.1 already defines. The derived layer adds `PATH.overlay` (method `overlay.egress-iface/1`: `overlay` bool, `endpoints`, `kind`, `provider`, `mtu`, `overlay_ns`) and the key `overlay_limited: true` on the PLCY class entries and the per-direction `policer`, `mtu`, `ecn` and `dscp` fields when `overlay` is true (probe.md §9.9). A derived field whose input the platform could not observe has status `unknown` and a `reason`, and carries no count (P5).
 
 ## Derived series (SERS, critical + derived)
 
