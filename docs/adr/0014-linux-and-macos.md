@@ -12,7 +12,7 @@ ADR 0002 scoped every role to Linux, so a user whose roaming laptop is a Mac had
 
 ## Options considered
 
-1. **Keep Linux only** (ADR 0002). Simplest, but Mac users must boot Linux to capture, which is the main obstacle to the field corpus on the networks they roam.
+1. **Keep Linux only** (ADR 0002). Simplest, but a Mac user must boot Linux (for example from a live USB) before every capture on the networks they roam.
 2. **macOS for every role.** A macOS responder adds a second server I/O path, service management (launchd) and deployment for no deployment that needs it.
 3. **macOS for the initiator roles only, Linux for every role.** Captures from Mac laptops become possible; the responder, whose stamps carry the half of each path the Mac cannot stamp in the kernel, stays on the best facility (Linux `SO_TIMESTAMPING`).
 4. **A platform abstraction across all crates** (`cfg` wherever behaviour differs). Spreads platform knowledge through the probe and makes each crate's tests platform-dependent.

@@ -3,13 +3,13 @@
 Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this file. Directory READMEs are authoritative for their own conventions; this file links them rather than repeating them.
 
 ## Product
-- PathTrace: Linux tool that records what a network path does to packets (capacity over time, delay, jitter, loss, queue, policers, reorder, dup, MTU, ECN/DSCP, per-transport treatment) between two endpoints the user controls, into PTF (Path Trace Format, `.ptf`), for a future trace-driven emulator.
+- PathTrace: Linux and macOS tool that records what a network path does to packets (capacity over time, delay, jitter, loss, queue, policers, reorder, dup, MTU, ECN/DSCP, per-transport treatment) between two endpoints the user controls, into PTF (Path Trace Format, `.ptf`), for a future trace-driven emulator.
 - Central rule: a trace records path behaviour, never what a protocol achieved over it.
 - Capture is irreversible, derivation is not: never lose or alter raw observations; derived model (PATH) is re-derivable from raw (OBSV etc.).
 - Requirements: docs/spec/REQ-*.md. Design: docs/design/. Decisions: docs/adr/. Proof: docs/evidence/. External facts: docs/research/.
 
 ## Scopes (hard boundaries)
-- Platform: Linux only, all roles (initiator, responder, tooling). x86_64 + aarch64. Kernel >= 6.1. IPv4 + IPv6. No macOS/Windows/mobile code paths, no cfg for them.
+- Platform: only Linux and macOS are supported targets (ADR 0014, REQ-SCOPE-009). Linux: all roles (initiator, responder, tooling), x86_64 + aarch64, kernel >= 6.1. macOS: initiator roles (every command except `serve`, `authorize`), aarch64, macOS >= 15. IPv4 + IPv6. Platform code only in pt-sys behind `cfg(target_os)`; other crates branch on pt-sys capabilities, never on cfg. A fact a platform cannot observe is recorded as unknown, never zero. No Windows/mobile code paths, no cfg for them.
 - Path: exactly two endpoints, one path. No topology, multipath, cross-traffic modelling, chaos/fault injection, pcap replay, protocol (QUIC/HTTP) analysis.
 - Rates: access networks up to 1 Gbit/s; probe hard rate cap default 500 Mbit/s.
 - Peers: probe only talks to the user's own Noise-authenticated responder.
@@ -18,7 +18,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 ## Crate map (details: crates/README.md)
 - pt-format: PTF read/write/validate, JSONL twin, import/export. forbid(unsafe).
 - pt-wire: probe header + control messages. forbid(unsafe).
-- pt-sys: Linux syscalls (sockets, timestamping, mmsg, cmsg, TCP_INFO, clocks, netlink). ONLY crate allowing unsafe; every unsafe block needs `// SAFETY:`.
+- pt-sys: Linux and macOS syscalls, one backend per OS (sockets, timestamping, mmsg, cmsg, TCP_INFO, clocks, netlink). ONLY crate allowing unsafe; every unsafe block needs `// SAFETY:`.
 - pt-probe: session, phases, responder, obslog. No async runtime; threads only.
 - pt-derive: raw -> PATH/SERS/PLCY/VALD model; netem/Mahimahi export, Mahimahi import. Pure (no I/O); methods versioned `name/N`.
 - pathtrace: CLI.
