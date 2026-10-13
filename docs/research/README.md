@@ -54,3 +54,4 @@ Pin source code to a commit or version. Keep notes under about 80 lines.
 | [R-0014](R-0014-rust-crate-selection-for-measurement.md) | Rust crate selection for sync measurement code | confirmed | |
 | [R-0015](R-0015-tx-id-errors-socket-drops-qdisc-stats.md) | OPT_ID on send errors, socket receive drops, qdisc and UDP drop counters | partially-confirmed | |
 | [R-0016](R-0016-ethtool-offload-features-ioctl.md) | Reading NIC offload features unprivileged, and which offloads reach the probe's sockets | confirmed | |
+| [R-0017](R-0017-macos-socket-timing-facilities.md) | macOS socket, timing and host facilities for an initiator | partially-confirmed | |
