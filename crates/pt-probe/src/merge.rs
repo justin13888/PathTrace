@@ -486,13 +486,15 @@ fn tx_ids(log: &Log) -> TxIds {
             // end its rows inside that call, where every stamp fits every row.
             let mut g = k + 1;
             while g < fs.len()
+                && g - k <= JOINT_MAX
                 && regions[g - 1].0 < regions[g - 1].1
                 && regions[g].0 < regions[g - 1].1
             {
                 g += 1;
             }
             // Longer runs come from outages where every send fails before taking an id; the
-            // joint search grows with the square of the run, so they are scored one at a time.
+            // joint search grows with the square of the run, so a failure that would start one is
+            // scored alone (the scan stops one past the bound to stay linear in the outage).
             if g - k > JOINT_MAX {
                 g = k + 1;
             }
