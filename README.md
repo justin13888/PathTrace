@@ -17,8 +17,8 @@ Every derived number carries its method, version and confidence. Every raw obser
 
 ## Scope
 
-- Linux only (x86_64, aarch64, kernel ≥ 6.1), IPv4 and IPv6. ([ADR 0002](docs/adr/0002-linux-only.md))
-- Two endpoints you control: an initiator (your laptop, on any access network) and a responder (a public Linux VM).
+- Only Linux and macOS are supported targets, IPv4 and IPv6. Linux (x86_64, aarch64, kernel ≥ 6.1) runs every role; macOS (aarch64, 15 or newer) runs the initiator, which is in development (issues labelled [`macos`](https://github.com/justin13888/PathTrace/labels/macos)). ([ADR 0014](docs/adr/0014-linux-and-macos.md))
+- Two endpoints you control: an initiator (your Linux or macOS laptop, on any access network) and a responder (a public Linux VM).
 - Access networks up to 1 Gbit/s. One path, two endpoints: no topology or cross-traffic modelling.
 - This release captures, derives and exports. The emulator, runner and fidelity scoring are tracked as issues labelled [`deferred`](https://github.com/justin13888/PathTrace/labels/deferred).
 
@@ -52,7 +52,7 @@ Not proven here, and needing real networks: behaviour on real access networks an
 
 | Path | Contents |
 |---|---|
-| [`crates/`](crates/) | `pt-format` (PTF), `pt-wire`, `pt-sys` (Linux syscalls), `pt-probe` (capture), `pt-derive` (model, exports), `pathtrace` (CLI) |
+| [`crates/`](crates/) | `pt-format` (PTF), `pt-wire`, `pt-sys` (Linux and macOS syscalls), `pt-probe` (capture), `pt-derive` (model, exports), `pathtrace` (CLI) |
 | [`xtask/`](xtask/) | Evidence runner, audit, ground-truth experiments |
 | [`docs/`](docs/) | Requirements → designs → ADRs → evidence, plus research and runbooks |
 | [`deploy/`](deploy/) | systemd unit and firewall ports for the responder |

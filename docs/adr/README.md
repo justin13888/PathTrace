@@ -13,7 +13,7 @@ One file per decision that is hard to reverse, affects compatibility, or departs
 | ADR | Title | Status |
 |---|---|---|
 | [0001](0001-license-apache-2.md) | License under Apache-2.0 | accepted |
-| [0002](0002-linux-only.md) | Linux only, for every role | accepted |
+| [0002](0002-linux-only.md) | Linux only, for every role | superseded-by: 0014 |
 | [0003](0003-name-pathtrace.md) | Product name PathTrace; format PTF | accepted |
 | [0004](0004-build-format-and-probe-defer-datapath.md) | Build the format, probe and derivation; defer the emulator datapath decision | accepted |
 | [0005](0005-merge-commits-and-pinned-evidence.md) | Merge-commit-only history with commit-pinned evidence | accepted |
@@ -25,3 +25,4 @@ One file per decision that is hard to reverse, affects compatibility, or departs
 | [0011](0011-ptf-container-and-encoding.md) | PTF container and encoding | accepted |
 | [0012](0012-timestamp-clock-domains.md) | Packet timestamps: kernel software stamps in CLOCK_REALTIME, recorded raw with clock pairs | accepted |
 | [0013](0013-requirement-refinements-from-evidence.md) | Refining requirements from evidence before they are first met | accepted |
+| [0014](0014-linux-and-macos.md) | Linux and macOS are the only supported targets; macOS runs the initiator | accepted |

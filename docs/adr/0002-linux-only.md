@@ -1,6 +1,7 @@
 # 0002: Linux only, for every role
 
 - status: accepted
+- superseded-by: 0014
 - date: 2026-10-10
 - requirements: REQ-SCOPE-001
 - evidence: —

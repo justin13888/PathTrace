@@ -6,9 +6,9 @@ The draft "PathLab: path profiling, trace format and emulator, Specification v0.
 |---|---|---|---|
 | 1 | Summary; central rule | REQ-SCOPE-003; README | "PathLab" renamed (ADR 0003) |
 | 2.1 | Goals G1–G5 | G1 → REQ-PRB-*; G2 → REQ-FMT-*; G3, G4, G5 → REQ-EMU-* | G3 to G5 deferred (ADR 0008) |
-| 2.2 | Non-goals | REQ-SCOPE-002, -004, -005; ADR 0002 | macOS/Windows emulator non-goal widened to "Linux only, every role" |
+| 2.2 | Non-goals | REQ-SCOPE-002, -004, -005, -009; ADR 0014 (supersedes ADR 0002) | Only Linux and macOS are supported targets: Linux every role, macOS the initiator; no Windows or mobile |
 | 2.3 | Definition of done | REQ-FMT-018, REQ-FMT-016, REQ-SEC-003, REQ-EMU-008, REQ-EMU-007, REQ-PRB-028 | Field-corpus criteria are `user-acceptance` (#16) |
-| 3 | Assumptions | REQ-PRB-014 (data budget), REQ-PRB-012 (CC recorded), REQ-EMU-006 (baseline), REQ-FMT-017 (sharing), ADR 0002 (platforms) | Roaming endpoint is a Linux laptop only |
+| 3 | Assumptions | REQ-PRB-014 (data budget), REQ-PRB-012 (CC recorded), REQ-EMU-006 (baseline), REQ-FMT-017 (sharing), REQ-SCOPE-009 and ADR 0014 (platforms) | Roaming endpoint is a Linux or macOS laptop; responder is Linux |
 | 4 | Identifiable vs not | docs/design/simulator-requirements.md "Known limits"; REQ-DRV-003 (split method), REQ-DRV-015 (proxy) | Verified against R-0003 |
 | 5.1–5.7 | Competitive analysis | R-0001 (Mahimahi), R-0002 (CellReplay), R-0003 (NeuralEmu), R-0004 (Pantheon), R-0005 (netem), R-0006 (Rattan), R-0007 (PNG) | Rows the draft marked † were not re-verified and are not relied on |
 | 5.8 | Conclusions; build vs reuse | ADR 0004 | Datapath decision moved to #2 |
@@ -19,7 +19,7 @@ The draft "PathLab: path profiling, trace format and emulator, Specification v0.
 | 6.5 | Phases, saturation validity, profiles | REQ-PRB-010, -011, -012, -013, -014; ADR 0010 | Light trains added (ADR 0010); `smoke` profile added |
 | 6.6 | Transport policy matrix | REQ-PRB-015, -023, -024, -026; ADR 0006 | |
 | 6.7 | Safety and etiquette | REQ-PRB-016, REQ-SCOPE-005, REQ-SCOPE-007 | |
-| 6.8 | Platform and I/O | REQ-PRB-017; ADR 0002, ADR 0007 | Only the Linux tier remains |
+| 6.8 | Platform and I/O | REQ-PRB-017, REQ-PRB-033, REQ-REPO-010; ADR 0014, ADR 0007 | Linux tier for every role; macOS initiator tier (R-0017); Windows tier dropped |
 | 6.9 | Output | REQ-PRB-018 | |
 | 7.1 | Format principles | REQ-FMT-006, -007, -008, -014; docs/design/ptf-format.md | |
 | 7.2 | Container | REQ-FMT-001 … -005 | |
@@ -42,5 +42,5 @@ The draft "PathLab: path profiling, trace format and emulator, Specification v0.
 | 13.3 | Quality bar | REQ-SEC-003, REQ-SEC-004, REQ-FMT-010 (golden files) | |
 | 14 | Milestones | ADR 0008 (reordered: capture first) | |
 | 15 | Risks | docs/design/simulator-requirements.md "Known limits"; ADR 0010 | |
-| 16 | Open questions | Resolved: 1 → all three workloads kept as reference flows; 2 → laptop only (ADR 0002); 3 → one responder per session, any number of regions; 4 → recorded, not controlled (REQ-PRB-012); 5 → irrelevant to capture; 6 → ADR 0004; 7 → public repo, Apache-2.0 (ADR 0001), redaction (REQ-FMT-017); 8 → 200 MB cap kept, `light` auto on metered | |
+| 16 | Open questions | Resolved: 1 → all three workloads kept as reference flows; 2 → laptop only, Linux or macOS (ADR 0014); 3 → one responder per session, any number of regions; 4 → recorded, not controlled (REQ-PRB-012); 5 → irrelevant to capture; 6 → ADR 0004; 7 → public repo, Apache-2.0 (ADR 0001), redaction (REQ-FMT-017); 8 → 200 MB cap kept, `light` auto on metered | |
 | 17 | References | docs/research/ | |

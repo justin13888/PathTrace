@@ -230,3 +230,10 @@ SIGINT or SIGTERM ends a session cleanly on either endpoint, with a partial trac
 - design: docs/design/probe.md
 
 After an interface switch, both endpoints keep sampling the interface that carries the route to the peer (interface counters, egress qdisc, Wi-Fi link state) and record the switch. After the pacer stalls, it skips ahead instead of sending its overdue packets back to back, and records the stall; a suspend of the host is recorded too.
+
+### REQ-PRB-033: macOS initiator capture
+- status: planned
+- spec: new
+- adr: 0014
+
+A `probe` session from a macOS initiator against a Linux responder records every packet the probe sends and receives, as on Linux: each RX time with its stamp source (kernel where the platform gives one), each TX time from user space next to the send call, every time column in a declared clock domain, and clock pairs relating the domains. Facts macOS cannot observe (kernel TX stamps, error-queue path-MTU and send-error reports, per-socket receive drops, egress qdisc and interface output-queue drops) are recorded as unknown, never as zero, and derivation and `trace info` treat them as unknown.
