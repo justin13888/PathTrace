@@ -66,3 +66,10 @@ Each change that adds or alters behaviour lands its design section first; decisi
 - evidence: EXP-0008-r3
 
 Tagged releases publish static (musl) `pathtrace` binaries for x86_64 and aarch64 Linux with SHA-256 checksums.
+
+### REQ-REPO-010: macOS release artefact
+- status: planned
+- spec: new
+- adr: 0014
+
+Tagged releases also publish a `pathtrace` binary for aarch64 macOS (`aarch64-apple-darwin`), built and tested in CI on macOS, with its SHA-256 checksum in the same checksum file as the Linux binaries.

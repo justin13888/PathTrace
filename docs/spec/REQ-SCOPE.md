@@ -1,12 +1,12 @@
 # REQ-SCOPE: product boundaries
 
 ### REQ-SCOPE-001: Linux only
-- status: met
+- status: dropped
 - spec: §2.2, §3, §6.8
-- adr: 0002
+- adr: 0002, 0014
 - evidence: EXP-0007-r8
 
-Every role (initiator, responder, tooling) runs on Linux only: x86_64 and aarch64, kernel 6.1 or newer. No code paths, configuration or CI exist for macOS, Windows, Android or iOS.
+Replaced by REQ-SCOPE-009 (ADR 0014). Every role (initiator, responder, tooling) runs on Linux only: x86_64 and aarch64, kernel 6.1 or newer. No code paths, configuration or CI exist for macOS, Windows, Android or iOS.
 
 ### REQ-SCOPE-002: Two endpoints, one path
 - status: met
@@ -58,3 +58,10 @@ The probe only ever exchanges traffic with a responder operated by the user and 
 - issue: #21
 
 UDP classes (`udp/high-port`, `udp/443`, QUIC-shaped) are also probed for reachability over the secondary address family.
+
+### REQ-SCOPE-009: Linux and macOS only
+- status: planned
+- spec: §2.2, §3, §6.8
+- adr: 0014
+
+Only Linux and macOS are supported targets. On Linux every role (initiator, responder, tooling) runs on x86_64 and aarch64, kernel 6.1 or newer. On macOS the initiator roles (every command except `serve` and `authorize`) run on aarch64, macOS 15 or newer. Platform-specific code exists only in `pt-sys`, behind `cfg(target_os)`; other crates see capabilities, never `cfg`. No code paths, configuration or CI exist for Windows, Android or iOS.
