@@ -1,7 +1,8 @@
 # `pathtrace` command-line interface
 
-- requirements: REQ-CLI-001 … REQ-CLI-004, REQ-PRB-025
-- adr: 0008 (stability)
+- requirements: REQ-CLI-001 … REQ-CLI-004, REQ-PRB-025, REQ-PRB-033, REQ-SCOPE-009
+- adr: 0008 (stability), 0014 (Linux and macOS)
+- research: R-0017 (macOS facilities)
 
 ## Principles
 
@@ -33,11 +34,13 @@
 | `import mahimahi <up> [<down>] -o <out.ptf>` | any | Import Mahimahi traces |
 | `trace redact <file> --level shareable\|anonymous -o <out>` | any | Remove identifying data (REQ-FMT-016) |
 | `trace check <file> [--json]` | any | Strict validation (REQ-FMT-018) |
-| `trace info <file> [--json]` | any | Summary: kind, ids, profile, class, sections, tables and rows, digest; `merge_checks`, and per direction `host_drops` and `local_qdisc_drops` from PATH |
+| `trace info <file> [--json]` | any | Summary: kind, ids, profile, class, sections, tables and rows, digest; `merge_checks`, and per direction `host_drops` and `local_qdisc_drops` from PATH. With PTF 1.2 derivation it also shows per direction `tx_timestamps` (the counts of `PATH.<dir>.timestamps`: how many transmit times are `snd`, `sched` or `user`) and `overlay` (`PATH.overlay`, probe.md §9.9). A field derivation could not establish shows its `unknown` status and `reason` and no counts, never 0 (probe.md §9.6) |
 | `trace dump <file> [-o out.jsonl]` / `trace load <in.jsonl> -o <out.ptf>` | any | Lossless JSON Lines twin (REQ-FMT-014) |
 | `doctor [<responder>] [--json]` | initiator | Preflight checks (REQ-PRB-025) |
 
-`--config-dir` (env `PATHTRACE_CONFIG_DIR`) applies to all commands. The default is `$XDG_CONFIG_HOME/pathtrace`.
+`--config-dir` (env `PATHTRACE_CONFIG_DIR`) applies to all commands. The default is `$XDG_CONFIG_HOME/pathtrace` (`~/.config/pathtrace` when unset), on macOS too, so scripts and runbooks name one path on both platforms.
+
+**Platforms** (ADR 0014, REQ-SCOPE-009). On Linux every command runs. On macOS every command runs except the responder's, `serve` and `authorize`: they stay in `--help` (one command set on both platforms) and exit 1 with "not supported on macOS: the responder runs on Linux (ADR 0014)".
 
 `PATHTRACE_RECV_BUF` and `PATHTRACE_TX_IDS` are test hooks for the ground-truth harness (probe.md §4.2), honoured by `probe` and `serve`. They change what is measured and are recorded in META `extra.test_hooks`; do not set them for field sessions.
 
@@ -51,6 +54,7 @@
 ### `--profile auto`
 - **Choice**: `light` when NetworkManager reports the egress interface as metered (`yes`/`yes (guessed)`), otherwise `standard`. The choice is printed (REQ-PRB-016).
 - **Reporting**: `probe` prints the chosen profile, the egress interface, and the metered state to stderr every time `auto` decides (also with `-q`). When the state is neither `yes…` nor `no…` (no `nmcli`, an unmanaged interface, a timeout), the line is a warning that `standard` was picked blind and that capped links need `--profile light`: phone hotspots are usually not flagged as metered, so silence there would spend up to 200 MB of the user's data.
+- **macOS**: there is no NetworkManager, and the platform's own flag (Network.framework's expensive and constrained path properties) is not read in this release (#75). The metered state is therefore always unknown on macOS: `auto` picks `standard` with the same warning.
 
 ### `probe` prints the session before measuring
 - **Problem**: the responder's half of a session can only be fetched with the session id and token. Printing them only at the end loses them when the probe is interrupted or crashes.
@@ -71,6 +75,8 @@
 ### `doctor` checks
 Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts that make a session impossible are fatal.
 
+The table below lists the checks on Linux. macOS runs the subset and replacements in "`doctor` on macOS".
+
 | Check | Fatal | What it reads |
 |---|---|---|
 | `kernel >= 6.1` | yes | `/proc/sys/kernel/osrelease` |
@@ -88,12 +94,13 @@ Each check is `ok`, `warn` (non-fatal), or `FAIL` (fatal: exit 1). Only facts th
 | per family: `udp/<port> not refused` | no | the UDP test above, on the responder port and 443 |
 | per family: `tcp/<port> not intercepted` | no (`responder reachable` is the fatal summary) | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass. When the request cannot be made (the second connect or the write fails) it warns `not tested`, and the port does not count as clean |
 | `responder reachable` | yes | on at least one family, the responder port took a TCP connection that was tested and that nothing intercepted; it fails only when the responder port is unreachable, intercepted or untested on every family, because `probe` falls back to the other family (probe.md §3.1) |
+| per family: `tunnel` | no | the egress interface toward the responder (or the default route) is a tunnel (probe.md §9.9): warns, naming the interface, the tunnel kind and provider, and that per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel rather than the network under it. Absent when the interface is not a tunnel, so Linux output without a tunnel is unchanged |
 
 Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power, timestamps and offloads matter as much.
 
 ### `doctor` reads offloads with `SIOCETHTOOL`
 - **Problem**: REQ-PRB-025 lists offloads among `doctor`'s local prerequisites. Receive coalescing on the receiving host changes what the probe observes there: fraglist GRO hands the probe's UDP datagrams one shared RX timestamp per batch, and LRO rewrites the TCP stream the reference flows measure (R-0016). `pt-sys` had no way to read an interface's features.
-- **Constraints**: unprivileged and read-only; no shelling out to `ethtool` (AGENTS.md); no async runtime or new dependency; Linux >= 6.1.
+- **Constraints**: unprivileged and read-only; no shelling out to `ethtool` (AGENTS.md); no async runtime or new dependency. `SIOCETHTOOL` is Linux's: on macOS the check is not applicable and not shown ("`doctor` on macOS").
 - **Alternatives**: the ethtool generic-netlink family (`ETHTOOL_MSG_FEATURES_GET`), which fits beside `netlink.rs`'s nl80211 code but needs a `CTRL_CMD_GETFAMILY` lookup, bitset attribute parsing (compact and verbose forms) and a family that kernels may build without (`CONFIG_ETHTOOL_NETLINK`); `/sys/class/net/<if>/` (has no feature flags).
 - **Choice**: `pt_sys::ethtool::features` issues three `SIOCETHTOOL` ioctls on a datagram socket: `ETHTOOL_GSSET_INFO` (feature count), `ETHTOOL_GSTRINGS` (names) and `ETHTOOL_GFEATURES` (available, requested, active and never-changed bits). Every one is in the kernel's list of ethtool commands allowed without `CAP_NET_ADMIN`. The `offloads` check reports `rx-gro`, `rx-gro-hw`, `rx-gro-list`, `rx-lro`, `rx-udp-gro-forwarding`, `tx-generic-segmentation`, `tx-tcp-segmentation`, `tx-tcp6-segmentation` and `tx-udp-segmentation` as `on` or `off` (absent ones are left out), and warns when `rx-gro-list` or `rx-lro` is on, naming the `ethtool -K` command that turns it off. `rx-gro`, `rx-gro-hw` and the segmentation offloads do not warn: the probe's UDP sockets never set `UDP_GRO` or `UDP_SEGMENT`, so they stay one datagram per send and receive with its own stamp, and TCP class probes and reference flows run with the GRO and TSO a deployed TCP stack has. `rx-udp-gro-forwarding` does not warn: it applies only to traffic with no local socket. An interface whose features cannot be read warns `not read`.
 - **Rationale**: the ioctl is the interface `ethtool` used before netlink and still falls back to, has a fixed layout, and needs about 100 lines of `libc` calls; the warning is limited to the offloads that change what PathTrace records, because a warning on GRO (on by default everywhere) would be noise the user cannot act on without root and that does not alter the trace.
@@ -101,5 +108,29 @@ Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 rea
 
 ### `doctor`'s timestamp self-test warms up
 - **Problem**: the kernel enables RX timestamping lazily (deferred static-key work after the first socket asks for it), so the first datagrams after bind can arrive unstamped. A single-packet self-test then falsely reports `kernel RX stamps false` (EXP-0008).
-- **Choice**: send loopback datagrams 10 ms apart, for up to 0.5 s, until both an RX stamp and a TX stamp have been seen. Report the result after that warm-up. The probe needs no change, because it records each packet's timestamp source (`rx_src`).
+- **Choice**: send loopback datagrams 10 ms apart, for up to 0.5 s, until both an RX stamp and a TX stamp have been seen. Report the result after that warm-up. On macOS, which has no kernel TX stamps, the warm-up waits for an RX stamp only. The probe needs no change, because it records each packet's timestamp source (`rx_src`).
 - **Validated by**: EXP-0007 (doctor check) and the release evidence, which run `doctor` from a fresh process.
+
+### `doctor` on macOS
+- **Problem**: several Linux checks read facilities macOS does not have (`/proc`, `/sys`, `adjtimex`, nl80211, `SIOCETHTOOL`, NetworkManager), and macOS has prerequisites of its own: its version floor (ADR 0014), Low Power Mode and the idle-sleep assertion the probe holds (probe.md §9.4). A Linux check that cannot apply must not read as a failure or a warning the user cannot act on.
+- **Constraints**: the check names, states (`ok`, `warn`, `FAIL`) and JSON shape stay as on Linux, so scripts read both; Linux output is unchanged; no shelling out (`sw_vers`, `pmset`, `networksetup`); only facts that make a session impossible are fatal; no Linux advice (`ethtool -K`, `tc`) on macOS.
+- **Alternatives**: showing every Linux check with a new state such as `n/a` (adds a state to the JSON that existing consumers do not expect, and a list of lines that say nothing); reporting them as `warn` (a permanent warning the user cannot clear trains them to ignore warnings).
+- **Choice**: a check that cannot apply on the platform is not run and not shown, in text or JSON. On macOS `doctor` runs:
+
+| Check | Fatal | What it reads on macOS |
+|---|---|---|
+| `macos >= 15` | yes | sysctl `kern.osproductversion`; replaces `kernel >= 6.1` |
+| `key` | yes | as on Linux |
+| `kernel timestamps` | no | the loopback self-test with RX only; `ok` when kernel RX stamps were seen, and its detail says that TX times are user-space on macOS (probe.md §9.2) |
+| `clock sync` | no | `ntp_adjtime` with `modes = 0` (unprivileged, R-0017): synchronised when `STA_UNSYNC` is clear, with the estimated and maximum error, as on Linux |
+| `power` | no | IOKit power sources (`IOPSCopyPowerSourcesInfo`, `IOPSGetProvidingPowerSourceType`): warns on battery; also warns when Low Power Mode is on (`NSProcessInfo.isLowPowerModeEnabled`, read through the Objective-C runtime's C API from `pt-sys`, no new crate) |
+| `sleep assertion` | no | creates and releases the `kIOPMAssertPreventUserIdleSystemSleep` assertion the probe holds (probe.md §9.4); warns when it cannot, because an idle sleep can then interrupt a session |
+| `resolve responder`, `ipv4`, `ipv6`, `responder reachable` | as on Linux | as on Linux (the route lookup uses a connected UDP socket and `getifaddrs`) |
+| per family: `egress interface` | no | as on Linux |
+| per family: `metered` | no | `unknown`, warned as on Linux when NetworkManager gives no answer, so the user knows `--profile auto` picks `standard` blind (#75) |
+| per family: `tunnel` | no | as on Linux; on a Mac the egress interface of Tailscale, the WireGuard app and other VPNs is `utun*` |
+| per family: `tcp/<port> reachable`, `udp/<port> not refused`, `tcp/<port> not intercepted` | as on Linux | as on Linux (a connected UDP socket reports ICMP port unreachable as `ECONNREFUSED` on BSD too) |
+
+- **Not run on macOS**: `clocksource` (one timebase), `cpu governor` (no cpufreq), `wifi link stats` (no Wi-Fi telemetry until #68) and `offloads` (no `SIOCETHTOOL`; the receive coalescing it warns about is Linux's). `doctor` without a responder on a Mac checks the same local facts; `doctor` on the Linux responder host is unchanged.
+- **Rationale**: hiding what cannot apply keeps the output a list of things the user can act on, and keeping names and states shared means one runbook section and one JSON consumer serve both platforms.
+- **Validated by**: unit tests of the platform check list and the macOS classifiers (#64); the macOS evidence (#66) runs `doctor --json` on a Mac with no fatal finding.
