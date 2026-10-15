@@ -55,3 +55,4 @@ Pin source code to a commit or version. Keep notes under about 80 lines.
 | [R-0015](R-0015-tx-id-errors-socket-drops-qdisc-stats.md) | OPT_ID on send errors, socket receive drops, qdisc and UDP drop counters | partially-confirmed | |
 | [R-0016](R-0016-ethtool-offload-features-ioctl.md) | Reading NIC offload features unprivileged, and which offloads reach the probe's sockets | confirmed | |
 | [R-0017](R-0017-macos-socket-timing-facilities.md) | macOS socket, timing and host facilities for an initiator | partially-confirmed | |
+| [R-0018](R-0018-macos-qos-clamp-pacing.md) | macOS QoS clamps, darwinbg and the time-constraint policy for the pacer | partially-confirmed | |
