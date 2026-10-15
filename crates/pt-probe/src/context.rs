@@ -21,16 +21,25 @@ fn read(p: &str) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-/// Static facts about this host for META (`endpoints.<role>`).
+/// The value of `key` in an os-release file (`KEY=value`, optionally quoted).
+fn os_release_field(text: &str, key: &str) -> Option<String> {
+    text.lines().find_map(|l| {
+        l.strip_prefix(key)?
+            .strip_prefix('=')
+            .map(|v| v.trim_matches('"').to_string())
+    })
+}
+
+/// Static facts about this host for META (`endpoints.<role>`), with the PTF 1.2 `os_family`
+/// and `os_version` (probe.md §9.8).
 pub fn host_facts() -> Value {
-    let os = read("/etc/os-release")
-        .and_then(|s| {
-            s.lines().find_map(|l| {
-                l.strip_prefix("PRETTY_NAME=")
-                    .map(|v| v.trim_matches('"').to_string())
-            })
-        })
-        .unwrap_or_else(|| "unknown".into());
+    let family = pt_sys::PLATFORM.os_family;
+    if family == "darwin" {
+        return darwin_host_facts();
+    }
+    let os_release = read("/etc/os-release");
+    let field = |k: &str| os_release.as_deref().and_then(|s| os_release_field(s, k));
+    let os = field("PRETTY_NAME").unwrap_or_else(|| "unknown".into());
     let cpu = read("/proc/cpuinfo")
         .and_then(|s| {
             s.lines().find_map(|l| {
@@ -41,6 +50,8 @@ pub fn host_facts() -> Value {
         .unwrap_or_else(|| "unknown".into());
     Value::map()
         .with("os", os)
+        .with("os_family", family)
+        .with("os_version", field("VERSION_ID"))
         .with(
             "kernel",
             read("/proc/sys/kernel/osrelease").unwrap_or_default(),
@@ -51,12 +62,7 @@ pub fn host_facts() -> Value {
             read("/proc/sys/kernel/hostname").unwrap_or_default(),
         )
         .with("cpu", cpu)
-        .with(
-            "cpus",
-            std::thread::available_parallelism()
-                .map(|n| n.get())
-                .unwrap_or(0),
-        )
+        .with("cpus", cpus())
         .with(
             "clocksource",
             read("/sys/devices/system/clocksource/clocksource0/current_clocksource")
@@ -78,6 +84,100 @@ pub fn host_facts() -> Value {
             "wmem_max",
             read("/proc/sys/net/core/wmem_max").and_then(|s| s.parse::<u64>().ok()),
         )
+}
+
+fn cpus() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(0)
+}
+
+/// macOS host facts from sysctl (probe.md §9.8): `os` is "macOS " and the product version,
+/// `kernel` the Darwin release, and `clocksource` is absent (one timebase). The Linux-only
+/// procfs facts (congestion control, socket buffer limits) are not recorded.
+fn darwin_host_facts() -> Value {
+    let s = pt_sys::host::sysctl_string;
+    let version = s("kern.osproductversion");
+    Value::map()
+        .with(
+            "os",
+            version
+                .as_deref()
+                .map_or_else(|| "macOS".to_string(), |v| format!("macOS {v}")),
+        )
+        .with("os_family", "darwin")
+        .with("os_version", version)
+        .with("kernel", s("kern.osrelease").unwrap_or_default())
+        .with("arch", std::env::consts::ARCH)
+        .with("hostname", s("kern.hostname").unwrap_or_default())
+        .with(
+            "cpu",
+            s("machdep.cpu.brand_string").unwrap_or_else(|| "unknown".into()),
+        )
+        .with("cpus", cpus())
+}
+
+/// Linux link kinds that are tunnels (probe.md §9.9).
+const TUNNEL_LINK_KINDS: &[&str] = &[
+    "wireguard",
+    "tun",
+    "ipip",
+    "sit",
+    "gre",
+    "ip6gre",
+    "ip6tnl",
+    "vti",
+    "vti6",
+    "xfrm",
+];
+
+/// macOS tunnel interface name prefixes (probe.md §9.9): NetworkExtension VPNs, Tailscale and
+/// the WireGuard app use `utun`.
+const TUNNEL_NAME_PREFIXES: &[&str] = &["utun", "ipsec", "tun", "tap"];
+
+/// The tunnel kind of an egress interface, or `None` when it is not a tunnel (probe.md §9.9).
+/// `link_kind` is the rtnetlink answer where rtnetlink exists (`Some`, holding the link kind
+/// or `None` for a device without one); without rtnetlink (macOS) the interface name's prefix
+/// decides.
+fn tunnel_kind(link_kind: Option<Option<&str>>, name: &str) -> Option<String> {
+    match link_kind {
+        Some(k) => k
+            .filter(|k| TUNNEL_LINK_KINDS.contains(k))
+            .map(str::to_string),
+        None => TUNNEL_NAME_PREFIXES
+            .iter()
+            .find(|p| {
+                name.strip_prefix(**p)
+                    .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+            })
+            .map(|p| (*p).to_string()),
+    }
+}
+
+/// The provider hint of a tunnel from the local address on it: `tailscale` inside
+/// 100.64.0.0/10 or fd7a:115c:a1e0::/48 (Tailscale's address ranges), else none.
+fn tunnel_provider(local: IpAddr) -> Option<&'static str> {
+    let tailscale = match local {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            o[0] == 100 && o[1] & 0xc0 == 64
+        }
+        IpAddr::V6(a) => a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    };
+    tailscale.then_some("tailscale")
+}
+
+/// META `endpoint.iface.tunnel {kind, provider}` of interface `name` holding the local address
+/// `local`, or `None` when it is not a tunnel (PTF 1.2, probe.md §9.9).
+pub fn tunnel_fact(name: &str, index: u32, local: Option<IpAddr>) -> Option<Value> {
+    // Without rtnetlink (macOS, or a failed query) the interface name decides.
+    let link_kind = pt_sys::netlink::link_kind(index).ok();
+    let kind = tunnel_kind(link_kind.as_ref().map(Option::as_deref), name)?;
+    Some(
+        Value::map()
+            .with("kind", kind)
+            .with("provider", local.and_then(tunnel_provider)),
+    )
 }
 
 /// NetworkManager metered state via `nmcli` with a timeout (R-0013). Runs before measurement,
@@ -111,16 +211,21 @@ pub fn metered(iface: &str) -> String {
     "unknown".into()
 }
 
-/// Interface facts for META.
-pub fn iface_facts(name: &str) -> Value {
+/// Interface facts for META. `local` is this host's address on the interface, which names
+/// the tunnel provider (`tunnel`, PTF 1.2, present only when the interface is a tunnel).
+pub fn iface_facts(name: &str, local: Option<IpAddr>) -> Value {
     let i = iface_info(name);
-    Value::map()
+    let v = Value::map()
         .with("name", i.name.clone())
         .with("index", i.index)
         .with("type", i.kind.name())
         .with("driver", i.driver.clone())
         .with("mtu", i.mtu)
-        .with("usb", i.usb)
+        .with("usb", i.usb);
+    match tunnel_fact(name, i.index, local) {
+        Some(t) => v.with("tunnel", t),
+        None => v,
+    }
 }
 
 /// The detail of an `iface_change` event (probe.md §4.4). Interface names are `pii: quasi`, as
@@ -286,6 +391,7 @@ fn run(
             u(st.udp6_in_csum_errors),
             u(st.softnet_dropped),
             u(st.softnet_squeezed),
+            u(st.udp_fullsock),
         ]);
         if let (Some(r), Some(i)) = (qd.as_mut(), info.as_ref())
             && let Ok(q) = r.root(i.index)
@@ -314,7 +420,10 @@ fn run(
                 Some(s.rx_packets as i64),
                 Some(s.tx_packets as i64),
                 Some(s.rx_dropped as i64),
-                Some(s.tx_dropped as i64),
+                // A counter the platform lacks is unknown, never 0 (probe.md §9.6).
+                pt_sys::PLATFORM
+                    .iface_tx_dropped
+                    .then_some(s.tx_dropped as i64),
                 Some(s.rx_errors as i64),
                 Some(s.tx_errors as i64),
             ]);
@@ -382,7 +491,7 @@ fn run(
                     iface_change_detail(
                         from.map(|f| f.0),
                         &name,
-                        iface_facts(&name),
+                        iface_facts(&name, Some(local)),
                         qdisc,
                         txqueuelen,
                         local,
@@ -461,6 +570,95 @@ mod tests {
     fn resolves_loopback_route() {
         let (local, name) = route_to("127.0.0.1".parse().unwrap()).unwrap();
         assert_eq!(local, "127.0.0.1".parse::<IpAddr>().unwrap());
-        assert_eq!(name, "lo");
+        // `lo` on Linux, `lo0` on macOS.
+        assert!(name.starts_with("lo"), "{name}");
+        // Loopback is not a tunnel on either platform.
+        assert!(iface_facts(&name, Some(local)).get("tunnel").is_none());
+    }
+
+    #[test]
+    fn classifies_linux_link_kinds() {
+        for k in TUNNEL_LINK_KINDS {
+            assert_eq!(tunnel_kind(Some(Some(*k)), "x0").as_deref(), Some(*k));
+        }
+        // rtnetlink answered: the link kind decides, not the name.
+        for k in [
+            None,
+            Some("veth"),
+            Some("bridge"),
+            Some("vlan"),
+            Some("dummy"),
+        ] {
+            assert_eq!(tunnel_kind(Some(k), "tun0"), None, "{k:?}");
+        }
+    }
+
+    #[test]
+    fn classifies_macos_interface_names() {
+        for (name, kind) in [
+            ("utun4", Some("utun")),
+            ("ipsec0", Some("ipsec")),
+            ("tun1", Some("tun")),
+            ("tap0", Some("tap")),
+            ("utun", None),
+            ("utunnel", None),
+            ("en0", None),
+            ("lo0", None),
+            ("bridge100", None),
+        ] {
+            assert_eq!(tunnel_kind(None, name).as_deref(), kind, "{name}");
+        }
+    }
+
+    #[test]
+    fn tailscale_address_ranges() {
+        for (a, p) in [
+            ("100.64.0.1", Some("tailscale")),
+            ("100.101.102.103", Some("tailscale")),
+            ("100.127.255.254", Some("tailscale")),
+            ("100.63.255.255", None),
+            ("100.128.0.1", None),
+            ("10.0.0.1", None),
+            ("fd7a:115c:a1e0::1", Some("tailscale")),
+            ("fd7a:115c:a1e1::1", None),
+            ("2001:db8::1", None),
+        ] {
+            assert_eq!(tunnel_provider(a.parse().unwrap()), p, "{a}");
+        }
+    }
+
+    #[test]
+    fn os_release_fields() {
+        let t = "NAME=\"Ubuntu\"\nVERSION_ID=\"24.04\"\nPRETTY_NAME=\"Ubuntu 24.04.1 LTS\"\nID=ubuntu\n";
+        assert_eq!(os_release_field(t, "VERSION_ID").as_deref(), Some("24.04"));
+        assert_eq!(
+            os_release_field(t, "PRETTY_NAME").as_deref(),
+            Some("Ubuntu 24.04.1 LTS")
+        );
+        assert_eq!(os_release_field(t, "ID").as_deref(), Some("ubuntu"));
+        assert_eq!(os_release_field(t, "VERSION"), None);
+    }
+
+    /// PTF 1.2 host identity (probe.md §9.8) on the platform the tests run on.
+    #[test]
+    fn host_facts_carry_the_platform() {
+        let f = host_facts();
+        let family = pt_sys::PLATFORM.os_family;
+        assert_eq!(f.get("os_family").and_then(Value::as_str), Some(family));
+        if family == "darwin" {
+            let v = f.get("os_version").and_then(Value::as_str).unwrap();
+            assert_eq!(
+                f.get("os").and_then(Value::as_str),
+                Some(format!("macOS {v}").as_str())
+            );
+            assert!(f.get("clocksource").is_none());
+            assert!(
+                f.get("kernel")
+                    .and_then(Value::as_str)
+                    .is_some_and(|k| !k.is_empty())
+            );
+        } else {
+            assert!(f.get("clocksource").is_some());
+        }
     }
 }

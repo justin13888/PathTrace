@@ -7,6 +7,7 @@
 pub mod clock;
 pub mod dir;
 pub mod export;
+pub mod overlay;
 pub mod policy;
 pub mod raw;
 
@@ -35,8 +36,14 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
     let la = dir::loaded_intervals(&pa);
     let lb = dir::loaded_intervals(&pb);
     drop((pa, pb));
-    let ab = dir::derive_dir(&raw, &tb, "a_to_b", &lb);
-    let ba = dir::derive_dir(&raw, &tb, "b_to_a", &la);
+    let mut ab = dir::derive_dir(&raw, &tb, "a_to_b", &lb);
+    let mut ba = dir::derive_dir(&raw, &tb, "b_to_a", &la);
+    // Through a tunnel, the verdicts that describe it are qualified, never dropped (§9.9).
+    let (overlay, overlaid) = overlay::overlay(&raw, &tb);
+    if overlaid {
+        overlay::limit_direction(&mut ab.fields);
+        overlay::limit_direction(&mut ba.fields);
+    }
 
     let coupling = |d: &dir::DirOut, single: i64| -> Value {
         match (d.phase_rate.get(&6), d.phase_rate.get(&single)) {
@@ -64,18 +71,20 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "queue.loss-onset/2",
         "policer.lossy-flat/2",
         "hostdrop.rxq-gap/1",
+        "hostdrop.host-fullsock/1",
         "qdisc.drop-count/2",
         "loss.gilbert-runs/2",
         "reorder.late-arrivals/1",
         "duplicate.count/1",
-        "mtu.ladder/1",
+        "mtu.ladder/2",
         "tos.light-cycle/1",
         "summary.pantheon5/1",
         "coupling.both-ratio/1",
         "timeline.outage/1",
         "timestamps.source-count/1",
-        "policy.matrix/1",
+        "policy.matrix/2",
         "vald.reference/1",
+        overlay::METHOD,
     ];
     let path = Value::map()
         .with(
@@ -129,7 +138,8 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
                 .with("a_to_b", coupling(&ab, 4))
                 .with("b_to_a", coupling(&ba, 5)),
         )
-        .with("timeline", Value::Array(timeline));
+        .with("timeline", Value::Array(timeline))
+        .with("overlay", overlay);
     let mut out = vec![Section::new(
         b"PATH",
         flags::CRITICAL | flags::DERIVED,
@@ -145,13 +155,14 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
             );
         }
     }
+    let mut plcy = policy::plcy(&raw, &tb);
+    if overlaid {
+        overlay::limit_policy(&mut plcy);
+    }
     out.push(Section::new(
         b"PLCY",
         flags::DERIVED,
-        policy::plcy(&raw, &tb)
-            .as_map()
-            .cloned()
-            .unwrap_or_default(),
+        plcy.as_map().cloned().unwrap_or_default(),
     ));
     out.push(Section::new(
         b"VALD",

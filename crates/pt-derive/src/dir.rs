@@ -345,6 +345,75 @@ fn segmented_drops(rows: &[(i64, i64)], switches: &[i64]) -> Option<(i64, usize)
     Some((total + b - a, segments))
 }
 
+/// Whether a socket the sender sent the ladder `flows` from recorded `icmp_errors: false` in
+/// META (PTF 1.2): it cannot observe ICMP errors, so their absence proves nothing
+/// (`mtu.ladder/2`). A trace without the key (PTF < 1.2) keeps the `/1` verdict.
+fn icmp_unobservable(raw: &Raw, sender: &str, flows: &[i64]) -> bool {
+    let socks: Vec<&str> = flows
+        .iter()
+        .map(|f| {
+            raw.flows
+                .get(&(*f as u64))
+                .and_then(|v| v.get("sock"))
+                .and_then(Value::as_str)
+                .unwrap_or("main")
+        })
+        .collect();
+    raw.meta
+        .get("endpoints")
+        .and_then(|e| e.get(sender))
+        .and_then(|e| e.get("sockets"))
+        .and_then(Value::as_array)
+        .unwrap_or(&[])
+        .iter()
+        .filter(|s| {
+            s.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| socks.contains(&n))
+        })
+        .any(|s| s.get("icmp_errors").and_then(Value::as_bool) == Some(false))
+}
+
+/// The rise of a host-wide cumulative counter over `(t, value)` rows, taken whole (no
+/// `iface_change` segmentation: the counter does not restart when the sampler follows another
+/// interface): `Err` when it decreases between consecutive rows (a wrap or a reboot), `None`
+/// without rows.
+fn counter_rise(rows: &[(i64, i64)]) -> Option<Result<i64, ()>> {
+    let mut rows = rows.to_vec();
+    rows.sort_by_key(|r| r.0);
+    if rows.windows(2).any(|w| w[1].1 < w[0].1) {
+        return Some(Err(()));
+    }
+    Some(Ok(rows.last()?.1 - rows.first()?.1))
+}
+
+/// `hostdrop.host-fullsock/1`: host drops at a receiver without `rxq_drops`, from the
+/// host-wide `netstack.udp_fullsock` (PTF 1.2, macOS; docs/design/derivation.md, Host drops).
+/// `None` when the receiver recorded no such counter.
+fn host_fullsock(raw: &Raw, receiver: &str) -> Option<Value> {
+    const M: &str = "hostdrop.host-fullsock/1";
+    let ns = raw.table(&format!("netstack[{receiver}]"))?;
+    let rows: Vec<(i64, i64)> = ns
+        .col("t")
+        .iter()
+        .zip(ns.col("udp_fullsock"))
+        .filter_map(|(t, v)| Some(((*t)?, (*v)?)))
+        .collect();
+    let source = Value::Array(vec![Value::from("netstack")]);
+    Some(match counter_rise(&rows)? {
+        Err(()) => field("unknown", M, 0.0).with("reason", "host-wide counter decreased"),
+        // No UDP socket on the host was dropped into, so the probe's sockets dropped nothing.
+        Ok(0) => field("known", M, 0.9)
+            .with("packets", 0u64)
+            .with("source", source),
+        // Which socket dropped is unknown: the rise is context, not a count of host drops.
+        Ok(rise) => field("unknown", M, 0.0)
+            .with("reason", "host-wide counter rose")
+            .with("host_socket_drops", rise)
+            .with("source", source),
+    })
+}
+
 pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i64)]) -> DirOut {
     let (pkts, ts_src, marks) = packets_marked(raw, tb, dir);
     let mut out = DirOut::default();
@@ -376,8 +445,11 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 .with("ambiguous_losses", marks.ambiguous_losses)
                 .with("source", Value::Array(vec![Value::from("pkt")]))
         } else {
-            field("unknown", "hostdrop.rxq-gap/1", 0.0)
-                .with("reason", "no rxq_drops in this trace (PTF 1.0)")
+            let receiver = if dir == "a_to_b" { "b" } else { "a" };
+            host_fullsock(raw, receiver).unwrap_or_else(|| {
+                field("unknown", "hostdrop.rxq-gap/1", 0.0)
+                    .with("reason", "no rxq_drops in this trace (PTF 1.0)")
+            })
         },
     );
     let sender = if dir == "a_to_b" { "a" } else { "b" };
@@ -404,7 +476,9 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                     None => field("unknown", "qdisc.drop-count/2", 0.0),
                 }
             }
-            None => field("unknown", "qdisc.drop-count/2", 0.0),
+            // PTF 1.0, or a macOS sender, which has no qdisc (probe.md §9.6).
+            None => field("unknown", "qdisc.drop-count/2", 0.0)
+                .with("reason", "no qdisc counters recorded"),
         },
     );
     let loaded = loaded_intervals(&pkts);
@@ -1123,7 +1197,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     // --- MTU (ladder) ---
     let pm: Vec<&Pkt> = pkts.iter().filter(|p| p.kind == "pmtu").collect();
     if pm.is_empty() {
-        f = f.with("mtu", field("unknown", "mtu.ladder/1", 0.0));
+        f = f.with("mtu", field("unknown", "mtu.ladder/2", 0.0));
     } else {
         let mut sizes: BTreeMap<i64, (u64, u64)> = BTreeMap::new();
         for p in &pm {
@@ -1146,15 +1220,24 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             .filter(|m| *m > 0)
             .collect();
         let larger_lost = sizes.iter().any(|(k, v)| Some(*k) > max_ok && v.1 == 0);
+        let flows: Vec<i64> = pm.iter().map(|p| p.flow).collect();
         f = f.with(
             "mtu",
             field(
                 if max_ok.is_some() { "known" } else { "unknown" },
-                "mtu.ladder/1",
+                "mtu.ladder/2",
                 0.9,
             )
             .with("path_mtu", max_ok)
-            .with("blackhole", larger_lost && icmp_mtu.is_empty())
+            .with(
+                "blackhole",
+                // Without ICMP errors at the sender, silence is not evidence (probe.md §9.5).
+                if icmp_unobservable(raw, sender, &flows) {
+                    Value::Null
+                } else {
+                    Value::from(larger_lost && icmp_mtu.is_empty())
+                },
+            )
             .with(
                 "icmp_mtu",
                 Value::Array(icmp_mtu.iter().map(|m| Value::from(*m)).collect()),

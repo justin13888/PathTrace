@@ -79,18 +79,34 @@ fn utc_now() -> String {
     )
 }
 
+/// The clock domains of an endpoint, each with the OS clock it is read from (PTF 1.2
+/// `source`, ptf-format.md §6; probe.md §9.1).
 fn clocks_value(role: Role) -> Value {
+    clocks_value_for(role, pt_sys::PLATFORM.os_family)
+}
+
+/// [`clocks_value`] for the platform `os_family` names.
+fn clocks_value_for(role: Role, os_family: &str) -> Value {
     let r = role.name();
+    let mono_source = if os_family == "darwin" {
+        "mach_absolute_time"
+    } else {
+        "CLOCK_MONOTONIC_RAW"
+    };
     Value::map()
         .with(
             &format!("{r}.mono"),
             Value::map()
                 .with("kind", "monotonic_raw")
-                .with("endpoint", r),
+                .with("endpoint", r)
+                .with("source", mono_source),
         )
         .with(
             &format!("{r}.real"),
-            Value::map().with("kind", "realtime").with("endpoint", r),
+            Value::map()
+                .with("kind", "realtime")
+                .with("endpoint", r)
+                .with("source", "CLOCK_REALTIME"),
         )
 }
 
@@ -151,6 +167,14 @@ fn obslog_meta(
     m
 }
 
+/// The detail of the `power_assertion` event (PTF 1.2, probe.md §9.4).
+fn power_assertion_detail<T>(held: &io::Result<T>) -> Value {
+    Value::map().with("held", held.is_ok()).with(
+        "error",
+        held.as_ref().err().map(std::string::ToString::to_string),
+    )
+}
+
 /// Per-socket capabilities for META `endpoint.sockets` (ptf-format.md, PTF 1.1).
 fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
     Value::Array(
@@ -166,6 +190,7 @@ fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
                     .with("send_buf", c.send_buf)
                     .with("rxq_ovfl", c.rxq_ovfl)
                     .with("tx_ids", s.tx_id_mode().name())
+                    .with("icmp_errors", c.icmp_errors)
             })
             .collect(),
     )
@@ -998,7 +1023,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let facts = context::host_facts()
         .with("addr", local_ip.to_string())
         .with("peer_addr", dst.to_string())
-        .with("iface", context::iface_facts(&iface))
+        .with("iface", context::iface_facts(&iface, Some(local_ip)))
         .with("qdisc", context::egress_facts(&iface).0)
         .with("txqueuelen", context::egress_facts(&iface).1)
         .with("metered", metered.as_str())
@@ -1076,6 +1101,13 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
                 .with("reason", why.as_str()),
         );
     }
+    // Keep an idle host awake from before P0 until this function returns, after the trace is
+    // written (probe.md §9.4). A session continues without it.
+    let _power = pt_sys::PLATFORM.power_assertion.then(|| {
+        let held = pt_sys::power::prevent_idle_sleep(pt_sys::power::SESSION_ASSERTION_NAME);
+        rec.event("power_assertion", power_assertion_detail(&held));
+        held.ok()
+    });
 
     // Endpoint.
     let shared = Shared::new(Role::A, opts.profile.data_cap, opts.rate_cap_bps);
@@ -2286,7 +2318,7 @@ fn responder_session(
     let facts = context::host_facts()
         .with("addr", local_ip.to_string())
         .with("peer_addr", src.to_string())
-        .with("iface", context::iface_facts(&iface))
+        .with("iface", context::iface_facts(&iface, Some(local_ip)))
         .with("qdisc", context::egress_facts(&iface).0)
         .with("txqueuelen", context::egress_facts(&iface).1)
         .with("initiator_label", label.as_str())
@@ -2477,6 +2509,48 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_domains_record_their_os_source() {
+        let source = |v: &Value, domain: &str| {
+            v.get(domain)
+                .and_then(|d| d.get("source"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let linux = clocks_value_for(Role::A, "linux");
+        assert_eq!(
+            source(&linux, "a.mono").as_deref(),
+            Some("CLOCK_MONOTONIC_RAW")
+        );
+        assert_eq!(source(&linux, "a.real").as_deref(), Some("CLOCK_REALTIME"));
+        let darwin = clocks_value_for(Role::B, "darwin");
+        assert_eq!(
+            source(&darwin, "b.mono").as_deref(),
+            Some("mach_absolute_time")
+        );
+        assert_eq!(source(&darwin, "b.real").as_deref(), Some("CLOCK_REALTIME"));
+        assert_eq!(
+            clocks_value(Role::A),
+            clocks_value_for(Role::A, pt_sys::PLATFORM.os_family)
+        );
+    }
+
+    #[test]
+    fn sockets_record_whether_icmp_errors_are_observable() {
+        let s =
+            Arc::new(UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap());
+        let caps = s.caps();
+        let v = sockets_value(&[(Sock::Main, s)]);
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(row.get("name").and_then(Value::as_str), Some("main"));
+        assert_eq!(
+            row.get("icmp_errors").and_then(Value::as_bool),
+            Some(caps.icmp_errors)
+        );
+        // IP_RECVERR on Linux; macOS has no ICMP error queue (probe.md §9.5).
+        assert_eq!(caps.icmp_errors, pt_sys::PLATFORM.os_family != "darwin");
+    }
 
     #[test]
     fn budget_reserve_covers_the_planned_time_still_to_come() {

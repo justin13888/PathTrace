@@ -9,7 +9,7 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use pt_format::Value;
-use pt_sys::clock::{boottime, mono_raw, sleep_until};
+use pt_sys::clock::{SPIN_NS, boottime, mono_raw, set_pacing_qos, sleep_until};
 use pt_sys::udp::{
     ErrEvent, InMsg, MAX_DATAGRAM, OutMsg, SendOutcome, TxIdMode, TxKind, UdpSock, poll_many,
 };
@@ -199,7 +199,11 @@ impl Endpoint {
             let rec = rec.clone();
             std::thread::Builder::new()
                 .name("pacer".into())
-                .spawn(move || pacer_loop(shared, socks, ids, cmd_rx, rec))?
+                .spawn(move || {
+                    // The least timer coalescing on macOS; nothing on Linux (probe.md §9.4).
+                    let _ = set_pacing_qos();
+                    pacer_loop(shared, socks, ids, cmd_rx, rec);
+                })?
         };
         let receiver = {
             let shared = shared.clone();
@@ -207,7 +211,10 @@ impl Endpoint {
             let cmd = cmd_tx.clone();
             std::thread::Builder::new()
                 .name("receiver".into())
-                .spawn(move || receiver_loop(shared, socks, cmd, rec))?
+                .spawn(move || {
+                    let _ = set_pacing_qos();
+                    receiver_loop(shared, socks, cmd, rec);
+                })?
         };
         Ok(Endpoint {
             shared,
@@ -435,7 +442,8 @@ fn pacer_loop(
             if n > mono_raw() + 2_000_000 {
                 continue;
             }
-            sleep_until(n, Duration::from_micros(100));
+            // Sleep until SPIN_NS before the deadline, then spin (probe.md §1, §9.4).
+            sleep_until(n, Duration::from_nanos(SPIN_NS));
         } else {
             continue;
         }

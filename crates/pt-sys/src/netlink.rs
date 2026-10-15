@@ -11,9 +11,9 @@
 use std::net::IpAddr;
 
 #[cfg(target_os = "linux")]
-pub use linux::{Nl80211, QdiscReader, RtMonitor};
+pub use linux::{Nl80211, QdiscReader, RtMonitor, link_kind};
 #[cfg(target_os = "macos")]
-pub use unavailable::{Nl80211, QdiscReader, RtMonitor};
+pub use unavailable::{Nl80211, QdiscReader, RtMonitor, link_kind};
 
 /// Kind of a routing change event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +132,12 @@ mod unavailable {
         }
     }
 
+    /// The rtnetlink link kind: unavailable on macOS, where a tunnel is known by its interface
+    /// name (probe.md §9.9).
+    pub fn link_kind(_ifindex: u32) -> io::Result<Option<String>> {
+        Err(crate::unsupported("rtnetlink"))
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -142,8 +148,9 @@ mod unavailable {
                 RtMonitor::open().unwrap_err().kind(),
                 QdiscReader::open().unwrap_err().kind(),
                 Nl80211::open().unwrap_err().kind(),
+                link_kind(1).unwrap_err().kind(),
             ];
-            assert_eq!(kinds, [io::ErrorKind::Unsupported; 3]);
+            assert_eq!(kinds, [io::ErrorKind::Unsupported; 4]);
         }
     }
 }
@@ -413,6 +420,43 @@ mod linux {
                 })
             }
         }
+    }
+
+    // ---------------------------------------------------------------- link kind
+
+    const RTM_NEWLINK: u16 = 16;
+    const RTM_GETLINK: u16 = 18;
+    /// `struct ifinfomsg`: family, pad, type, index, flags, change.
+    const IFINFOMSG_LEN: usize = 16;
+    const IFLA_LINKINFO: u16 = 18;
+    const IFLA_INFO_KIND: u16 = 1;
+
+    /// The rtnetlink link kind (`IFLA_INFO_KIND`, e.g. `wireguard`, `tun`, `gre`) of interface
+    /// `ifindex`, with an unprivileged `RTM_GETLINK`; `None` for a device without one (a
+    /// physical NIC). Used to recognise tunnels (probe.md §9.9).
+    pub fn link_kind(ifindex: u32) -> io::Result<Option<String>> {
+        let mut sock = NlSocket::open(libc::NETLINK_ROUTE, 0, false)?;
+        let mut req = [0u8; IFINFOMSG_LEN];
+        req[4..8].copy_from_slice(&(ifindex as i32).to_ne_bytes());
+        let msgs = sock.request(RTM_GETLINK, 0, &req)?;
+        Ok(msgs
+            .iter()
+            .filter(|(ty, _)| *ty == RTM_NEWLINK)
+            .find_map(|(_, body)| parse_link_kind(body)))
+    }
+
+    /// The `IFLA_INFO_KIND` string of an `RTM_NEWLINK` body.
+    fn parse_link_kind(body: &[u8]) -> Option<String> {
+        let info = attrs(body.get(IFINFOMSG_LEN..)?)
+            .into_iter()
+            .find(|(t, _)| *t == IFLA_LINKINFO)?
+            .1;
+        let kind = attrs(info)
+            .into_iter()
+            .find(|(t, _)| *t == IFLA_INFO_KIND)?
+            .1;
+        let s = String::from_utf8_lossy(kind.split(|b| *b == 0).next().unwrap_or(&[]));
+        (!s.is_empty()).then(|| s.into_owned())
     }
 
     // ---------------------------------------------------------------- qdisc statistics (R-0015)
@@ -697,6 +741,23 @@ mod linux {
             let mut r = QdiscReader::open().unwrap();
             let q = r.root(1).unwrap().expect("lo root qdisc");
             assert!(!q.kind.is_empty());
+        }
+
+        #[test]
+        fn parse_link_kind_reads_nested_info_kind() {
+            let mut body = vec![0u8; IFINFOMSG_LEN];
+            body.extend(attr(3, b"wg0\0"));
+            let mut info = attr(IFLA_INFO_KIND, b"wireguard\0");
+            info.extend(attr(2, &[0; 4]));
+            body.extend(attr(IFLA_LINKINFO, &info));
+            assert_eq!(parse_link_kind(&body).as_deref(), Some("wireguard"));
+            // A physical NIC has no IFLA_LINKINFO.
+            assert_eq!(parse_link_kind(&body[..IFINFOMSG_LEN + 8]), None);
+        }
+
+        #[test]
+        fn loopback_has_no_link_kind() {
+            assert_eq!(link_kind(1).unwrap(), None);
         }
 
         #[test]
