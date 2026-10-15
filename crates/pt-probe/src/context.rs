@@ -124,8 +124,10 @@ const TUNNEL_LINK_KINDS: &[&str] = &[
     "ipip",
     "sit",
     "gre",
+    "ip6gre",
     "ip6tnl",
     "vti",
+    "vti6",
     "xfrm",
 ];
 
