@@ -11,6 +11,7 @@ compile_error!("pt-sys supports only Linux and macOS (ADR 0014)");
 
 pub mod clock;
 pub mod ethtool;
+pub mod host;
 pub mod netif;
 pub mod netlink;
 pub mod power;
