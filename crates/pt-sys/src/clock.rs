@@ -94,7 +94,9 @@ mod mach {
         fn mach_timebase_info(info: *mut Timebase) -> libc::c_int;
     }
 
-    /// (numerator, denominator) of the timebase, read once.
+    /// (numerator, denominator) of the timebase, read once. Panics if `mach_timebase_info`
+    /// fails or reports a zero field: no fallback ratio is right on every Mac (Apple silicon
+    /// is 125/3), and a wrong one would scale every recorded time silently.
     fn timebase() -> (u64, u64) {
         static TB: OnceLock<(u64, u64)> = OnceLock::new();
         *TB.get_or_init(|| {
@@ -104,11 +106,13 @@ mod mach {
             };
             // SAFETY: `tb` is a valid, writable mach_timebase_info_data_t.
             let r = unsafe { mach_timebase_info(&raw mut tb) };
-            if r != 0 || tb.numerator == 0 || tb.denominator == 0 {
-                (1, 1)
-            } else {
-                (u64::from(tb.numerator), u64::from(tb.denominator))
-            }
+            assert!(
+                r == 0 && tb.numerator != 0 && tb.denominator != 0,
+                "mach_timebase_info failed (kern_return {r}, {}/{})",
+                tb.numerator,
+                tb.denominator
+            );
+            (u64::from(tb.numerator), u64::from(tb.denominator))
         })
     }
 
