@@ -66,7 +66,15 @@ code 'target_os' | grep -oE 'target_os *= *"[^"]*"' | sed -E 's/.*"(.*)"/\1/' | 
 if awk '$2 != "linux" && $2 != "macos" {bad=1} END {exit !bad}' "$out/target_os_values.txt"; then say "FAIL target_os other than linux or macos"; fail=1
 elif ! grep -qw linux "$out/target_os_values.txt"; then say "FAIL pt-sys has no linux backend"; fail=1
 else say "PASS target_os names only linux and macos ($(awk '{printf "%s%s %s", sep, $2, $1; sep=", "}' "$out/target_os_values.txt"))"; fi
-code 'cfg\((not\()?(windows|unix)\)|target_family|target_vendor' >"$out/other_platform_cfg.txt"
+# windows/unix as a cfg predicate anywhere inside cfg(...), cfg_attr(...) or cfg!(...), including
+# nested any/all/not and predicates rustfmt splits over several lines; string literals are ignored.
+code 'target_family|target_vendor' >"$out/other_platform_cfg.txt"
+# shellcheck disable=SC2016 # the single-quoted program is Perl, not shell
+grep -rlE --include='*.rs' --include='Cargo.toml' 'cfg' crates xtask bench Cargo.toml | xargs perl -0777 -ne '
+  while (/\b(cfg(?:_attr)?!?)\s*(\((?:[^()"]++|"(?:[^"\\]|\\.)*"|(?2))*\))/g) {
+    my ($k, $m, $at) = ($1, $2, $-[0]); (my $p = $m) =~ s/"(?:[^"\\]|\\.)*"//g;
+    if ($p =~ /(?<![\w"])(?:windows|unix)(?![\w"])/) { my $l = 1 + (substr($_, 0, $at) =~ tr/\n//); (my $s = $m) =~ s/\s+/ /g; print "$ARGV:$l:$k$s\n" }
+  }' >>"$out/other_platform_cfg.txt"
 if [ -s "$out/other_platform_cfg.txt" ]; then say "FAIL platform cfg other than target_os"; fail=1; else say "PASS no windows/unix/target_family/target_vendor cfg"; fi
 roles=$(sed -n '/pub enum Role {/,/^}/p' crates/pt-probe/src/flows.rs | grep -cE '^\s+[A-Z],?$')
 if [ "$roles" -eq 2 ]; then say "PASS exactly two endpoint roles (a, b): one path"; else say "FAIL role count $roles"; fail=1; fi
