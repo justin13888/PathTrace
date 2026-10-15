@@ -1,17 +1,98 @@
-//! Linux system interface for PathTrace. The only workspace crate allowed `unsafe`; every
-//! unsafe block documents why it is sound.
+//! Linux and macOS system interface for PathTrace. The only workspace crate allowed `unsafe`;
+//! every unsafe block documents why it is sound.
 //!
-//! Facts relied upon are verified in docs/research/R-0010 … R-0016.
+//! Facts relied upon are verified in docs/research/R-0010 … R-0017. Each module has a Linux and a
+//! macOS backend behind `cfg(target_os)` with the same public API (ADR 0014, probe.md §9); what
+//! a platform cannot observe is reported through [`PLATFORM`] and per-socket capabilities
+//! ([`udp::TsCaps`]), or as an [`io::ErrorKind::Unsupported`] error, so callers never need `cfg`.
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+compile_error!("pt-sys supports only Linux and macOS (ADR 0014)");
 
 pub mod clock;
 pub mod ethtool;
 pub mod netif;
 pub mod netlink;
+pub mod power;
 pub mod signal;
 pub mod tcp;
 pub mod udp;
 
 use std::io;
+
+/// What this platform's backend can observe (probe.md §9). Callers branch on these, never on
+/// `cfg`; what a socket actually got is in [`udp::TsCaps`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Platform {
+    /// PTF 1.2 `endpoint.os_family`: `linux` or `darwin`.
+    pub os_family: &'static str,
+    /// Kernel transmit timestamps can be requested (`SO_TIMESTAMPING`).
+    pub kernel_tx_stamps: bool,
+    /// Sockets have an error queue carrying TX stamps and ICMP errors (`MSG_ERRQUEUE`).
+    pub error_queue: bool,
+    /// One system call sends or receives many datagrams (`sendmmsg`/`recvmmsg`); otherwise one
+    /// call per datagram.
+    pub batched_io: bool,
+    /// Per-socket receive drop counts (`SO_RXQ_OVFL`).
+    pub socket_rx_drops: bool,
+    /// Egress qdisc statistics ([`netlink::QdiscReader`]).
+    pub qdisc_stats: bool,
+    /// [`netif::IfStats::tx_dropped`] is a real counter. Where false it is 0 and must be
+    /// recorded as unknown (null), never as 0 (probe.md §9.6).
+    pub iface_tx_dropped: bool,
+    /// Wi-Fi link state ([`netlink::Nl80211`]).
+    pub wifi_link: bool,
+    /// Routing change events ([`netlink::RtMonitor`]).
+    pub route_events: bool,
+    /// Interface offload features ([`ethtool::features`]).
+    pub offload_features: bool,
+    /// Which TCP state the kernel reports.
+    pub tcp_state: tcp::TcpStateKind,
+    /// A power assertion can keep the system awake for a session ([`power`]).
+    pub power_assertion: bool,
+}
+
+/// The capabilities of the platform this was compiled for.
+#[cfg(target_os = "linux")]
+pub const PLATFORM: Platform = Platform {
+    os_family: "linux",
+    kernel_tx_stamps: true,
+    error_queue: true,
+    batched_io: true,
+    socket_rx_drops: true,
+    qdisc_stats: true,
+    iface_tx_dropped: true,
+    wifi_link: true,
+    route_events: true,
+    offload_features: true,
+    tcp_state: tcp::TcpStateKind::TcpInfo,
+    power_assertion: false,
+};
+
+/// The capabilities of the platform this was compiled for.
+#[cfg(target_os = "macos")]
+pub const PLATFORM: Platform = Platform {
+    os_family: "darwin",
+    kernel_tx_stamps: false,
+    error_queue: false,
+    batched_io: false,
+    socket_rx_drops: false,
+    qdisc_stats: false,
+    iface_tx_dropped: false,
+    wifi_link: false,
+    route_events: false,
+    offload_features: false,
+    tcp_state: tcp::TcpStateKind::ConnectionInfo,
+    power_assertion: true,
+};
+
+/// The error a facility this platform lacks returns.
+pub(crate) fn unsupported(what: &str) -> io::Error {
+    io::Error::new(
+        io::ErrorKind::Unsupported,
+        format!("{what} is not available on {}", PLATFORM.os_family),
+    )
+}
 
 /// Convert a libc return value into `io::Result`.
 pub(crate) fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
@@ -22,6 +103,7 @@ pub(crate) fn cvt(ret: libc::c_int) -> io::Result<libc::c_int> {
     }
 }
 
+#[cfg(target_os = "linux")]
 pub(crate) fn cvt_ssize(ret: libc::ssize_t) -> io::Result<usize> {
     if ret < 0 {
         Err(io::Error::last_os_error())

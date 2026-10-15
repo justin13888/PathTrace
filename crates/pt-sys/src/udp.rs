@@ -1,32 +1,59 @@
-//! UDP probe sockets: batched send/receive with per-packet TOS, kernel timestamps, TTL, socket
-//! drop counts, and error-queue TX stamps / ICMP (R-0010, R-0011, R-0015).
+//! UDP probe sockets: send/receive with per-packet TOS, kernel timestamps, TTL, socket drop
+//! counts, and error-queue TX stamps / ICMP (R-0010, R-0011, R-0015).
+//!
+//! Linux batches with `sendmmsg`/`recvmmsg` and reads TX stamps and ICMP errors from the error
+//! queue. macOS (probe.md §9.2 to §9.5, R-0017) sends and receives one datagram per
+//! `sendmsg`/`recvmsg`, stamps arrivals with `SO_TIMESTAMP` (µs), sets `IP_DONTFRAG`/
+//! `IPV6_DONTFRAG`, and has no error queue, kernel TX stamps or per-socket drop counts: its
+//! sockets report `kernel_tx`, `icmp_errors` and `rxq_ovfl` false in [`TsCaps`].
 
 use std::io;
 use std::mem::{size_of, zeroed};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
+#[cfg(target_os = "linux")]
+use std::sync::atomic::{AtomicBool, AtomicU8};
+use std::sync::atomic::{AtomicU32, Ordering};
 
-use crate::{cvt, cvt_ssize, getsockopt_int, setsockopt};
+#[cfg(target_os = "linux")]
+use crate::cvt_ssize;
+use crate::{cvt, getsockopt_int, setsockopt};
 
 /// Maximum datagram we ever receive (probe packets are ≤ path MTU; jumbo frames are out of scope).
 pub const MAX_DATAGRAM: usize = 9216;
 const CMSG_BUF: usize = 256;
 
 // Values from include/uapi/linux/errqueue.h and net_tstamp.h (R-0010).
+#[cfg(target_os = "linux")]
 const SCM_TSTAMP_SND: u32 = 0;
+#[cfg(target_os = "linux")]
 const SCM_TSTAMP_SCHED: u32 = 1;
+#[cfg(target_os = "linux")]
 const SO_EE_ORIGIN_LOCAL: u8 = 1;
+#[cfg(target_os = "linux")]
 const SO_EE_ORIGIN_ICMP: u8 = 2;
+#[cfg(target_os = "linux")]
 const SO_EE_ORIGIN_ICMP6: u8 = 3;
+#[cfg(target_os = "linux")]
 const SO_EE_ORIGIN_TIMESTAMPING: u8 = 4;
+#[cfg(target_os = "linux")]
 const IP_PMTUDISC_PROBE: libc::c_int = 3;
+#[cfg(target_os = "linux")]
 const IPV6_PMTUDISC_PROBE: libc::c_int = 3;
-// asm-generic/socket.h (x86_64 and aarch64 use the generic values; R-0015).
+// asm-generic/socket.h (x86_64 and aarch64 use the generic values; R-0015). Linux only: on
+// macOS 32 is SO_BROADCAST and the others do not exist (R-0017).
+#[cfg(target_os = "linux")]
 const SO_RXQ_OVFL: libc::c_int = 40;
+#[cfg(target_os = "linux")]
 const SO_RCVBUFFORCE: libc::c_int = 33;
+#[cfg(target_os = "linux")]
 const SO_SNDBUFFORCE: libc::c_int = 32;
+#[cfg(target_os = "linux")]
 const SCM_TS_OPT_ID: libc::c_int = 81;
+/// The smallest buffer macOS is asked for when it rejects a larger request (it refuses sizes
+/// above `kern.ipc.maxsockbuf` instead of capping them).
+#[cfg(target_os = "macos")]
+const MIN_BUF: usize = 64 << 10;
 
 /// How the OPT_IDs of sent datagrams are known (docs/design/probe.md §4.1, R-0015).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +74,7 @@ impl TxIdMode {
             TxIdMode::Predicted => "predicted",
         }
     }
+    #[cfg(target_os = "linux")]
     fn code(self) -> u8 {
         match self {
             TxIdMode::None => 0,
@@ -54,6 +82,7 @@ impl TxIdMode {
             TxIdMode::Predicted => 2,
         }
     }
+    #[cfg(target_os = "linux")]
     fn from_code(c: u8) -> TxIdMode {
         match c {
             1 => TxIdMode::Explicit,
@@ -63,7 +92,7 @@ impl TxIdMode {
     }
 }
 
-/// Whether the running kernel accepts `SCM_TS_OPT_ID` (added in 6.13, R-0015).
+/// Whether the running kernel accepts `SCM_TS_OPT_ID` (added in 6.13, R-0015); false on macOS.
 pub fn kernel_has_ts_opt_id() -> bool {
     let rel = std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default();
     let mut it = rel
@@ -76,6 +105,7 @@ pub fn kernel_has_ts_opt_id() -> bool {
 
 /// Errors a kernel raises before the append stage, which therefore never consume an OPT_ID
 /// (R-0015).
+#[cfg(target_os = "linux")]
 fn error_before_append(errno: i32) -> bool {
     matches!(
         errno,
@@ -85,6 +115,7 @@ fn error_before_append(errno: i32) -> bool {
 
 /// Errors raised after the append stage (a qdisc drop with `IP_RECVERR`, a netfilter drop),
 /// which consume an OPT_ID on every kernel (R-0015).
+#[cfg(target_os = "linux")]
 fn error_after_append(errno: i32) -> bool {
     matches!(errno, libc::ENOBUFS | libc::EPERM)
 }
@@ -94,6 +125,7 @@ fn error_after_append(errno: i32) -> bool {
 /// `restores_append_ids`: the kernel (≥ 6.13) returns the id on append-stage errors (EAGAIN,
 /// EMSGSIZE, a pending ICMP error such as ECONNREFUSED), so only errors after the append
 /// stage consume one; older kernels consume one on every error except those before append.
+#[cfg(target_os = "linux")]
 fn predicted_consumes(error: Option<&io::Error>, restores_append_ids: bool) -> bool {
     let Some(errno) = error.and_then(io::Error::raw_os_error) else {
         return true;
@@ -106,11 +138,13 @@ fn predicted_consumes(error: Option<&io::Error>, restores_append_ids: bool) -> b
 
 /// Whether the running kernel returns the OPT_ID of a datagram that fails in the append stage
 /// (6.13 and later, R-0015).
+#[cfg(target_os = "linux")]
 fn kernel_restores_append_ids() -> bool {
     kernel_has_ts_opt_id()
 }
 
 /// Id accounting after one `sendmmsg` call (docs/design/probe.md §4.1).
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct IdAccount {
     /// Id of the batch's first datagram.
@@ -127,6 +161,7 @@ struct IdAccount {
 /// `provisional`: the previous call on this socket assumed a burn after a partial send. The
 /// pacer retries the failed datagram alone right away, so if this call fails at once with an
 /// error that consumes no id, that datagram did not consume one either: the burn is undone.
+#[cfg(target_os = "linux")]
 fn settle_ids(
     mode: TxIdMode,
     first_id: u32,
@@ -159,9 +194,11 @@ fn settle_ids(
 /// Socket configuration.
 #[derive(Debug, Clone, Copy)]
 pub struct SockOpts {
-    /// Enable kernel RX/TX software timestamps with OPT_ID + OPT_TSONLY.
+    /// Enable kernel RX/TX software timestamps with OPT_ID + OPT_TSONLY (macOS: RX stamps with
+    /// `SO_TIMESTAMP`).
     pub timestamping: bool,
-    /// Set DF and ignore the cached PMTU (`IP_PMTUDISC_PROBE`), and receive ICMP errors.
+    /// Set DF and ignore the cached PMTU (`IP_PMTUDISC_PROBE`), and receive ICMP errors (macOS:
+    /// set DF with `IP_DONTFRAG`/`IPV6_DONTFRAG`; ICMP errors are not observable).
     pub pmtu_probe: bool,
     pub recv_buf: usize,
     pub send_buf: usize,
@@ -192,6 +229,9 @@ pub struct TsCaps {
     pub send_buf: usize,
     /// `SO_RXQ_OVFL` is enabled: every received datagram reports the socket's drop count.
     pub rxq_ovfl: bool,
+    /// ICMP errors reach the socket's error queue (`IP_RECVERR`), so the absence of an `icmp`
+    /// event is evidence (PTF 1.2 `icmp_errors`; false on macOS, probe.md §9.5).
+    pub icmp_errors: bool,
 }
 
 /// Result of [`UdpSock::send_batch`].
@@ -204,7 +244,8 @@ pub struct SendOutcome {
     /// The datagram at index `sent` failed (fewer than all were accepted).
     pub failed: bool,
     /// The failed datagram's error, when the kernel reported it. `sendmmsg` reports an errno
-    /// only when the first datagram fails, so after a partial send it is unknown (`None`).
+    /// only when the first datagram fails, so after a partial send it is unknown (`None`). On
+    /// macOS each datagram has its own `sendmsg`, so it is always known.
     pub error: Option<io::Error>,
     /// The id the failed attempt consumed: exact in `Explicit` mode, assumed in `Predicted`
     /// mode, `None` when no id was consumed.
@@ -239,12 +280,12 @@ pub struct OutMsg<'a> {
 pub struct InMsg {
     pub len: usize,
     pub src: SocketAddr,
-    /// Kernel software RX timestamp, CLOCK_REALTIME ns.
+    /// Kernel software RX timestamp, CLOCK_REALTIME ns (macOS: `SO_TIMESTAMP`, whole µs).
     pub rx_kernel: Option<u64>,
     /// The socket's cumulative drop count when this datagram was queued (`SO_RXQ_OVFL`);
     /// `None` if the option is off.
     pub rxq_drops: Option<u32>,
-    /// User-space CLOCK_REALTIME right after `recvmmsg` returned (fallback).
+    /// User-space CLOCK_REALTIME right after `recvmmsg` (macOS: `recvmsg`) returned (fallback).
     pub rx_user: u64,
     pub tos: Option<u8>,
     pub ttl: Option<u8>,
@@ -295,15 +336,20 @@ pub struct UdpSock {
     /// uses it.
     next_id: AtomicU32,
     /// [`TxIdMode`] code; may fall back from explicit to predicted on the first send.
+    #[cfg(target_os = "linux")]
     id_mode: AtomicU8,
     /// Whether a send has confirmed the id mode yet.
+    #[cfg(target_os = "linux")]
     mode_confirmed: AtomicBool,
     /// The kernel returns ids on append-stage errors (≥ 6.13), for `Predicted` mode.
+    #[cfg(target_os = "linux")]
     restores_append_ids: bool,
     /// `Predicted` mode: the last call assumed a burn after a partial send (errno unknown).
+    #[cfg(target_os = "linux")]
     provisional_burn: AtomicBool,
     /// Control message type that carries an explicit id (`SCM_TS_OPT_ID`; tests replace it
     /// with an unknown type to get the EINVAL of a kernel without it).
+    #[cfg(target_os = "linux")]
     opt_id_cmsg: libc::c_int,
 }
 
@@ -312,28 +358,35 @@ pub(crate) fn sockaddr_from(addr: &SocketAddr) -> (libc::sockaddr_storage, libc:
     let mut ss: libc::sockaddr_storage = unsafe { zeroed() };
     let len = match addr {
         SocketAddr::V4(a) => {
-            let sin = libc::sockaddr_in {
-                sin_family: libc::AF_INET as libc::sa_family_t,
-                sin_port: a.port().to_be(),
-                sin_addr: libc::in_addr {
-                    s_addr: u32::from_ne_bytes(a.ip().octets()),
-                },
-                sin_zero: [0; 8],
+            // SAFETY: sockaddr_in is plain data; all-zero is a valid value, set below.
+            let mut sin: libc::sockaddr_in = unsafe { zeroed() };
+            sin.sin_family = libc::AF_INET as libc::sa_family_t;
+            sin.sin_port = a.port().to_be();
+            sin.sin_addr = libc::in_addr {
+                s_addr: u32::from_ne_bytes(a.ip().octets()),
             };
+            #[cfg(target_os = "macos")]
+            {
+                sin.sin_len = size_of::<libc::sockaddr_in>() as u8;
+            }
             // SAFETY: sockaddr_storage is larger than and suitably aligned for sockaddr_in.
             unsafe { std::ptr::write((&raw mut ss).cast::<libc::sockaddr_in>(), sin) };
             size_of::<libc::sockaddr_in>()
         }
         SocketAddr::V6(a) => {
-            let sin6 = libc::sockaddr_in6 {
-                sin6_family: libc::AF_INET6 as libc::sa_family_t,
-                sin6_port: a.port().to_be(),
-                sin6_flowinfo: a.flowinfo(),
-                sin6_addr: libc::in6_addr {
-                    s6_addr: a.ip().octets(),
-                },
-                sin6_scope_id: a.scope_id(),
+            // SAFETY: sockaddr_in6 is plain data; all-zero is a valid value, set below.
+            let mut sin6: libc::sockaddr_in6 = unsafe { zeroed() };
+            sin6.sin6_family = libc::AF_INET6 as libc::sa_family_t;
+            sin6.sin6_port = a.port().to_be();
+            sin6.sin6_flowinfo = a.flowinfo();
+            sin6.sin6_addr = libc::in6_addr {
+                s6_addr: a.ip().octets(),
             };
+            sin6.sin6_scope_id = a.scope_id();
+            #[cfg(target_os = "macos")]
+            {
+                sin6.sin6_len = size_of::<libc::sockaddr_in6>() as u8;
+            }
             // SAFETY: sockaddr_storage is larger than and suitably aligned for sockaddr_in6.
             unsafe { std::ptr::write((&raw mut ss).cast::<libc::sockaddr_in6>(), sin6) };
             size_of::<libc::sockaddr_in6>()
@@ -368,6 +421,7 @@ pub(crate) fn sockaddr_to(ss: &libc::sockaddr_storage) -> Option<SocketAddr> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn ts_ns(ts: &libc::timespec) -> u64 {
     ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
 }
@@ -397,8 +451,91 @@ fn read_int(data: &[u8]) -> Option<i32> {
     Some(i32::from_ne_bytes(data.get(..4)?.try_into().ok()?))
 }
 
+/// A close-on-exec, non-blocking UDP socket. macOS has no `SOCK_CLOEXEC`/`SOCK_NONBLOCK`, so
+/// both are set with `fcntl` before the socket is used.
+#[cfg(target_os = "macos")]
+fn udp_socket(domain: libc::c_int) -> io::Result<OwnedFd> {
+    // SAFETY: plain socket(2) call; the returned fd is owned below.
+    let raw = cvt(unsafe { libc::socket(domain, libc::SOCK_DGRAM, 0) })?;
+    // SAFETY: `raw` is a fresh, valid fd we exclusively own.
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    let f = fd.as_raw_fd();
+    // SAFETY: fcntl on a valid fd with integer arguments.
+    cvt(unsafe { libc::fcntl(f, libc::F_SETFD, libc::FD_CLOEXEC) })?;
+    // SAFETY: as above.
+    let fl = cvt(unsafe { libc::fcntl(f, libc::F_GETFL) })?;
+    // SAFETY: as above.
+    cvt(unsafe { libc::fcntl(f, libc::F_SETFL, fl | libc::O_NONBLOCK) })?;
+    Ok(fd)
+}
+
+/// Ask for a `size`-byte buffer with `opt`; macOS refuses a request above
+/// `kern.ipc.maxsockbuf` rather than capping it, so halve the request until it is accepted or
+/// reaches [`MIN_BUF`]. The effective size is read back by the caller.
+#[cfg(target_os = "macos")]
+fn set_buf(f: RawFd, opt: libc::c_int, size: usize) {
+    let mut s = size;
+    while setsockopt(f, libc::SOL_SOCKET, opt, s as libc::c_int).is_err() && s > MIN_BUF {
+        s = (s / 2).max(MIN_BUF);
+    }
+}
+
 impl UdpSock {
     /// Create and bind a UDP socket. IPv6 sockets are v6-only.
+    #[cfg(target_os = "macos")]
+    pub fn bind(addr: SocketAddr, opts: SockOpts) -> io::Result<UdpSock> {
+        let v6 = addr.is_ipv6();
+        let fd = udp_socket(if v6 { libc::AF_INET6 } else { libc::AF_INET })?;
+        let f = fd.as_raw_fd();
+        if v6 {
+            setsockopt(f, libc::IPPROTO_IPV6, libc::IPV6_V6ONLY, 1 as libc::c_int)?;
+        }
+        setsockopt(f, libc::SOL_SOCKET, libc::SO_REUSEADDR, 1 as libc::c_int)?;
+        set_buf(f, libc::SO_RCVBUF, opts.recv_buf);
+        set_buf(f, libc::SO_SNDBUF, opts.send_buf);
+        if v6 {
+            setsockopt(
+                f,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVTCLASS,
+                1 as libc::c_int,
+            )?;
+            setsockopt(
+                f,
+                libc::IPPROTO_IPV6,
+                libc::IPV6_RECVHOPLIMIT,
+                1 as libc::c_int,
+            )?;
+            if opts.pmtu_probe {
+                setsockopt(f, libc::IPPROTO_IPV6, libc::IPV6_DONTFRAG, 1 as libc::c_int)?;
+            }
+        } else {
+            setsockopt(f, libc::IPPROTO_IP, libc::IP_RECVTOS, 1 as libc::c_int)?;
+            setsockopt(f, libc::IPPROTO_IP, libc::IP_RECVTTL, 1 as libc::c_int)?;
+            if opts.pmtu_probe {
+                setsockopt(f, libc::IPPROTO_IP, libc::IP_DONTFRAG, 1 as libc::c_int)?;
+            }
+        }
+        let mut caps = TsCaps::default();
+        if opts.timestamping {
+            caps.kernel_rx =
+                setsockopt(f, libc::SOL_SOCKET, libc::SO_TIMESTAMP, 1 as libc::c_int).is_ok();
+        }
+        caps.recv_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_RCVBUF).unwrap_or(0) as usize;
+        caps.send_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_SNDBUF).unwrap_or(0) as usize;
+        let (ss, len) = sockaddr_from(&addr);
+        // SAFETY: `ss`/`len` describe a valid sockaddr for this socket's family.
+        cvt(unsafe { libc::bind(f, (&raw const ss).cast(), len) })?;
+        Ok(UdpSock {
+            fd,
+            v6,
+            caps,
+            next_id: AtomicU32::new(0),
+        })
+    }
+
+    /// Create and bind a UDP socket. IPv6 sockets are v6-only.
+    #[cfg(target_os = "linux")]
     pub fn bind(addr: SocketAddr, opts: SockOpts) -> io::Result<UdpSock> {
         let v6 = addr.is_ipv6();
         let domain = if v6 { libc::AF_INET6 } else { libc::AF_INET };
@@ -488,6 +625,8 @@ impl UdpSock {
             }
         }
         caps.rxq_ovfl = setsockopt(f, libc::SOL_SOCKET, SO_RXQ_OVFL, 1 as libc::c_int).is_ok();
+        // IP_RECVERR / IPV6_RECVERR were enabled above, or bind failed.
+        caps.icmp_errors = true;
         caps.recv_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_RCVBUF).unwrap_or(0) as usize;
         caps.send_buf = getsockopt_int(f, libc::SOL_SOCKET, libc::SO_SNDBUF).unwrap_or(0) as usize;
         let (ss, len) = sockaddr_from(&addr);
@@ -536,13 +675,96 @@ impl UdpSock {
     }
 
     /// How this socket's transmit ids are known.
+    #[cfg(target_os = "linux")]
     pub fn tx_id_mode(&self) -> TxIdMode {
         TxIdMode::from_code(self.id_mode.load(Ordering::Relaxed))
+    }
+
+    /// How this socket's transmit ids are known: on macOS there are no kernel TX stamps, so ids
+    /// are only a local counter (probe.md §9.2).
+    #[cfg(target_os = "macos")]
+    pub fn tx_id_mode(&self) -> TxIdMode {
+        TxIdMode::None
+    }
+
+    /// Send a batch with one `sendmsg` per datagram, each with its own TOS (probe.md §9.4).
+    /// Stops at the first datagram the kernel rejects, whose error is always known; no id is
+    /// burned (`TxIdMode::None`), so `burned_id` and `unburned_id` are `None`.
+    #[cfg(target_os = "macos")]
+    pub fn send_batch(&self, msgs: &[OutMsg<'_>]) -> SendOutcome {
+        let first_id = self.next_id.load(Ordering::Relaxed);
+        let mut sent = 0;
+        let mut error = None;
+        for m in msgs {
+            match self.sendmsg(m) {
+                Ok(()) => sent += 1,
+                Err(e) => {
+                    error = Some(e);
+                    break;
+                }
+            }
+        }
+        self.next_id
+            .store(first_id.wrapping_add(sent as u32), Ordering::Relaxed);
+        SendOutcome {
+            sent,
+            first_id,
+            failed: sent < msgs.len(),
+            error,
+            burned_id: None,
+            unburned_id: None,
+        }
+    }
+
+    /// One `sendmsg` call carrying the datagram's TOS / traffic class in a cmsg.
+    #[cfg(target_os = "macos")]
+    fn sendmsg(&self, m: &OutMsg<'_>) -> io::Result<()> {
+        let (mut name, namelen) = sockaddr_from(&m.dst);
+        let mut iov = libc::iovec {
+            iov_base: m.payload.as_ptr() as *mut libc::c_void,
+            iov_len: m.payload.len(),
+        };
+        // u64 words keep the cmsg header aligned.
+        let mut ctrl = [0u64; CMSG_BUF / 8];
+        // SAFETY: msghdr is plain data; zero is a valid initial value.
+        let mut h: libc::msghdr = unsafe { zeroed() };
+        h.msg_name = (&raw mut name).cast();
+        h.msg_namelen = namelen;
+        h.msg_iov = &raw mut iov;
+        h.msg_iovlen = 1;
+        h.msg_control = ctrl.as_mut_ptr().cast();
+        // SAFETY: CMSG_SPACE is a pure size computation.
+        h.msg_controllen = unsafe { libc::CMSG_SPACE(size_of::<libc::c_int>() as u32) } as _;
+        let (level, ty) = if self.v6 {
+            (libc::IPPROTO_IPV6, libc::IPV6_TCLASS)
+        } else {
+            (libc::IPPROTO_IP, libc::IP_TOS)
+        };
+        // SAFETY: msg_control points at a CMSG_BUF-byte buffer, larger than one CMSG_SPACE(4);
+        // CMSG_FIRSTHDR is non-null for a non-zero msg_controllen.
+        unsafe {
+            let c = libc::CMSG_FIRSTHDR(&raw const h);
+            (*c).cmsg_level = level;
+            (*c).cmsg_type = ty;
+            (*c).cmsg_len = libc::CMSG_LEN(size_of::<libc::c_int>() as u32) as _;
+            std::ptr::write_unaligned(
+                libc::CMSG_DATA(c).cast::<libc::c_int>(),
+                libc::c_int::from(m.tos),
+            );
+        }
+        // SAFETY: `h` points at live buffers (name, iov, ctrl, the payload) that outlive the
+        // call.
+        let r = unsafe { libc::sendmsg(self.fd.as_raw_fd(), &raw const h, 0) };
+        if r < 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(())
     }
 
     /// Send a batch with `sendmmsg`, one datagram per message, each with its own TOS (and, in
     /// `Explicit` mode, its own OPT_ID). Stops at the first datagram the kernel rejects; the
     /// caller decides whether to retry it or the rest (docs/design/probe.md §4.1).
+    #[cfg(target_os = "linux")]
     pub fn send_batch(&self, msgs: &[OutMsg<'_>]) -> SendOutcome {
         let first_id = self.next_id.load(Ordering::Relaxed);
         if msgs.is_empty() {
@@ -597,6 +819,7 @@ impl UdpSock {
     }
 
     /// One `sendmmsg` call. `first_id`: set each datagram's OPT_ID explicitly from it.
+    #[cfg(target_os = "linux")]
     fn sendmmsg(&self, msgs: &[OutMsg<'_>], first_id: Option<u32>) -> io::Result<usize> {
         let n = msgs.len();
         let mut addrs = Vec::with_capacity(n);
@@ -669,7 +892,7 @@ impl UdpSock {
     }
 
     /// Wait up to `timeout_ms` for readability or error-queue entries.
-    /// Returns (readable, error_queue_pending).
+    /// Returns (readable, error_queue_pending); the latter is always false on macOS.
     pub fn poll(&self, timeout_ms: i32) -> io::Result<(bool, bool)> {
         let mut p = libc::pollfd {
             fd: self.fd.as_raw_fd(),
@@ -685,13 +908,64 @@ impl UdpSock {
             }
             return Err(e);
         }
-        Ok((
-            p.revents & libc::POLLIN != 0,
-            p.revents & libc::POLLERR != 0,
-        ))
+        Ok(revents(&p))
+    }
+
+    /// Receive up to `bufs.len()` datagrams without blocking, one `recvmsg` each (probe.md
+    /// §9.3, §9.4). Metadata is appended to `out`.
+    #[cfg(target_os = "macos")]
+    pub fn recv_batch(
+        &self,
+        bufs: &mut [[u8; MAX_DATAGRAM]],
+        out: &mut Vec<InMsg>,
+    ) -> io::Result<usize> {
+        let mut got = 0;
+        for buf in bufs.iter_mut() {
+            // SAFETY: plain data, zero-initialised.
+            let mut name: libc::sockaddr_storage = unsafe { zeroed() };
+            let mut ctrl = [0u64; CMSG_BUF / 8];
+            let mut iov = libc::iovec {
+                iov_base: buf.as_mut_ptr().cast(),
+                iov_len: MAX_DATAGRAM,
+            };
+            // SAFETY: plain data, zero-initialised.
+            let mut h: libc::msghdr = unsafe { zeroed() };
+            h.msg_name = (&raw mut name).cast();
+            h.msg_namelen = size_of::<libc::sockaddr_storage>() as libc::socklen_t;
+            h.msg_iov = &raw mut iov;
+            h.msg_iovlen = 1;
+            h.msg_control = ctrl.as_mut_ptr().cast();
+            h.msg_controllen = CMSG_BUF as _;
+            // SAFETY: all pointers reference live local buffers of the stated sizes.
+            let r = unsafe { libc::recvmsg(self.fd.as_raw_fd(), &raw mut h, libc::MSG_DONTWAIT) };
+            let rx_user = crate::clock::realtime();
+            if r < 0 {
+                let e = io::Error::last_os_error();
+                if e.kind() == io::ErrorKind::WouldBlock || got > 0 {
+                    // Like recvmmsg, report what was received; a later call sees the error.
+                    return Ok(got);
+                }
+                return Err(e);
+            }
+            let mut m = InMsg {
+                len: r as usize,
+                src: sockaddr_to(&name).unwrap_or(SocketAddr::from(([0, 0, 0, 0], 0))),
+                rx_kernel: None,
+                rxq_drops: None,
+                rx_user,
+                tos: None,
+                ttl: None,
+                truncated: h.msg_flags & libc::MSG_TRUNC != 0,
+            };
+            for_each_cmsg(&h, |level, ty, data| rx_cmsg(&mut m, level, ty, data));
+            out.push(m);
+            got += 1;
+        }
+        Ok(got)
     }
 
     /// Receive up to `bufs.len()` datagrams without blocking. Metadata is appended to `out`.
+    #[cfg(target_os = "linux")]
     pub fn recv_batch(
         &self,
         bufs: &mut [[u8; MAX_DATAGRAM]],
@@ -791,7 +1065,15 @@ impl UdpSock {
         Ok(r)
     }
 
+    /// Drain the error queue without blocking: macOS has none (probe.md §9.2, §9.5), so there
+    /// is never anything to drain.
+    #[cfg(target_os = "macos")]
+    pub fn drain_errqueue(&self, _out: &mut Vec<ErrEvent>) -> io::Result<usize> {
+        Ok(0)
+    }
+
     /// Drain the error queue (TX timestamps, ICMP errors, local errors) without blocking.
+    #[cfg(target_os = "linux")]
     pub fn drain_errqueue(&self, out: &mut Vec<ErrEvent>) -> io::Result<usize> {
         let mut count = 0;
         loop {
@@ -903,7 +1185,8 @@ impl UdpSock {
     }
 }
 
-/// Poll several sockets at once. Returns (readable, error-queue pending) per socket.
+/// Poll several sockets at once. Returns (readable, error-queue pending) per socket; the latter
+/// is always false on macOS.
 pub fn poll_many(socks: &[&UdpSock], timeout_ms: i32) -> io::Result<Vec<(bool, bool)>> {
     let mut fds: Vec<libc::pollfd> = socks
         .iter()
@@ -922,15 +1205,36 @@ pub fn poll_many(socks: &[&UdpSock], timeout_ms: i32) -> io::Result<Vec<(bool, b
         }
         return Err(e);
     }
-    Ok(fds
-        .iter()
-        .map(|p| {
-            (
-                p.revents & libc::POLLIN != 0,
-                p.revents & libc::POLLERR != 0,
-            )
-        })
-        .collect())
+    Ok(fds.iter().map(revents).collect())
+}
+
+/// (readable, error-queue pending) of a polled socket. macOS has no error queue, so `POLLERR`
+/// there means a pending socket error, which the next send or receive reports.
+fn revents(p: &libc::pollfd) -> (bool, bool) {
+    (
+        p.revents & libc::POLLIN != 0,
+        cfg!(target_os = "linux") && p.revents & libc::POLLERR != 0,
+    )
+}
+
+/// Record one cmsg of a received datagram (macOS, probe.md §9.3): `SO_TIMESTAMP` is a
+/// `struct timeval` in CLOCK_REALTIME; the received TOS and TTL are one byte each under their
+/// `IP_RECV*` types; IPv6 traffic class and hop limit are ints.
+#[cfg(target_os = "macos")]
+fn rx_cmsg(m: &mut InMsg, level: libc::c_int, ty: libc::c_int, data: &[u8]) {
+    match (level, ty) {
+        (libc::SOL_SOCKET, libc::SCM_TIMESTAMP) if data.len() >= size_of::<libc::timeval>() => {
+            // SAFETY: SCM_TIMESTAMP carries one timeval; length checked; read_unaligned
+            // tolerates cmsg alignment.
+            let tv: libc::timeval = unsafe { std::ptr::read_unaligned(data.as_ptr().cast()) };
+            m.rx_kernel = Some(tv.tv_sec as u64 * 1_000_000_000 + tv.tv_usec as u64 * 1_000);
+        }
+        (libc::IPPROTO_IP, libc::IP_RECVTOS) => m.tos = data.first().copied(),
+        (libc::IPPROTO_IP, libc::IP_RECVTTL) => m.ttl = data.first().copied(),
+        (libc::IPPROTO_IPV6, libc::IPV6_TCLASS) => m.tos = read_int(data).map(|v| v as u8),
+        (libc::IPPROTO_IPV6, libc::IPV6_HOPLIMIT) => m.ttl = read_int(data).map(|v| v as u8),
+        _ => {}
+    }
 }
 
 impl AsRawFd for UdpSock {
@@ -943,6 +1247,7 @@ impl AsRawFd for UdpSock {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn loopback_tos_ttl_and_timestamps() {
         let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
@@ -1011,6 +1316,7 @@ mod tests {
         assert!(ids.contains(&0) && ids.contains(&3), "{errs:?}");
     }
 
+    #[cfg(target_os = "linux")]
     fn drain_stamp_ids(s: &UdpSock, want: usize) -> Vec<u32> {
         let mut errs = Vec::new();
         for _ in 0..50 {
@@ -1028,6 +1334,7 @@ mod tests {
             .collect()
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn failed_sends_burn_ids_and_stamps_stay_aligned() {
         let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
@@ -1069,6 +1376,7 @@ mod tests {
         assert!(ids.iter().all(|i| *i == 0 || *i == last), "{ids:?}");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn predicted_consumption_rules() {
         let e = io::Error::from_raw_os_error;
@@ -1095,6 +1403,7 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn partial_send_burn_is_undone_by_a_retry_that_consumes_nothing() {
         use TxIdMode::{Explicit, Predicted};
@@ -1145,6 +1454,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn forced_predicted_ids_match_the_kernel_after_partial_send_and_retry() {
         let a = UdpSock::bind(
@@ -1185,6 +1495,7 @@ mod tests {
         assert_eq!(ids, vec![0, 1], "kernel ids must match the predicted ones");
     }
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn explicit_ids_fall_back_to_predicted_on_einval() {
         let mut a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
@@ -1219,6 +1530,101 @@ mod tests {
         assert_eq!(ids, vec![0, 1]);
     }
 
+    /// probe.md §9.3: every datagram carries the `SO_TIMESTAMP` cmsg, and its time lies
+    /// between a CLOCK_REALTIME read before the send and one after the receive.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_loopback_tos_ttl_and_timestamps() {
+        for (bind, v6) in [("127.0.0.1:0", false), ("[::1]:0", true)] {
+            let a = UdpSock::bind(bind.parse().unwrap(), SockOpts::default()).unwrap();
+            let b = UdpSock::bind(bind.parse().unwrap(), SockOpts::default()).unwrap();
+            let caps = b.caps();
+            assert!(caps.kernel_rx && !caps.kernel_tx, "{caps:?}");
+            assert!(!caps.rxq_ovfl && !caps.icmp_errors, "{caps:?}");
+            assert!(caps.recv_buf > 0 && caps.send_buf > 0, "{caps:?}");
+            assert_eq!((a.tx_id_mode(), a.is_v6()), (TxIdMode::None, v6));
+            let dst = b.local_addr().unwrap();
+            let payload = [7u8; 100];
+            let msgs: Vec<OutMsg<'_>> = (0..4u8)
+                .map(|i| OutMsg {
+                    dst,
+                    payload: &payload,
+                    tos: (34 << 2) | i,
+                })
+                .collect();
+            let before = crate::clock::realtime();
+            let o = a.send_batch(&msgs);
+            assert_eq!((o.sent, o.failed, o.first_id), (4, false, 0));
+            assert_eq!(a.next_tx_id(), 4);
+            let mut bufs = vec![[0u8; MAX_DATAGRAM]; 8];
+            let mut got = Vec::new();
+            for _ in 0..100 {
+                b.poll(10).unwrap();
+                b.recv_batch(&mut bufs, &mut got).unwrap();
+                if got.len() >= 4 {
+                    break;
+                }
+            }
+            let after = crate::clock::realtime();
+            assert_eq!(got.len(), 4);
+            for (i, m) in got.iter().enumerate() {
+                assert_eq!((m.len, m.src), (100, a.local_addr().unwrap()));
+                assert_eq!(m.tos, Some((34 << 2) | i as u8), "v6 {v6}");
+                assert!(m.ttl.is_some_and(|t| t > 0), "v6 {v6}");
+                let rx = m.rx_kernel.expect("SO_TIMESTAMP on every datagram");
+                // The stamp is whole µs, truncated.
+                assert_eq!(rx % 1_000, 0);
+                assert!(
+                    rx >= before / 1_000 * 1_000 && rx <= after,
+                    "{before} {rx} {after}"
+                );
+                assert!(m.rx_user >= rx && m.rxq_drops.is_none() && !m.truncated);
+            }
+            let mut errs = Vec::new();
+            assert_eq!(a.drain_errqueue(&mut errs).unwrap(), 0);
+            assert!(!a.poll(0).unwrap().1, "no error queue");
+        }
+    }
+
+    /// A failed `sendmsg` stops the batch with its errno known and burns no id (probe.md §9.4).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_failed_send_reports_its_errno() {
+        let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        let dst = b.local_addr().unwrap();
+        let ok = [1u8; 100];
+        let big = vec![2u8; 70_000]; // > 65535: EMSGSIZE
+        let batch = [
+            OutMsg {
+                dst,
+                payload: &ok,
+                tos: 0,
+            },
+            OutMsg {
+                dst,
+                payload: &big,
+                tos: 0,
+            },
+            OutMsg {
+                dst,
+                payload: &ok,
+                tos: 0,
+            },
+        ];
+        let o = a.send_batch(&batch);
+        assert_eq!((o.sent, o.failed, o.first_id), (1, true, 0));
+        assert_eq!(
+            o.error.as_ref().and_then(io::Error::raw_os_error),
+            Some(libc::EMSGSIZE)
+        );
+        assert_eq!((o.burned_id, o.unburned_id), (None, None));
+        let o = a.send_batch(&batch[2..]);
+        assert_eq!((o.sent, o.failed, o.first_id), (1, false, 1));
+        assert!(a.send_batch(&[]).sent == 0 && a.next_tx_id() == 2);
+    }
+
+    #[cfg(target_os = "linux")]
     #[test]
     fn socket_drops_are_reported_per_datagram() {
         let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
