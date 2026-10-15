@@ -1252,6 +1252,7 @@ mod tests {
     fn loopback_tos_ttl_and_timestamps() {
         let a = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
         let b = UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap();
+        assert!(b.caps().icmp_errors, "IP_RECVERR: {:?}", b.caps());
         let dst = b.local_addr().unwrap();
         let payload = [7u8; 100];
         let msgs: Vec<OutMsg<'_>> = (0..4u8)

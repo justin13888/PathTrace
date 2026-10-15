@@ -363,9 +363,17 @@ mod tests {
             tcp_info(c.as_raw_fd()).unwrap_err(),
             congestion(c.as_raw_fd()).unwrap_err(),
             saved_syn(c.as_raw_fd()).unwrap_err(),
+            set_save_syn(c.as_raw_fd()).unwrap_err(),
         ] {
             assert_eq!(e.kind(), io::ErrorKind::Unsupported);
         }
+    }
+
+    /// The PTF table each kind of TCP state goes to (probe.md §9.7).
+    #[test]
+    fn state_kind_tables() {
+        assert_eq!(TcpStateKind::TcpInfo.table(), "tcpinfo");
+        assert_eq!(TcpStateKind::ConnectionInfo.table(), "tcpinfo_darwin");
     }
 
     #[cfg(target_os = "linux")]
@@ -394,5 +402,9 @@ mod tests {
         assert!(len >= 104);
         assert!(acked.is_some());
         assert!(!cc.is_empty());
+        assert_eq!(
+            tcp_connection_info(s.as_raw_fd()).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
     }
 }

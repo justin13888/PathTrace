@@ -145,3 +145,46 @@ pub(crate) fn getsockopt_int(
     let r = unsafe { libc::getsockopt(fd, level, name, (&raw mut v).cast(), &mut len) };
     cvt(r).map(|_| v)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The PTF 1.2 `endpoint.os_family` and TCP state kind of each platform (probe.md §9).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn platform_linux() {
+        assert_eq!(PLATFORM.os_family, "linux");
+        assert_eq!(PLATFORM.tcp_state, tcp::TcpStateKind::TcpInfo);
+        assert_eq!(PLATFORM.tcp_state.table(), "tcpinfo");
+        let p = PLATFORM;
+        assert_eq!(
+            (
+                p.kernel_tx_stamps,
+                p.socket_rx_drops,
+                p.iface_tx_dropped,
+                p.power_assertion
+            ),
+            (true, true, true, false)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn platform_macos() {
+        assert_eq!(PLATFORM.os_family, "darwin");
+        assert_eq!(PLATFORM.tcp_state, tcp::TcpStateKind::ConnectionInfo);
+        assert_eq!(PLATFORM.tcp_state.table(), "tcpinfo_darwin");
+        let p = PLATFORM;
+        assert_eq!(
+            (
+                p.kernel_tx_stamps,
+                p.socket_rx_drops,
+                p.iface_tx_dropped,
+                p.qdisc_stats,
+                p.power_assertion
+            ),
+            (false, false, false, false, true)
+        );
+    }
+}
