@@ -737,10 +737,10 @@ fn local_checks(cfg: &Path) -> Vec<Check> {
     }
     if PLATFORM.power_assertion {
         let (ok, d) = match pt_sys::power::prevent_idle_sleep("pathtrace doctor") {
-            Ok(a) => {
-                drop(a);
-                (true, "a session can keep the system from idle sleep".into())
-            }
+            // The assertion is released when `_assertion` goes out of scope at the end of
+            // this arm. An explicit drop() trips clippy::drop_non_drop on Linux, where
+            // PowerAssertion is a stub without a Drop impl.
+            Ok(_assertion) => (true, "a session can keep the system from idle sleep".into()),
             Err(e) => (
                 false,
                 format!(
