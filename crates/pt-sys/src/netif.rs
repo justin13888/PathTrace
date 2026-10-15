@@ -107,6 +107,15 @@ pub fn iface_with_addr(addr: IpAddr) -> io::Result<Option<String>> {
     Ok(found)
 }
 
+/// Whether a Linux ARP hardware type (`/sys/class/net/<name>/type`) is a layer-3 tunnel
+/// (probe.md §9.9): `ARPHRD_NONE` (65534: TUN, WireGuard, xfrm), `ARPHRD_TUNNEL` (768: ipip,
+/// vti), `ARPHRD_TUNNEL6` (769: ip6tnl, vti6), `ARPHRD_SIT` (776), `ARPHRD_IPGRE` (778: gre)
+/// and `ARPHRD_IP6GRE` (823: ip6gre).
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+fn linux_arphrd_is_tunnel(arphrd: u32) -> bool {
+    matches!(arphrd, 65534 | 768 | 769 | 776 | 778 | 823)
+}
+
 #[cfg(target_os = "linux")]
 fn read_trim(p: &Path) -> Option<String> {
     fs::read_to_string(p).ok().map(|s| s.trim().to_string())
@@ -315,10 +324,7 @@ pub fn iface_info(name: &str) -> IfInfo {
         IfType::Wwan
     } else if matches!(d, "rndis_host" | "cdc_ether" | "cdc_ncm" | "ipheth") {
         IfType::UsbTether
-    } else if base.join("tun_flags").exists()
-        || arphrd == 65534
-        || matches!(arphrd, 768 | 769 | 776)
-    {
+    } else if base.join("tun_flags").exists() || linux_arphrd_is_tunnel(arphrd) {
         IfType::Tunnel
     } else if devpath.is_none() {
         IfType::Virtual
@@ -543,6 +549,16 @@ mod tests {
         assert_eq!(info.kind, IfType::Loopback);
         assert!(info.index > 0 && info.mtu.is_some(), "{info:?}");
         assert!(if_stats(&name).is_some());
+    }
+
+    #[test]
+    fn linux_tunnel_arp_types() {
+        for t in [65534, 768, 769, 776, 778, 823] {
+            assert!(linux_arphrd_is_tunnel(t), "{t}");
+        }
+        for t in [0, 1, 772, 801] {
+            assert!(!linux_arphrd_is_tunnel(t), "{t}");
+        }
     }
 
     #[cfg(target_os = "macos")]
