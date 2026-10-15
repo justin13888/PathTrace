@@ -280,7 +280,10 @@ mod tests {
     #[test]
     fn sleep_until_is_accurate() {
         // On a loaded host the scheduler can delay any single wakeup; the function must be
-        // accurate when it gets the CPU, so judge the best of a few tries.
+        // accurate when it gets the CPU, so judge the best of a few tries. The pacer sleeps in
+        // the pacing QoS class (probe.md §9.4); a test thread's default class lets macOS shift
+        // the coarse wakeup by more than SPIN_NS, so measure under the class the pacer runs in.
+        set_pacing_qos().expect("unprivileged");
         let best = (0..5)
             .map(|_| sleep_until(mono_raw() + 2_000_000, Duration::from_nanos(SPIN_NS)))
             .min()
