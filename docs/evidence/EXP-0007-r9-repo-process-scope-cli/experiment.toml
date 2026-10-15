@@ -9,7 +9,7 @@ documented command exists, JSON output parses, exit codes are 0/1/2 as documente
 and idempotent, leaves raw sections byte-identical and raises a 1.0 file's header minor to 1.1; traces carry the tool commit and every PATH field a \
 versioned method and status; doctor runs and reports JSON."""
 command = "sh docs/evidence/EXP-0007-r9-repo-process-scope-cli/check.sh"
-covers = [".convco", "hk.pkl", "mise.toml", "mise.lock", "AGENTS.md", "LICENSE", "crates/pathtrace/src", "crates/pt-derive/src", "crates/pt-probe/src/flows.rs", "crates/pt-sys/src", "conformance/v1.0-real"]
+covers = [".convco", "hk.pkl", "mise.toml", "mise.lock", "AGENTS.md", "LICENSE", "Cargo.toml", "crates", "xtask", "bench", "conformance/v1.0-real"]
 requirements = [
   "REQ-REPO-001", "REQ-REPO-002", "REQ-REPO-003", "REQ-REPO-004", "REQ-REPO-005", "REQ-REPO-006", "REQ-REPO-007", "REQ-REPO-008",
   "REQ-SCOPE-002", "REQ-SCOPE-003", "REQ-SCOPE-004", "REQ-SCOPE-009",
