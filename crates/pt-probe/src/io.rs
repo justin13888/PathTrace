@@ -30,6 +30,39 @@ pub const STALL_NS: u64 = 2_000_000;
 pub const CONTROL_FLOW_A: u8 = 250;
 pub const CONTROL_FLOW_B: u8 = 251;
 
+/// The verdict on a [`pt_sys::clock::pacing_check`], worded once for `doctor` and `probe`
+/// (probe.md §9.4): `(ok, detail)`. Not ok when the pacer would wake [`PACING_LATE_NS`] or more
+/// late at best, naming the likely cause and what to do about it.
+///
+/// [`PACING_LATE_NS`]: pt_sys::clock::PACING_LATE_NS
+pub fn pacing_verdict(c: &pt_sys::clock::PacingCheck) -> (bool, String) {
+    let policy = match &c.policy {
+        Some(e) => format!("; pacing policy not set: {e}"),
+        None => String::new(),
+    };
+    if !c.late() {
+        return (
+            true,
+            format!(
+                "pacer wakes {} µs late at best{policy}",
+                c.best_late_ns / 1_000
+            ),
+        );
+    }
+    let cause = if c.background {
+        "this process runs in the background policy (taskpolicy -b, a background launchd service)"
+    } else {
+        "this process likely runs under a QoS clamp (taskpolicy -c, a launchd ProcessType, a CI runner's service) or the host is loaded"
+    };
+    (
+        false,
+        format!(
+            "pacer wakes {:.1} ms late at best{policy}: {cause}; start pathtrace from a terminal session (lateness is recorded as tx_user_lag and stall events)",
+            c.best_late_ns as f64 / 1e6
+        ),
+    )
+}
+
 /// A control datagram handed from the receiver to the control layer.
 #[derive(Debug)]
 pub struct CtrlIn {
@@ -200,7 +233,8 @@ impl Endpoint {
             std::thread::Builder::new()
                 .name("pacer".into())
                 .spawn(move || {
-                    // The least timer coalescing on macOS; nothing on Linux (probe.md §9.4).
+                    // On macOS the least timer coalescing and the time-constraint policy;
+                    // nothing on Linux (probe.md §9.4).
                     let _ = set_pacing_qos();
                     pacer_loop(shared, socks, ids, cmd_rx, rec);
                 })?
@@ -1139,6 +1173,33 @@ pub fn is_controlled(p: &Pattern) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pacing_verdicts() {
+        use pt_sys::clock::PacingCheck;
+        let c = |late: u64, background: bool, policy: Option<std::io::Error>| PacingCheck {
+            policy,
+            best_late_ns: late,
+            background,
+        };
+        assert_eq!(
+            pacing_verdict(&c(42_000, false, None)),
+            (true, "pacer wakes 42 µs late at best".to_string())
+        );
+        let (ok, d) = pacing_verdict(&c(2_310_792, false, None));
+        assert!(!ok);
+        assert!(d.starts_with("pacer wakes 2.3 ms late at best: "), "{d}");
+        assert!(
+            d.contains("QoS clamp") && d.contains("terminal session"),
+            "{d}"
+        );
+        let (ok, d) = pacing_verdict(&c(4_384_334, true, None));
+        assert!(!ok);
+        assert!(d.contains("background policy (taskpolicy -b"), "{d}");
+        let (ok, d) = pacing_verdict(&c(10_000, false, Some(std::io::Error::other("refused"))));
+        assert!(ok);
+        assert!(d.ends_with("; pacing policy not set: refused"), "{d}");
+    }
 
     #[test]
     fn dead_man_stops_saturating_flows_and_pauses_observers() {
