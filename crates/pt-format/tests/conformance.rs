@@ -52,7 +52,7 @@ fn corpus_verdicts_are_stable() {
 #[test]
 fn jsonl_twin_roundtrips_valid_corpus() {
     // The synthetic corpora (conformance/v1.0-real holds captured traces, checked above).
-    for version in ["v1.0", "v1.1"] {
+    for version in ["v1.0", "v1.1", "v1.2"] {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../conformance")
             .join(version);

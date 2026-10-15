@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Independent PTF 1.0 reader, written only from docs/design/ptf-format.md (REQ-FMT-018).
+"""Independent PTF 1.x reader (1.0 to 1.2), written only from docs/design/ptf-format.md (REQ-FMT-018).
+
+Every 1.1 and 1.2 addition is a non-critical table, column or head key, so the generic reading
+below covers them: heads are decoded as whole CBOR maps, tables and columns by name, and
+nullability comes from each column.
 
 Pure Python 3.14 standard library (compression.zstd); CRC32C and BLAKE3 are implemented here
 from their published specifications, so nothing is shared with the Rust implementation.

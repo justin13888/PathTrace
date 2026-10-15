@@ -1,4 +1,4 @@
-; PTF 1.x section heads (1.0, with 1.1 additions marked), CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
+; PTF 1.x section heads (1.0, with 1.1 and 1.2 additions marked), CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
 ; All maps are deterministic CBOR (ptf-format.md Part II §4). Every map is open: readers ignore
 ; unknown keys (`* tstr => any`), so minor versions can add keys (P6).
 
@@ -47,7 +47,7 @@ meta = {
   ? endpoints: { ? a: endpoint, ? b: endpoint },
   ? endpoint: endpoint,                              ; obslog only
   ? network: { ? class: tstr, ? label: tstr, ? mobility: tstr, ? tags: [* tstr], * tstr => any },
-  ? clocks: { * clock-id => { kind: "monotonic_raw" / "realtime" / "tai" / "trace", ? endpoint: "a" / "b", ? shifted: bool, * tstr => any } },
+  ? clocks: { * clock-id => { kind: "monotonic_raw" / "realtime" / "tai" / "trace", ? endpoint: "a" / "b", ? shifted: bool, ? source: tstr, * tstr => any } },   ; 1.2: source (§6; absent = the Linux clocks)
   redaction: "full" / "shareable" / "anonymous",
   ? complete: bool,
   ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null }],
@@ -60,9 +60,13 @@ meta = {
 tool = { name: tstr, version: tstr, git_commit: tstr, git_dirty: bool, * tstr => any }
 endpoint = {
   ? os: tstr, ? kernel: tstr, ? arch: tstr, ? hostname: tstr, ? cpu: tstr, ? cpus: uint,
+  ? os_family: "linux" / "darwin" / tstr,            ; 1.2
+  ? os_version: tstr,                                ; 1.2
   ? clocksource: tstr, ? tcp_cc_default: tstr, ? tcp_cc_available: tstr,
   ? addr: tstr, ? peer_addr: tstr, ? metered: tstr,
-  ? iface: { ? name: tstr, ? index: uint, ? type: tstr, ? driver: tstr / null, ? mtu: uint / null, ? usb: bool, * tstr => any },
+  ? iface: { ? name: tstr, ? index: uint, ? type: tstr, ? driver: tstr / null, ? mtu: uint / null, ? usb: bool,
+             ? tunnel: { kind: tstr, provider: tstr / null, * tstr => any },   ; 1.2: absent when not a tunnel
+             * tstr => any },
   ? timestamping: { * tstr => any },
   ? sockets: [* socket],                             ; 1.1: one entry per UDP socket, in sock-index order
   ? qdisc: { ? kind: tstr, ? handle: uint, * tstr => any } / null,   ; 1.1: egress root qdisc (null: none reported)
@@ -72,6 +76,7 @@ endpoint = {
 socket = {
   name: tstr, kernel_rx: bool, kernel_tx: bool, recv_buf: uint, send_buf: uint,
   rxq_ovfl: bool, tx_ids: "explicit" / "predicted" / "none" / tstr,
+  ? icmp_errors: bool,                               ; 1.2 (absent: not recorded)
   * tstr => any
 }
 
@@ -99,8 +104,11 @@ path-head = {
   directions: { ? a_to_b: direction, ? b_to_a: direction },
   ? coupling: { * tstr => any },
   ? timeline: [* { * tstr => any }],
+  ? overlay: field,                                  ; 1.2: overlay.egress-iface/1 (overlay, endpoints, kind, provider, mtu, overlay_ns)
   * tstr => any
 }
+; 1.2: when PATH.overlay.overlay is true, PLCY class entries and the per-direction policer, mtu,
+; ecn and dscp fields carry overlay_limited: true.
 direction = { * tstr => field }                      ; base_delay, jitter, capacity, queue, ...
 field = {
   status: "known" / "estimated" / "unknown",
