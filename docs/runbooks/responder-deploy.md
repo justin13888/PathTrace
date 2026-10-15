@@ -122,6 +122,8 @@ Use this when the responder is reachable only through a tailnet (a home server w
    tailscale ping <host> | tee "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-ping.txt"
    ```
 
+   On a Mac, the Tailscale app does not put a `tailscale` command on `PATH` by default. Turn on its CLI integration (Tailscale menu > Settings > "Show CLI integration", then install it), or call the app's binary directly: `/Applications/Tailscale.app/Contents/MacOS/Tailscale ping <host>`. The same applies to `tailscale ip` and `tailscale netcheck` below.
+
    The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`: a direct path. `via DERP(<region>)` means the traffic is relayed through Tailscale's DERP servers over TCP, so a trace would record the relay, not the network: do not record. Fix the direct connection first (UDP 41641 open outbound, `tailscale netcheck` reports `UDP: true`), or record that network without the overlay. Keep the saved output next to the session's trace.
 4. **Verify.** `pathtrace doctor vm-ts` warns `tunnel` (`utun*` on a Mac, `tailscale0` on Linux, provider `tailscale`). That warning is expected here; every other check must pass, and the smoke session must complete, as in section 4 above.
 
