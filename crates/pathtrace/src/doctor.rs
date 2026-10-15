@@ -1,17 +1,27 @@
-//! `pathtrace doctor`: preflight checks before a field session (REQ-PRB-025). The checks and
-//! why `doctor` opens no session: docs/design/cli.md.
+//! `pathtrace doctor`: preflight checks before a field session (REQ-PRB-025). The checks, which
+//! of them run on each platform, and why `doctor` opens no session: docs/design/cli.md.
 
 use std::io::{ErrorKind, Read, Write};
-use std::net::{SocketAddr, TcpStream, UdpSocket};
+use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use pt_probe::config::{self, Responder};
+use pt_sys::PLATFORM;
 use pt_sys::clock::NtpState;
+use pt_sys::netif::{IfInfo, IfType};
 use pt_sys::udp::{MAX_DATAGRAM, OutMsg, SockOpts, UdpSock};
 
 const TCP_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// The oldest supported macOS release (ADR 0014).
+const MACOS_FLOOR: u32 = 15;
+
+/// Whether this is the macOS build. Checks branch on [`PLATFORM`], never on `cfg`.
+fn darwin() -> bool {
+    PLATFORM.os_family == "darwin"
+}
 
 /// Sent on every connected TCP port. At least 64 bytes (the responder's connection header), so
 /// the responder reads it whole, rejects it, and closes without writing anything.
@@ -35,17 +45,19 @@ fn check(out: &mut Vec<Check>, name: &str, ok: bool, detail: impl Into<String>, 
 
 /// Verify kernel RX and TX timestamps on loopback. The kernel enables RX timestamping lazily, so
 /// the first datagrams after bind may arrive unstamped: keep sending (10 ms apart, up to 0.5 s)
-/// until both kinds of stamp have been seen (docs/design/cli.md).
-fn timestamps() -> (bool, bool, String) {
+/// until both kinds of stamp have been seen, or only an RX stamp where the platform has no
+/// kernel TX stamps (docs/design/cli.md). Returns whether the check passes, and its detail.
+fn timestamps() -> (bool, String) {
     let (Ok(a), Ok(b)) = (
         UdpSock::bind("127.0.0.1:0".parse().expect("addr"), SockOpts::default()),
         UdpSock::bind("127.0.0.1:0".parse().expect("addr"), SockOpts::default()),
     ) else {
-        return (false, false, "cannot bind loopback UDP".into());
+        return (false, "cannot bind loopback UDP".into());
     };
     let Ok(dst) = b.local_addr() else {
-        return (false, false, "no local addr".into());
+        return (false, "no local addr".into());
     };
+    let want_tx = PLATFORM.kernel_tx_stamps;
     let p = [0u8; 64];
     let mut bufs = vec![[0u8; MAX_DATAGRAM]; 4];
     let mut errs = Vec::new();
@@ -68,15 +80,67 @@ fn timestamps() -> (bool, bool, String) {
         tx |= errs
             .iter()
             .any(|e| matches!(e, pt_sys::udp::ErrEvent::TxStamp { .. }));
-        if rx && tx {
+        if rx && (tx || !want_tx) {
             break;
         }
     }
-    (
-        rx,
-        tx,
-        format!("kernel RX stamps {rx}, kernel TX stamps {tx}"),
-    )
+    timestamps_detail(rx, tx, want_tx)
+}
+
+/// The `kernel timestamps` verdict. Where the platform has no kernel TX stamps (macOS), RX alone
+/// passes and the detail says that TX times are user-space (probe.md §9.2).
+fn timestamps_detail(rx: bool, tx: bool, want_tx: bool) -> (bool, String) {
+    if want_tx {
+        (
+            rx && tx,
+            format!("kernel RX stamps {rx}, kernel TX stamps {tx}"),
+        )
+    } else {
+        (
+            rx,
+            format!(
+                "kernel RX stamps {rx}; TX times are user-space (macOS has no kernel TX stamps)"
+            ),
+        )
+    }
+}
+
+/// `ProductVersion` from `/System/Library/CoreServices/SystemVersion.plist`, the file `sw_vers`
+/// reads (an XML property list).
+fn plist_product_version(plist: &str) -> Option<&str> {
+    const KEY: &str = "<key>ProductVersion</key>";
+    let rest = plist[plist.find(KEY)? + KEY.len()..]
+        .trim_start()
+        .strip_prefix("<string>")?;
+    Some(rest[..rest.find("</string>")?].trim())
+}
+
+/// macOS release at least [`MACOS_FLOOR`].
+fn macos_ok(version: &str) -> bool {
+    version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u32>().ok())
+        .is_some_and(|m| m >= MACOS_FLOOR)
+}
+
+/// The fatal OS check: `kernel >= 6.1` on Linux, `macos >= 15` on macOS (ADR 0014).
+fn os_check(c: &mut Vec<Check>) {
+    if darwin() {
+        let plist = std::fs::read_to_string("/System/Library/CoreServices/SystemVersion.plist")
+            .unwrap_or_default();
+        let v = plist_product_version(&plist)
+            .unwrap_or_default()
+            .to_string();
+        check(c, &format!("macos >= {MACOS_FLOOR}"), macos_ok(&v), v, true);
+    } else {
+        let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let kok = kernel_ok(&kernel);
+        check(c, "kernel >= 6.1", kok, kernel, true);
+    }
 }
 
 /// Kernel release at least 6.1.
@@ -89,8 +153,15 @@ fn kernel_ok(release: &str) -> bool {
     ver.len() == 2 && (ver[0], ver[1]) >= (6, 1)
 }
 
-fn clock_sync(s: &NtpState) -> (bool, String) {
-    if s.synced {
+/// The `clock sync` verdict, with advice for this host's OS.
+fn clock_sync(s: &NtpState, darwin: bool) -> (bool, String) {
+    if darwin && !s.synced {
+        (
+            false,
+            "not synchronised: turn on \"Set time and date automatically\" (System Settings > General > Date & Time) and wait for sync"
+                .into(),
+        )
+    } else if s.synced {
         (
             true,
             format!(
@@ -258,13 +329,82 @@ fn offloads(
     (false, d)
 }
 
-/// Interface of the default route, IPv4 first (a route lookup only: nothing is sent to the
-/// documentation addresses).
-fn default_iface() -> Option<String> {
+/// Interface and local address of the default route, IPv4 first (a route lookup only: nothing
+/// is sent to the documentation addresses).
+fn default_route() -> Option<(String, IpAddr)> {
     ["192.0.2.1:9", "[2001:db8::1]:9"].iter().find_map(|a| {
         let ip = pt_sys::netif::local_addr_for(a.parse().expect("addr")).ok()?;
-        pt_sys::netif::iface_with_addr(ip).ok().flatten()
+        Some((pt_sys::netif::iface_with_addr(ip).ok().flatten()?, ip))
     })
+}
+
+/// A local address in Tailscale's ranges, 100.64.0.0/10 or fd7a:115c:a1e0::/48 (probe.md §9.9).
+fn tailscale_addr(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(a) => {
+            let o = a.octets();
+            o[0] == 100 && o[1] & 0xc0 == 64
+        }
+        IpAddr::V6(a) => a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
+    }
+}
+
+/// The tunnel kind of interface `name` (probe.md §9.9): on macOS its name prefix (`utun`,
+/// `ipsec`, `tun`, `tap`); on Linux the sysfs device type (`wireguard`), `tun` for a TUN/TAP
+/// device, or the ARP hardware type of an IP-in-IP tunnel.
+fn tunnel_kind(name: &str) -> String {
+    if darwin() {
+        return name.trim_end_matches(|c: char| c.is_ascii_digit()).into();
+    }
+    let base = Path::new("/sys/class/net").join(name);
+    let uevent = std::fs::read_to_string(base.join("uevent")).unwrap_or_default();
+    let arphrd = std::fs::read_to_string(base.join("type")).unwrap_or_default();
+    linux_tunnel_kind(
+        uevent.lines().find_map(|l| l.strip_prefix("DEVTYPE=")),
+        base.join("tun_flags").exists(),
+        arphrd.trim().parse().unwrap_or(0),
+    )
+}
+
+fn linux_tunnel_kind(devtype: Option<&str>, tun: bool, arphrd: u32) -> String {
+    match (devtype, tun, arphrd) {
+        (Some(d), _, _) if !d.is_empty() => d.into(),
+        (_, true, _) => "tun".into(),
+        (_, _, 768) => "ipip".into(),
+        (_, _, 769) => "ip6tnl".into(),
+        (_, _, 776) => "sit".into(),
+        _ => "unknown".into(),
+    }
+}
+
+/// The `tunnel` verdict for an egress interface: a tunnel warns, because what the probe then
+/// measures for some verdicts is the tunnel's behaviour (probe.md §9.9).
+fn tunnel_detail(info: &IfInfo, kind: &str, local: IpAddr) -> (bool, String) {
+    if info.kind != IfType::Tunnel {
+        return (true, "not a tunnel".into());
+    }
+    let provider = if tailscale_addr(local) {
+        ", provider tailscale"
+    } else {
+        ""
+    };
+    (
+        false,
+        format!(
+            "{} is a tunnel (kind {kind}{provider}): per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel, not the network under it; delay, jitter, loss, capacity and reorder stay end-to-end",
+            info.name
+        ),
+    )
+}
+
+fn tunnel_check(c: &mut Vec<Check>, info: &IfInfo, local: IpAddr, suffix: &str) {
+    let kind = if info.kind == IfType::Tunnel {
+        tunnel_kind(&info.name)
+    } else {
+        String::new()
+    };
+    let (ok, d) = tunnel_detail(info, &kind, local);
+    check(c, &format!("tunnel{suffix}"), ok, d, false);
 }
 
 /// What an empty UDP datagram to a port provoked.
@@ -413,8 +553,10 @@ fn family_checks(c: &mut Vec<Check>, dst: SocketAddr, suffix: &str) -> bool {
             ),
             false,
         );
-        let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
-        check(c, &format!("offloads{suffix}"), ok, d, false);
+        if PLATFORM.offload_features {
+            let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
+            check(c, &format!("offloads{suffix}"), ok, d, false);
+        }
         check(
             c,
             &format!("metered{suffix}"),
@@ -422,7 +564,7 @@ fn family_checks(c: &mut Vec<Check>, dst: SocketAddr, suffix: &str) -> bool {
             pt_probe::context::metered(&iface),
             false,
         );
-        if info.kind == pt_sys::netif::IfType::Wifi {
+        if PLATFORM.wifi_link && info.kind == IfType::Wifi {
             let w = pt_sys::netlink::Nl80211::open().and_then(|mut n| n.sample(info.index));
             check(
                 c,
@@ -432,6 +574,7 @@ fn family_checks(c: &mut Vec<Check>, dst: SocketAddr, suffix: &str) -> bool {
                 false,
             );
         }
+        tunnel_check(c, &info, ip, suffix);
     }
     let main = dst.port();
     let mut reachable = false;
@@ -546,14 +689,12 @@ fn responder_checks(c: &mut Vec<Check>, r: &Responder) {
     );
 }
 
-pub fn run(cfg: &Path, responder: Option<&Responder>, json: bool) -> ExitCode {
+/// The checks of this host alone, in output order. A check that cannot apply on the platform is
+/// not run and not shown (docs/design/cli.md, "`doctor` on macOS").
+fn local_checks(cfg: &Path) -> Vec<Check> {
     let mut c = Vec::new();
-    let kernel = std::fs::read_to_string("/proc/sys/kernel/osrelease")
-        .unwrap_or_default()
-        .trim()
-        .to_string();
-    let kok = kernel_ok(&kernel);
-    check(&mut c, "kernel >= 6.1", kok, kernel, true);
+    let linux = !darwin();
+    os_check(&mut c);
     match config::load_keypair(cfg) {
         Ok(k) => check(
             &mut c,
@@ -564,35 +705,69 @@ pub fn run(cfg: &Path, responder: Option<&Responder>, json: bool) -> ExitCode {
         ),
         Err(e) => check(&mut c, "key", false, e.to_string(), true),
     }
-    let (rx, tx, d) = timestamps();
-    check(&mut c, "kernel timestamps", rx && tx, d, false);
-    let cs =
-        std::fs::read_to_string("/sys/devices/system/clocksource/clocksource0/current_clocksource")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
-    check(
-        &mut c,
-        "clocksource",
-        cs == "tsc" || cs == "arch_sys_counter",
-        cs,
-        false,
-    );
+    let (ok, d) = timestamps();
+    check(&mut c, "kernel timestamps", ok, d, false);
+    if linux {
+        let cs = std::fs::read_to_string(
+            "/sys/devices/system/clocksource/clocksource0/current_clocksource",
+        )
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+        check(
+            &mut c,
+            "clocksource",
+            cs == "tsc" || cs == "arch_sys_counter",
+            cs,
+            false,
+        );
+    }
     let (ok, d) = match pt_sys::clock::ntp_state() {
-        Ok(s) => clock_sync(&s),
-        Err(e) => (false, format!("adjtimex: {e}")),
+        Ok(s) => clock_sync(&s, !linux),
+        Err(e) => (
+            false,
+            format!("{}: {e}", if linux { "adjtimex" } else { "ntp_adjtime" }),
+        ),
     };
     check(&mut c, "clock sync", ok, d, false);
-    let (ok, d) = power(&read_supplies());
-    check(&mut c, "power", ok, d, false);
-    let (driver, govs) = read_governors();
-    let (ok, d) = governor(&driver, &govs);
-    check(&mut c, "cpu governor", ok, d, false);
+    // macOS has no /sys/class/power_supply; its IOKit power check is #78.
+    if linux {
+        let (ok, d) = power(&read_supplies());
+        check(&mut c, "power", ok, d, false);
+    }
+    if PLATFORM.power_assertion {
+        let (ok, d) = match pt_sys::power::prevent_idle_sleep("pathtrace doctor") {
+            Ok(a) => {
+                drop(a);
+                (true, "a session can keep the system from idle sleep".into())
+            }
+            Err(e) => (
+                false,
+                format!(
+                    "cannot create an idle-sleep assertion ({e}): an idle sleep can interrupt a session"
+                ),
+            ),
+        };
+        check(&mut c, "sleep assertion", ok, d, false);
+    }
+    if linux {
+        let (driver, govs) = read_governors();
+        let (ok, d) = governor(&driver, &govs);
+        check(&mut c, "cpu governor", ok, d, false);
+    }
+    c
+}
+
+pub fn run(cfg: &Path, responder: Option<&Responder>, json: bool) -> ExitCode {
+    let mut c = local_checks(cfg);
     if let Some(r) = responder {
         responder_checks(&mut c, r);
-    } else if let Some(iface) = default_iface() {
-        let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
-        check(&mut c, "offloads", ok, d, false);
+    } else if let Some((iface, ip)) = default_route() {
+        if PLATFORM.offload_features {
+            let (ok, d) = offloads(&iface, &pt_sys::ethtool::features(&iface));
+            check(&mut c, "offloads", ok, d, false);
+        }
+        tunnel_check(&mut c, &pt_sys::netif::iface_info(&iface), ip, "");
     }
     let failed = c.iter().any(|x| !x.ok && x.fatal);
     if json {
@@ -635,18 +810,160 @@ mod tests {
 
     #[test]
     fn clock_sync_reports_errors() {
-        let (ok, d) = clock_sync(&NtpState {
+        let synced = NtpState {
             synced: true,
             esterror_us: 120,
             maxerror_us: 4000,
-        });
-        assert!(ok && d.contains("120 us") && d.contains("4000 us"), "{d}");
-        let (ok, d) = clock_sync(&NtpState {
+        };
+        let unsynced = NtpState {
             synced: false,
             esterror_us: 0,
             maxerror_us: 16_000_000,
-        });
-        assert!(!ok && d.contains("NTP"), "{d}");
+        };
+        for darwin in [false, true] {
+            let (ok, d) = clock_sync(&synced, darwin);
+            assert!(ok && d.contains("120 us") && d.contains("4000 us"), "{d}");
+        }
+        let (ok, d) = clock_sync(&unsynced, false);
+        assert!(!ok && d.contains("NTP") && d.contains("chrony"), "{d}");
+        // No Linux daemon advice on macOS.
+        let (ok, d) = clock_sync(&unsynced, true);
+        assert!(
+            !ok && d.contains("Date & Time") && !d.contains("chrony"),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn macos_version_floor() {
+        let plist = "<?xml version=\"1.0\"?>\n<plist version=\"1.0\">\n<dict>\n\t<key>ProductUserVisibleVersion</key>\n\t<string>26.6.1</string>\n\t<key>ProductVersion</key>\n\t<string>15.7.1</string>\n</dict>\n</plist>\n";
+        assert_eq!(plist_product_version(plist), Some("15.7.1"));
+        assert_eq!(plist_product_version("<dict></dict>"), None);
+        assert_eq!(
+            plist_product_version("<key>ProductVersion</key><integer>1</integer>"),
+            None
+        );
+        assert!(macos_ok("15.0"));
+        assert!(macos_ok("26.6.1"));
+        assert!(!macos_ok("14.7.2"));
+        assert!(!macos_ok(""));
+        assert!(!macos_ok("garbage"));
+    }
+
+    #[test]
+    fn timestamps_without_kernel_tx() {
+        assert_eq!(
+            timestamps_detail(true, false, true),
+            (
+                false,
+                "kernel RX stamps true, kernel TX stamps false".into()
+            )
+        );
+        assert!(timestamps_detail(true, true, true).0);
+        let (ok, d) = timestamps_detail(true, false, false);
+        assert!(ok && d.contains("user-space"), "{d}");
+        assert!(!timestamps_detail(false, false, false).0);
+    }
+
+    /// The local checks on this platform, by name: Linux-only checks are not shown on macOS.
+    #[test]
+    fn local_check_list_per_platform() {
+        let c = local_checks(Path::new("/nonexistent/pathtrace-doctor-test"));
+        let names: Vec<&str> = c.iter().map(|x| x.name.as_str()).collect();
+        if darwin() {
+            assert_eq!(
+                names,
+                [
+                    "macos >= 15",
+                    "key",
+                    "kernel timestamps",
+                    "clock sync",
+                    "sleep assertion"
+                ]
+            );
+            // A supported Mac has no fatal finding but the missing key.
+            for x in &c {
+                assert!(
+                    x.ok || !x.fatal || x.name == "key",
+                    "{}: {}",
+                    x.name,
+                    x.detail
+                );
+                assert!(!x.detail.contains("ethtool"), "{}", x.detail);
+            }
+        } else {
+            assert_eq!(
+                names,
+                [
+                    "kernel >= 6.1",
+                    "key",
+                    "kernel timestamps",
+                    "clocksource",
+                    "clock sync",
+                    "power",
+                    "cpu governor"
+                ]
+            );
+        }
+    }
+
+    fn iface(name: &str, kind: IfType) -> IfInfo {
+        IfInfo {
+            name: name.into(),
+            index: 1,
+            kind,
+            driver: None,
+            mtu: Some(1280),
+            usb: false,
+            txqueuelen: None,
+        }
+    }
+
+    #[test]
+    fn tunnel_warning() {
+        let v4: IpAddr = "192.168.1.20".parse().unwrap();
+        assert_eq!(
+            tunnel_detail(&iface("en0", IfType::Wifi), "", v4),
+            (true, "not a tunnel".into())
+        );
+        let (ok, d) = tunnel_detail(&iface("wg0", IfType::Tunnel), "wireguard", v4);
+        assert!(!ok);
+        assert!(d.starts_with("wg0 is a tunnel (kind wireguard): "), "{d}");
+        assert!(d.contains("policers") && d.contains("DSCP"), "{d}");
+        let ts: IpAddr = "100.101.102.103".parse().unwrap();
+        let (_, d) = tunnel_detail(&iface("utun4", IfType::Tunnel), "utun", ts);
+        assert!(
+            d.starts_with("utun4 is a tunnel (kind utun, provider tailscale): "),
+            "{d}"
+        );
+    }
+
+    #[test]
+    fn tailscale_ranges() {
+        for a in ["100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1"] {
+            assert!(tailscale_addr(a.parse().unwrap()), "{a}");
+        }
+        for a in [
+            "100.63.255.255",
+            "100.128.0.1",
+            "10.0.0.1",
+            "fd7a:115c:a1e1::1",
+        ] {
+            assert!(!tailscale_addr(a.parse().unwrap()), "{a}");
+        }
+    }
+
+    #[test]
+    fn linux_tunnel_kinds() {
+        assert_eq!(
+            linux_tunnel_kind(Some("wireguard"), false, 65534),
+            "wireguard"
+        );
+        assert_eq!(linux_tunnel_kind(None, true, 65534), "tun");
+        assert_eq!(linux_tunnel_kind(None, false, 768), "ipip");
+        assert_eq!(linux_tunnel_kind(None, false, 769), "ip6tnl");
+        assert_eq!(linux_tunnel_kind(Some(""), false, 776), "sit");
+        assert_eq!(linux_tunnel_kind(None, false, 1), "unknown");
     }
 
     fn supply(kind: &str, scope: &str, online: bool, status: &str) -> Supply {
@@ -738,6 +1055,9 @@ mod tests {
 
     #[test]
     fn loopback_offloads_read() {
+        if !PLATFORM.offload_features {
+            return;
+        }
         let (_, d) = offloads("lo", &pt_sys::ethtool::features("lo"));
         assert!(d.starts_with("lo: rx-gro on"), "{d}");
     }
