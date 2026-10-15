@@ -299,7 +299,7 @@ ADR 0014 lets the initiator roles run on macOS 15 or newer (aarch64) against a L
 | Host-wide UDP socket-full drops | `netstack.udp_rcvbuf_errors` | `udps_fullsock` | `netstack.udp_fullsock` (PTF 1.2); the Linux columns null |
 | Softnet backlog drops | `/proc/net/softnet_stat` | none | `softnet_dropped`, `softnet_squeezed` null |
 | Egress qdisc and interface output-queue drops | `qdisc` table | none (no qdisc; the interface's queue management exposes no drop count) | no `qdisc` rows; META `endpoint.qdisc` and `txqueuelen` null |
-| Interface counters | `/proc/net/dev` → `ifstats` | `getifaddrs` `if_data` | `ifstats` (`rx_dropped` from `ifi_iqdrops`; `tx_dropped` null, the column declared nullable as PTF 1.2 allows) |
+| Interface counters | `/proc/net/dev` → `ifstats` | 64-bit `if_data64` from sysctl `NET_RT_IFLIST2` (`getifaddrs` gives the 32-bit `if_data`, whose byte counters wrap in 34 s at 1 Gbit/s) | `ifstats` (`rx_dropped` from `ifi_iqdrops`; `tx_dropped` null, the column declared nullable as PTF 1.2 allows) |
 | Wi-Fi link state | nl80211 → `wifi` | none (#68) | no `wifi` rows |
 | TCP state | `TCP_INFO` → `tcpinfo` | `TCP_CONNECTION_INFO` | `tcpinfo_darwin` (§9.7) |
 

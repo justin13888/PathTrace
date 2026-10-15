@@ -1,8 +1,12 @@
-//! Network interface facts from sysfs and getifaddrs (R-0013).
+//! Network interface facts (R-0013, R-0017): sysfs, procfs and getifaddrs on Linux; on macOS
+//! getifaddrs, the routing sysctl's 64-bit `if_data`, `SIOCGIFMEDIA` and sysctl
+//! `net.inet.udp.stats` (probe.md §9.6).
 
+#[cfg(target_os = "linux")]
 use std::fs;
 use std::io;
 use std::net::{IpAddr, SocketAddr, UdpSocket};
+#[cfg(target_os = "linux")]
 use std::path::Path;
 
 /// Coarse interface type.
@@ -39,10 +43,13 @@ pub struct IfInfo {
     pub name: String,
     pub index: u32,
     pub kind: IfType,
+    /// Kernel driver (Linux; `None` on macOS).
     pub driver: Option<String>,
     pub mtu: Option<u32>,
+    /// Behind USB (Linux; always false on macOS, which does not expose it without IOKit).
     pub usb: bool,
-    /// Device transmit queue length in packets (`tx_queue_len`).
+    /// Device transmit queue length in packets (`tx_queue_len`; `None` on macOS, which has no
+    /// qdisc, probe.md §9.6).
     pub txqueuelen: Option<u32>,
 }
 
@@ -100,11 +107,181 @@ pub fn iface_with_addr(addr: IpAddr) -> io::Result<Option<String>> {
     Ok(found)
 }
 
+#[cfg(target_os = "linux")]
 fn read_trim(p: &Path) -> Option<String> {
     fs::read_to_string(p).ok().map(|s| s.trim().to_string())
 }
 
-/// Classify an interface from /sys/class/net/<name>/ (R-0013).
+/// Classify an interface from its name, `if_data` type and media word (macOS, R-0017).
+/// Tunnels are named `utun`, `ipsec`, `tun` or `tap` (NetworkExtension VPNs, Tailscale and the
+/// WireGuard app use `utun`, probe.md §9.9); Wi-Fi and wired Ethernet share the Ethernet type
+/// and differ in their media (`IFM_IEEE80211` vs `IFM_ETHER`).
+#[cfg(target_os = "macos")]
+fn classify_darwin(name: &str, ifi_type: u8, media: Option<i32>) -> IfType {
+    // <net/if_types.h> and <net/if_media.h>.
+    const IFT_ETHER: u8 = 0x06;
+    const IFT_LOOP: u8 = 0x18;
+    const IFT_GIF: u8 = 0x37;
+    const IFT_STF: u8 = 0x39;
+    const IFT_BRIDGE: u8 = 0xd1;
+    const IFT_CELLULAR: u8 = 0xff;
+    const IFM_NMASK: i32 = 0xe0;
+    const IFM_IEEE80211: i32 = 0x80;
+    let tunnel = ["utun", "ipsec", "tun", "tap"].iter().any(|p| {
+        name.strip_prefix(p)
+            .is_some_and(|n| n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    if ifi_type == IFT_LOOP {
+        IfType::Loopback
+    } else if tunnel || matches!(ifi_type, IFT_GIF | IFT_STF) {
+        IfType::Tunnel
+    } else if ifi_type == IFT_CELLULAR || name.starts_with("pdp_ip") {
+        IfType::Wwan
+    } else if ifi_type == IFT_BRIDGE
+        || ["bridge", "awdl", "llw", "anpi", "ap"].iter().any(|p| {
+            name.strip_prefix(p)
+                .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+        })
+    {
+        IfType::Virtual
+    } else if ifi_type == IFT_ETHER {
+        if media.is_some_and(|m| m & IFM_NMASK == IFM_IEEE80211) {
+            IfType::Wifi
+        } else {
+            IfType::Ethernet
+        }
+    } else {
+        IfType::Other
+    }
+}
+
+/// The 64-bit `if_data` and index of interface `name` from sysctl `NET_RT_IFLIST2`
+/// (`if_msghdr2`); `getifaddrs` would give the 32-bit `if_data`, whose byte counters wrap in
+/// 34 s at 1 Gbit/s.
+#[cfg(target_os = "macos")]
+fn link_data(name: &str) -> Option<(u32, libc::if_data64)> {
+    let cname = std::ffi::CString::new(name).ok()?;
+    // SAFETY: `cname` is a valid NUL-terminated string.
+    let index = unsafe { libc::if_nametoindex(cname.as_ptr()) };
+    if index == 0 {
+        return None;
+    }
+    let mut mib = [
+        libc::CTL_NET,
+        libc::PF_ROUTE,
+        0,
+        0,
+        libc::NET_RT_IFLIST2,
+        index as libc::c_int,
+    ];
+    let buf = sysctl_bytes(&mut mib)?;
+    let mut pos = 0;
+    while pos + size_of::<libc::if_msghdr2>() <= buf.len() {
+        // SAFETY: at least size_of::<if_msghdr2>() bytes remain; read_unaligned copies a
+        // plain-data struct out of the byte buffer whatever its alignment. Messages of other
+        // types are shorter than that or only their length and type fields are used.
+        let h: libc::if_msghdr2 = unsafe { std::ptr::read_unaligned(buf[pos..].as_ptr().cast()) };
+        let len = usize::from(h.ifm_msglen);
+        if len == 0 {
+            break;
+        }
+        if i32::from(h.ifm_type) == libc::RTM_IFINFO2 && u32::from(h.ifm_index) == index {
+            return Some((index, h.ifm_data));
+        }
+        pos += len;
+    }
+    None
+}
+
+/// Read a sysctl MIB into a buffer of the size the kernel reports.
+#[cfg(target_os = "macos")]
+fn sysctl_bytes(mib: &mut [libc::c_int]) -> Option<Vec<u8>> {
+    let mut len = 0usize;
+    // SAFETY: a size query: null output buffer, `len` receives the size.
+    let r = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            std::ptr::null_mut(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 || len == 0 {
+        return None;
+    }
+    let mut buf = vec![0u8; len];
+    // SAFETY: `buf` has `len` writable bytes and `len` says so; the kernel writes at most that
+    // and stores the written length back.
+    let r = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            mib.len() as libc::c_uint,
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if r != 0 {
+        return None;
+    }
+    buf.truncate(len);
+    Some(buf)
+}
+
+/// The current media word (`ifm_current`) of interface `name` (`SIOCGIFMEDIA`), unprivileged.
+#[cfg(target_os = "macos")]
+fn media(name: &str) -> Option<i32> {
+    /// `_IOWR('i', 56, struct ifmediareq)`: `struct ifmediareq` is 44 bytes, the name in its
+    /// first 16 and `ifm_current` at offset 16.
+    const SIOCGIFMEDIA: libc::c_ulong = 0xc02c_6938;
+    let b = name.as_bytes();
+    if b.is_empty() || b.len() >= libc::IFNAMSIZ || b.contains(&0) {
+        return None;
+    }
+    // u32 words keep the struct 4-byte aligned; zero leaves `ifm_ulist` null and
+    // `ifm_count` 0, so the kernel writes no media list.
+    let mut req = [0u32; 11];
+    let mut name_bytes = [0u8; 16];
+    name_bytes[..b.len()].copy_from_slice(b);
+    for (i, w) in name_bytes.as_chunks::<4>().0.iter().enumerate() {
+        req[i] = u32::from_ne_bytes(*w);
+    }
+    // SAFETY: plain socket(2); closed below.
+    let fd = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
+    if fd < 0 {
+        return None;
+    }
+    // SAFETY: `req` is a 44-byte ifmediareq naming a NUL-terminated interface with a null
+    // media list, so the kernel writes only within the struct.
+    let r = unsafe { libc::ioctl(fd, SIOCGIFMEDIA, req.as_mut_ptr()) };
+    // SAFETY: `fd` is the descriptor opened above, closed exactly once.
+    unsafe { libc::close(fd) };
+    (r == 0).then_some(req[4] as i32)
+}
+
+/// Classify an interface (macOS: from its name, `if_data` type and media word).
+#[cfg(target_os = "macos")]
+pub fn iface_info(name: &str) -> IfInfo {
+    let data = link_data(name);
+    let (index, ifi_type, mtu) = data
+        .map(|(i, d)| (i, d.ifi_type, Some(d.ifi_mtu)))
+        .unwrap_or((0, 0, None));
+    IfInfo {
+        name: name.to_string(),
+        index,
+        kind: classify_darwin(name, ifi_type, media(name)),
+        driver: None,
+        mtu,
+        usb: false,
+        txqueuelen: None,
+    }
+}
+
+/// Classify an interface from `/sys/class/net/<name>/` (R-0013).
+#[cfg(target_os = "linux")]
 pub fn iface_info(name: &str) -> IfInfo {
     let base = Path::new("/sys/class/net").join(name);
     let index = read_trim(&base.join("ifindex"))
@@ -161,19 +338,40 @@ pub fn iface_info(name: &str) -> IfInfo {
     }
 }
 
-/// Interface counters (/sys/class/net/<if>/statistics).
+/// Interface counters (Linux `/sys/class/net/<if>/statistics`; macOS 64-bit `if_data`).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct IfStats {
     pub rx_bytes: u64,
     pub tx_bytes: u64,
     pub rx_packets: u64,
     pub tx_packets: u64,
+    /// macOS: `ifi_iqdrops`.
     pub rx_dropped: u64,
+    /// 0 where [`crate::PLATFORM`]`.iface_tx_dropped` is false (macOS has no such counter,
+    /// R-0017): record it as null there, never as 0 (probe.md §9.6).
     pub tx_dropped: u64,
     pub rx_errors: u64,
     pub tx_errors: u64,
 }
 
+/// Counters of interface `name` from the routing sysctl's 64-bit `if_data`.
+#[cfg(target_os = "macos")]
+pub fn if_stats(name: &str) -> Option<IfStats> {
+    let (_, d) = link_data(name)?;
+    Some(IfStats {
+        rx_bytes: d.ifi_ibytes,
+        tx_bytes: d.ifi_obytes,
+        rx_packets: d.ifi_ipackets,
+        tx_packets: d.ifi_opackets,
+        rx_dropped: d.ifi_iqdrops,
+        tx_dropped: 0,
+        rx_errors: d.ifi_ierrors,
+        tx_errors: d.ifi_oerrors,
+    })
+}
+
+/// Counters of interface `name` from `/sys/class/net/<name>/statistics`.
+#[cfg(target_os = "linux")]
 pub fn if_stats(name: &str) -> Option<IfStats> {
     let base = Path::new("/sys/class/net").join(name).join("statistics");
     let r = |f: &str| read_trim(&base.join(f)).and_then(|s| s.parse().ok());
@@ -191,9 +389,14 @@ pub fn if_stats(name: &str) -> Option<IfStats> {
 
 /// Host network-stack drop counters (cumulative; `None` where unreadable): UDP and UDP6 from
 /// `/proc/net/snmp` and `/proc/net/snmp6`, softnet backlog drops and squeezes summed over CPUs
-/// from `/proc/net/softnet_stat` (R-0015).
+/// from `/proc/net/softnet_stat` (R-0015). On macOS only `udp_fullsock` is readable and every
+/// other field is `None` (probe.md §9.6).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct StackStats {
+    /// macOS `udps_fullsock` (sysctl `net.inet.udp.stats`): host-wide datagrams not delivered
+    /// because the receiving socket was full; a 32-bit counter. `None` on Linux (PTF 1.2
+    /// `netstack.udp_fullsock`).
+    pub udp_fullsock: Option<u64>,
     pub udp_in_errors: Option<u64>,
     pub udp_rcvbuf_errors: Option<u64>,
     pub udp_sndbuf_errors: Option<u64>,
@@ -207,6 +410,7 @@ pub struct StackStats {
 }
 
 /// Value of `field` in the `Udp:` header/value line pair of /proc/net/snmp.
+#[cfg(target_os = "linux")]
 fn snmp_field(text: &str, proto: &str, field: &str) -> Option<u64> {
     let mut lines = text.lines().filter(|l| l.starts_with(proto));
     let names = lines.next()?;
@@ -216,6 +420,7 @@ fn snmp_field(text: &str, proto: &str, field: &str) -> Option<u64> {
 }
 
 /// Value of `name` in /proc/net/snmp6 (`name value` per line).
+#[cfg(target_os = "linux")]
 fn snmp6_field(text: &str, name: &str) -> Option<u64> {
     text.lines().find_map(|l| {
         let mut it = l.split_whitespace();
@@ -224,6 +429,7 @@ fn snmp6_field(text: &str, name: &str) -> Option<u64> {
 }
 
 /// Sum of hex column `col` over every CPU line of /proc/net/softnet_stat.
+#[cfg(target_os = "linux")]
 fn softnet_sum(text: &str, col: usize) -> Option<u64> {
     let mut any = false;
     let mut sum = 0u64;
@@ -235,10 +441,12 @@ fn softnet_sum(text: &str, col: usize) -> Option<u64> {
     any.then_some(sum)
 }
 
+#[cfg(target_os = "linux")]
 fn parse_stack(snmp: &str, snmp6: &str, softnet: &str) -> StackStats {
     let u = |f| snmp_field(snmp, "Udp:", f);
     let u6 = |f| snmp6_field(snmp6, f);
     StackStats {
+        udp_fullsock: None,
         udp_in_errors: u("InErrors"),
         udp_rcvbuf_errors: u("RcvbufErrors"),
         udp_sndbuf_errors: u("SndbufErrors"),
@@ -252,7 +460,42 @@ fn parse_stack(snmp: &str, snmp6: &str, softnet: &str) -> StackStats {
     }
 }
 
+/// `udps_fullsock` from the bytes of a `struct udpstat` (`netinet/udp_var.h`: the seventh
+/// u32, offset 24).
+#[cfg(target_os = "macos")]
+fn udp_fullsock(udpstat: &[u8]) -> Option<u64> {
+    let b = udpstat.get(24..28)?;
+    Some(u64::from(u32::from_ne_bytes(b.try_into().ok()?)))
+}
+
+/// Read the host's stack drop counters: on macOS only `udps_fullsock` (probe.md §9.6).
+#[cfg(target_os = "macos")]
+pub fn stack_stats() -> StackStats {
+    let mut buf = [0u8; 256];
+    let mut len = buf.len();
+    // SAFETY: the name is a NUL-terminated literal; `buf` has `len` writable bytes and the
+    // kernel writes at most that, storing the written length back; nothing is set.
+    let r = unsafe {
+        libc::sysctlbyname(
+            c"net.inet.udp.stats".as_ptr(),
+            buf.as_mut_ptr().cast(),
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    StackStats {
+        udp_fullsock: if r == 0 {
+            udp_fullsock(&buf[..len.min(buf.len())])
+        } else {
+            None
+        },
+        ..StackStats::default()
+    }
+}
+
 /// Read the host's (network namespace's) stack drop counters.
+#[cfg(target_os = "linux")]
 pub fn stack_stats() -> StackStats {
     let r = |p: &str| fs::read_to_string(p).unwrap_or_default();
     parse_stack(
@@ -266,6 +509,7 @@ pub fn stack_stats() -> StackStats {
 mod tests {
     use super::*;
 
+    #[cfg(target_os = "linux")]
     #[test]
     fn parses_stack_counters() {
         let snmp = "Ip: Forwarding DefaultTTL\nIp: 1 64\n\
@@ -297,6 +541,51 @@ mod tests {
         let name = iface_with_addr(ip).unwrap().expect("lo");
         let info = iface_info(&name);
         assert_eq!(info.kind, IfType::Loopback);
+        assert!(info.index > 0 && info.mtu.is_some(), "{info:?}");
         assert!(if_stats(&name).is_some());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_interface_classes() {
+        let ether = 0x06;
+        assert_eq!(classify_darwin("lo0", 0x18, None), IfType::Loopback);
+        for n in ["utun3", "ipsec0", "tun1", "tap0"] {
+            assert_eq!(classify_darwin(n, 0xff, None), IfType::Tunnel, "{n}");
+        }
+        assert_eq!(classify_darwin("gif0", 0x37, None), IfType::Tunnel);
+        assert_eq!(classify_darwin("en0", ether, Some(0x80)), IfType::Wifi);
+        assert_eq!(classify_darwin("en7", ether, Some(0x20)), IfType::Ethernet);
+        assert_eq!(classify_darwin("en7", ether, None), IfType::Ethernet);
+        assert_eq!(classify_darwin("pdp_ip0", 0xff, None), IfType::Wwan);
+        assert_eq!(classify_darwin("bridge0", 0xd1, None), IfType::Virtual);
+        assert_eq!(classify_darwin("awdl0", ether, Some(0x80)), IfType::Virtual);
+        assert_eq!(classify_darwin("utunnel", 0x01, None), IfType::Other);
+        assert_eq!(udp_fullsock(&[0; 23]), None);
+        let mut st = [0u8; 104];
+        st[24..28].copy_from_slice(&7u32.to_ne_bytes());
+        assert_eq!(udp_fullsock(&st), Some(7));
+    }
+
+    /// probe.md §9.6: on macOS only `udp_fullsock` is readable; the Linux counters are unknown.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn darwin_stack_stats() {
+        let s = stack_stats();
+        assert!(s.udp_fullsock.is_some(), "{s:?}");
+        assert_eq!(
+            StackStats {
+                udp_fullsock: None,
+                ..s
+            },
+            StackStats::default()
+        );
+        // The loopback counters advance with traffic.
+        let before = if_stats("lo0").unwrap();
+        let s = UdpSocket::bind("127.0.0.1:0").unwrap();
+        s.send_to(&[0; 100], s.local_addr().unwrap()).unwrap();
+        let after = if_stats("lo0").unwrap();
+        assert!(after.tx_packets > before.tx_packets, "{before:?} {after:?}");
+        assert_eq!(after.tx_dropped, 0);
     }
 }

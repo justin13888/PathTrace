@@ -1,6 +1,6 @@
 [package]
 name = "pt-sys"
-description = "Linux system interface for PathTrace: sockets, kernel timestamps, cmsgs, TCP_INFO, clocks, netlink"
+description = "Linux and macOS system interface for PathTrace: sockets, kernel timestamps, cmsgs, TCP_INFO, clocks, netlink"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
