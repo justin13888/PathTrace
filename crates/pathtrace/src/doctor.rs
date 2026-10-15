@@ -8,6 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use pt_probe::config::{self, Responder};
+use pt_probe::context::Tunnel;
 use pt_sys::PLATFORM;
 use pt_sys::clock::NtpState;
 use pt_sys::netif::{IfInfo, IfType};
@@ -372,76 +373,29 @@ fn default_route() -> Option<(String, IpAddr)> {
     })
 }
 
-/// A local address in Tailscale's ranges, 100.64.0.0/10 or fd7a:115c:a1e0::/48 (probe.md §9.9).
-fn tailscale_addr(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(a) => {
-            let o = a.octets();
-            o[0] == 100 && o[1] & 0xc0 == 64
-        }
-        IpAddr::V6(a) => a.segments()[..3] == [0xfd7a, 0x115c, 0xa1e0],
-    }
-}
-
-/// The tunnel kind of interface `name` (probe.md §9.9): on macOS its name prefix (`utun`,
-/// `ipsec`, `tun`, `tap`); on Linux the sysfs device type (`wireguard`), `tun` for a TUN/TAP
-/// device, or the ARP hardware type of an IP-in-IP, vti or GRE tunnel.
-fn tunnel_kind(name: &str) -> String {
-    if darwin() {
-        return name.trim_end_matches(|c: char| c.is_ascii_digit()).into();
-    }
-    let base = Path::new("/sys/class/net").join(name);
-    let uevent = std::fs::read_to_string(base.join("uevent")).unwrap_or_default();
-    let arphrd = std::fs::read_to_string(base.join("type")).unwrap_or_default();
-    linux_tunnel_kind(
-        uevent.lines().find_map(|l| l.strip_prefix("DEVTYPE=")),
-        base.join("tun_flags").exists(),
-        arphrd.trim().parse().unwrap_or(0),
-    )
-}
-
-fn linux_tunnel_kind(devtype: Option<&str>, tun: bool, arphrd: u32) -> String {
-    match (devtype, tun, arphrd) {
-        (Some(d), _, _) if !d.is_empty() => d.into(),
-        (_, true, _) => "tun".into(),
-        // ARPHRD_TUNNEL and ARPHRD_TUNNEL6 are shared by ipip/vti and ip6tnl/vti6; only the
-        // rtnetlink link kind (#63) tells them apart.
-        (_, _, 768) => "ipip or vti".into(),
-        (_, _, 769) => "ip6tnl or vti6".into(),
-        (_, _, 776) => "sit".into(),
-        (_, _, 778) => "gre".into(),
-        (_, _, 823) => "ip6gre".into(),
-        _ => "unknown".into(),
-    }
-}
-
-/// The `tunnel` verdict for an egress interface: a tunnel warns, because what the probe then
-/// measures for some verdicts is the tunnel's behaviour (probe.md §9.9).
-fn tunnel_detail(info: &IfInfo, kind: &str, local: IpAddr) -> (bool, String) {
-    if info.kind != IfType::Tunnel {
+/// The `tunnel` verdict for egress interface `name`: a tunnel warns, because what the probe
+/// then measures for some verdicts is the tunnel's behaviour (probe.md §9.9).
+fn tunnel_detail(name: &str, tunnel: Option<&Tunnel>) -> (bool, String) {
+    let Some(t) = tunnel else {
         return (true, "not a tunnel".into());
-    }
-    let provider = if tailscale_addr(local) {
-        ", provider tailscale"
-    } else {
-        ""
     };
+    let provider = t
+        .provider
+        .map_or_else(String::new, |p| format!(", provider {p}"));
     (
         false,
         format!(
-            "{} is a tunnel (kind {kind}{provider}): per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel, not the network under it; delay, jitter, loss, capacity and reorder stay end-to-end",
-            info.name
+            "{name} is a tunnel (kind {}{provider}): per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel, not the network under it; delay, jitter, loss, capacity and reorder stay end-to-end",
+            t.kind
         ),
     )
 }
 
+/// The `tunnel` check, classified by the same rule as META `endpoint.iface.tunnel`, so the
+/// warning names exactly the kind the trace records.
 fn tunnel_check(c: &mut Vec<Check>, info: &IfInfo, local: IpAddr, suffix: &str) {
-    let kind = if info.kind == IfType::Tunnel {
-        tunnel_kind(&info.name)
-    } else {
-        String::new()
-    };
-    let (ok, d) = tunnel_detail(info, &kind, local);
+    let t = pt_probe::context::tunnel(&info.name, info.index, Some(local));
+    let (ok, d) = tunnel_detail(&info.name, t.as_ref());
     check(c, &format!("tunnel{suffix}"), ok, d, false);
 }
 
@@ -948,31 +902,22 @@ mod tests {
         }
     }
 
-    fn iface(name: &str, kind: IfType) -> IfInfo {
-        IfInfo {
-            name: name.into(),
-            index: 1,
-            kind,
-            driver: None,
-            mtu: Some(1280),
-            usb: false,
-            txqueuelen: None,
-        }
-    }
-
     #[test]
     fn tunnel_warning() {
-        let v4: IpAddr = "192.168.1.20".parse().unwrap();
-        assert_eq!(
-            tunnel_detail(&iface("en0", IfType::Wifi), "", v4),
-            (true, "not a tunnel".into())
-        );
-        let (ok, d) = tunnel_detail(&iface("wg0", IfType::Tunnel), "wireguard", v4);
+        assert_eq!(tunnel_detail("en0", None), (true, "not a tunnel".into()));
+        let wg = Tunnel {
+            kind: "wireguard".into(),
+            provider: None,
+        };
+        let (ok, d) = tunnel_detail("wg0", Some(&wg));
         assert!(!ok);
         assert!(d.starts_with("wg0 is a tunnel (kind wireguard): "), "{d}");
         assert!(d.contains("policers") && d.contains("DSCP"), "{d}");
-        let ts: IpAddr = "100.101.102.103".parse().unwrap();
-        let (_, d) = tunnel_detail(&iface("utun4", IfType::Tunnel), "utun", ts);
+        let ts = Tunnel {
+            kind: "utun".into(),
+            provider: Some("tailscale"),
+        };
+        let (_, d) = tunnel_detail("utun4", Some(&ts));
         assert!(
             d.starts_with("utun4 is a tunnel (kind utun, provider tailscale): "),
             "{d}"
@@ -980,33 +925,21 @@ mod tests {
     }
 
     #[test]
-    fn tailscale_ranges() {
-        for a in ["100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1"] {
-            assert!(tailscale_addr(a.parse().unwrap()), "{a}");
-        }
-        for a in [
-            "100.63.255.255",
-            "100.128.0.1",
-            "10.0.0.1",
-            "fd7a:115c:a1e1::1",
-        ] {
-            assert!(!tailscale_addr(a.parse().unwrap()), "{a}");
-        }
-    }
-
-    #[test]
-    fn linux_tunnel_kinds() {
-        assert_eq!(
-            linux_tunnel_kind(Some("wireguard"), false, 65534),
-            "wireguard"
+    fn tunnel_check_on_loopback() {
+        // The shared classifier (pt_probe::context::tunnel) decides: loopback is not a tunnel
+        // on either platform, so the check is `ok`.
+        let name = if darwin() { "lo0" } else { "lo" };
+        let mut c = Vec::new();
+        tunnel_check(
+            &mut c,
+            &pt_sys::netif::iface_info(name),
+            "127.0.0.1".parse().unwrap(),
+            " (IPv4)",
         );
-        assert_eq!(linux_tunnel_kind(None, true, 65534), "tun");
-        assert_eq!(linux_tunnel_kind(None, false, 768), "ipip or vti");
-        assert_eq!(linux_tunnel_kind(None, false, 769), "ip6tnl or vti6");
-        assert_eq!(linux_tunnel_kind(Some(""), false, 776), "sit");
-        assert_eq!(linux_tunnel_kind(None, false, 778), "gre");
-        assert_eq!(linux_tunnel_kind(None, false, 823), "ip6gre");
-        assert_eq!(linux_tunnel_kind(None, false, 1), "unknown");
+        assert_eq!(c.len(), 1);
+        assert_eq!(c[0].name, "tunnel (IPv4)");
+        assert!(c[0].ok && !c[0].fatal, "{}", c[0].detail);
+        assert_eq!(c[0].detail, "not a tunnel");
     }
 
     fn supply(kind: &str, scope: &str, online: bool, status: &str) -> Supply {
