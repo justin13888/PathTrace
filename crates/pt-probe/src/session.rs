@@ -79,18 +79,29 @@ fn utc_now() -> String {
     )
 }
 
+/// The clock domains of an endpoint, each with the OS clock it is read from (PTF 1.2
+/// `source`, ptf-format.md §6; probe.md §9.1).
 fn clocks_value(role: Role) -> Value {
     let r = role.name();
+    let mono_source = if pt_sys::PLATFORM.os_family == "darwin" {
+        "mach_absolute_time"
+    } else {
+        "CLOCK_MONOTONIC_RAW"
+    };
     Value::map()
         .with(
             &format!("{r}.mono"),
             Value::map()
                 .with("kind", "monotonic_raw")
-                .with("endpoint", r),
+                .with("endpoint", r)
+                .with("source", mono_source),
         )
         .with(
             &format!("{r}.real"),
-            Value::map().with("kind", "realtime").with("endpoint", r),
+            Value::map()
+                .with("kind", "realtime")
+                .with("endpoint", r)
+                .with("source", "CLOCK_REALTIME"),
         )
 }
 
@@ -151,6 +162,14 @@ fn obslog_meta(
     m
 }
 
+/// The detail of the `power_assertion` event (PTF 1.2, probe.md §9.4).
+fn power_assertion_detail<T>(held: &io::Result<T>) -> Value {
+    Value::map().with("held", held.is_ok()).with(
+        "error",
+        held.as_ref().err().map(std::string::ToString::to_string),
+    )
+}
+
 /// Per-socket capabilities for META `endpoint.sockets` (ptf-format.md, PTF 1.1).
 fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
     Value::Array(
@@ -166,6 +185,7 @@ fn sockets_value(socks: &[(Sock, Arc<UdpSock>)]) -> Value {
                     .with("send_buf", c.send_buf)
                     .with("rxq_ovfl", c.rxq_ovfl)
                     .with("tx_ids", s.tx_id_mode().name())
+                    .with("icmp_errors", c.icmp_errors)
             })
             .collect(),
     )
@@ -998,7 +1018,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     let facts = context::host_facts()
         .with("addr", local_ip.to_string())
         .with("peer_addr", dst.to_string())
-        .with("iface", context::iface_facts(&iface))
+        .with("iface", context::iface_facts(&iface, Some(local_ip)))
         .with("qdisc", context::egress_facts(&iface).0)
         .with("txqueuelen", context::egress_facts(&iface).1)
         .with("metered", metered.as_str())
@@ -1076,6 +1096,13 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
                 .with("reason", why.as_str()),
         );
     }
+    // Keep an idle host awake from before P0 until this function returns, after the trace is
+    // written (probe.md §9.4). A session continues without it.
+    let _power = pt_sys::PLATFORM.power_assertion.then(|| {
+        let held = pt_sys::power::prevent_idle_sleep(pt_sys::power::SESSION_ASSERTION_NAME);
+        rec.event("power_assertion", power_assertion_detail(&held));
+        held.ok()
+    });
 
     // Endpoint.
     let shared = Shared::new(Role::A, opts.profile.data_cap, opts.rate_cap_bps);
@@ -2286,7 +2313,7 @@ fn responder_session(
     let facts = context::host_facts()
         .with("addr", local_ip.to_string())
         .with("peer_addr", src.to_string())
-        .with("iface", context::iface_facts(&iface))
+        .with("iface", context::iface_facts(&iface, Some(local_ip)))
         .with("qdisc", context::egress_facts(&iface).0)
         .with("txqueuelen", context::egress_facts(&iface).1)
         .with("initiator_label", label.as_str())

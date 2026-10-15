@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use pt_sys::clock::mono_raw;
-use pt_sys::tcp::TCP_INFO_FIELDS;
+use pt_sys::tcp::{TcpInfoRaw, TcpStateKind};
 
 use crate::record::{APP_EVENTS, Recorder};
 
@@ -115,33 +115,41 @@ pub fn log_app(rec: &Recorder, flow: u8, event: &str, bytes: u64, value: i64) {
     );
 }
 
-/// Sample TCP_INFO every 10 ms until `done` (REQ-PRB-012).
+/// One sampled row: flow, time, the length the kernel returned, then every field of `kind`.
+fn tcp_state_row(flow: u8, t: u64, info: &TcpInfoRaw) -> Vec<Option<i64>> {
+    let mut row = vec![Some(i64::from(flow)), Some(t as i64), Some(info.len as i64)];
+    for (_, off, size) in info.kind().fields() {
+        row.push(info.field(*off, *size).map(|v| v as i64));
+    }
+    row
+}
+
+/// Sample the kernel's TCP state every 10 ms until `done` (REQ-PRB-012): `TCP_INFO` into
+/// `tcpinfo`, or on macOS `TCP_CONNECTION_INFO` into `tcpinfo_darwin` (probe.md §9.7).
 pub fn spawn_sampler(
     fd: i32,
     flow: u8,
     rec: Recorder,
     done: Arc<AtomicBool>,
 ) -> std::thread::JoinHandle<()> {
+    let kind = pt_sys::PLATFORM.tcp_state;
+    let table = kind.table();
     std::thread::spawn(move || {
         let mut rows = Vec::new();
         while !done.load(Ordering::Relaxed) {
-            if let Ok(info) = pt_sys::tcp::tcp_info(fd) {
-                let mut row = vec![
-                    Some(i64::from(flow)),
-                    Some(mono_raw() as i64),
-                    Some(info.len as i64),
-                ];
-                for (_, off, size) in TCP_INFO_FIELDS {
-                    row.push(info.field(*off, *size).map(|v| v as i64));
-                }
-                rows.push(row);
+            let info = match kind {
+                TcpStateKind::TcpInfo => pt_sys::tcp::tcp_info(fd),
+                TcpStateKind::ConnectionInfo => pt_sys::tcp::tcp_connection_info(fd),
+            };
+            if let Ok(info) = info {
+                rows.push(tcp_state_row(flow, mono_raw(), &info));
             }
             if rows.len() >= 100 {
-                rec.rows("tcpinfo", std::mem::take(&mut rows));
+                rec.rows(table, std::mem::take(&mut rows));
             }
             std::thread::sleep(Duration::from_millis(10));
         }
-        rec.rows("tcpinfo", rows);
+        rec.rows(table, rows);
     })
 }
 
@@ -708,6 +716,27 @@ mod tests {
         assert_eq!(ConnHeader::peek(&b), Some(h));
         assert!(ConnHeader::verify(&b, &k));
         assert!(!ConnHeader::verify(&b, &[4u8; 32]));
+    }
+
+    /// A loopback sample of the platform's TCP state fills the row of the table it goes to:
+    /// `tcpinfo` on Linux, `tcpinfo_darwin` on macOS (probe.md §9.7).
+    #[test]
+    fn tcp_state_sample_matches_its_table() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let c = TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let _s = l.accept().unwrap();
+        let kind = pt_sys::PLATFORM.tcp_state;
+        let info = match kind {
+            TcpStateKind::TcpInfo => pt_sys::tcp::tcp_info(c.as_raw_fd()),
+            TcpStateKind::ConnectionInfo => pt_sys::tcp::tcp_connection_info(c.as_raw_fd()),
+        }
+        .unwrap();
+        let row = tcp_state_row(7, 123, &info);
+        let (_, cols) = crate::record::table_def(kind.table(), crate::flows::Role::A).unwrap();
+        assert_eq!(row.len(), cols.len());
+        assert_eq!(&row[..2], &[Some(7), Some(123)]);
+        // The state field is filled (ESTABLISHED is 1 on Linux and 4 on macOS).
+        assert!(row[3].is_some_and(|s| s > 0), "{row:?}");
     }
 
     #[test]

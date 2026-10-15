@@ -79,6 +79,19 @@ pub const APP_EVENTS: &[&str] = &[
     "error",
 ];
 
+/// The declared unit of a `tcpinfo_darwin` column (ptf-format.md, Raw tables).
+fn darwin_tcp_unit(field: &str) -> &'static str {
+    match field {
+        "state" => "enum",
+        "options" | "flags" => "bitmask",
+        "rto" | "rttcur" | "srtt" => "ms",
+        "maxseg" | "snd_ssthresh" | "snd_cwnd" | "snd_wnd" | "snd_sbbytes" | "rcv_wnd"
+        | "txbytes" | "txretransmitbytes" | "rxbytes" | "rxoutoforderbytes" => "B",
+        "txpackets" | "rxpackets" | "txretransmitpackets" => "count",
+        _ => "raw",
+    }
+}
+
 /// Schema of every raw table (docs/design/probe.md §5). `r` is the logging endpoint.
 pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)> {
     let mono = format!("{}.mono", r.name());
@@ -135,6 +148,18 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
             }
             (b"OBSV", v)
         }
+        // macOS `TCP_CONNECTION_INFO` (PTF 1.2, probe.md §9.7): never mixed with `tcpinfo`.
+        "tcpinfo_darwin" => {
+            let mut v = vec![
+                c("flow", Enc::Rle, "id"),
+                c("t", Enc::Delta2, "ns").clock(mono),
+                c("optlen", Enc::Rle, "B"),
+            ];
+            for (f, _, _) in pt_sys::tcp::TCP_CONNECTION_INFO_FIELDS {
+                v.push(c(f, Enc::Delta, darwin_tcp_unit(f)).null());
+            }
+            (b"OBSV", v)
+        }
         "app" => (
             b"OBSV",
             vec![
@@ -183,7 +208,13 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("rx_packets", Enc::Delta, "count"),
                 c("tx_packets", Enc::Delta, "count"),
                 c("rx_dropped", Enc::Delta, "count"),
-                c("tx_dropped", Enc::Delta, "count"),
+                // Nullable (PTF 1.2) only where the platform has no such counter (macOS),
+                // so Linux tables keep their 1.1 declaration.
+                if pt_sys::PLATFORM.iface_tx_dropped {
+                    c("tx_dropped", Enc::Delta, "count")
+                } else {
+                    c("tx_dropped", Enc::Delta, "count").null()
+                },
                 c("rx_errors", Enc::Delta, "count"),
                 c("tx_errors", Enc::Delta, "count"),
             ],
@@ -202,6 +233,8 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("udp6_in_csum_errors", Enc::Delta, "count").null(),
                 c("softnet_dropped", Enc::Delta, "count").null(),
                 c("softnet_squeezed", Enc::Delta, "count").null(),
+                // PTF 1.2: macOS `udps_fullsock` (probe.md §9.6), null on Linux.
+                c("udp_fullsock", Enc::Delta, "count").null(),
             ],
         ),
         "qdisc" => (
@@ -604,6 +637,39 @@ pub fn pii(v: impl Into<Value>, class: &str) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// PTF 1.2 schemas (ptf-format.md, Raw tables): `tcpinfo_darwin` has every
+    /// `struct tcp_connection_info` field with its unit, `netstack` ends with `udp_fullsock`,
+    /// and `ifstats.tx_dropped` is nullable exactly where the platform has no such counter.
+    #[test]
+    fn ptf_1_2_schemas() {
+        let (kind, cols) = table_def("tcpinfo_darwin", Role::A).unwrap();
+        assert_eq!(kind, b"OBSV");
+        assert_eq!(
+            cols.len(),
+            3 + pt_sys::tcp::TCP_CONNECTION_INFO_FIELDS.len()
+        );
+        let unit = |n: &str| cols.iter().find(|c| c.name == n).map(|c| c.unit);
+        for (n, u) in [
+            ("state", "enum"),
+            ("options", "bitmask"),
+            ("srtt", "ms"),
+            ("snd_cwnd", "B"),
+            ("txbytes", "B"),
+            ("txpackets", "count"),
+            ("rttvar", "raw"),
+            ("tfo", "raw"),
+        ] {
+            assert_eq!(unit(n), Some(u), "{n}");
+        }
+        assert!(cols[3..].iter().all(|c| c.nullable));
+        let (_, ns) = table_def("netstack", Role::A).unwrap();
+        let last = ns.last().unwrap();
+        assert_eq!((last.name, last.nullable), ("udp_fullsock", true));
+        let (_, ifs) = table_def("ifstats", Role::A).unwrap();
+        let tx = ifs.iter().find(|c| c.name == "tx_dropped").unwrap();
+        assert_eq!(tx.nullable, !pt_sys::PLATFORM.iface_tx_dropped);
+    }
 
     #[test]
     fn records_and_recovers() {
