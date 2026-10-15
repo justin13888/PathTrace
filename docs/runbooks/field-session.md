@@ -4,7 +4,7 @@ Goal: one trustworthy `.ptf` trace per session, labelled so that class-level con
 
 ## What you need
 
-A session always has two Linux machines (x86_64 or aarch64, kernel ≥ 6.1), both under your control, with `pathtrace` installed on each:
+A session always has two machines under your control with `pathtrace` installed on each. Only Linux and macOS are supported targets (ADR 0014): the responder runs Linux (x86_64 or aarch64, kernel ≥ 6.1); the initiator runs Linux the same way or macOS 15 or newer on Apple silicon:
 
 - **Initiator**: the machine physically on the network you want to record (your laptop at the hotel, café or on the train). It runs `pathtrace probe`, so the trace describes the path from where it sits.
 - **Responder**: a second machine with a stable, publicly reachable address (a VM or a home server with the ports in [deploy/README.md](../../deploy/README.md) open). It runs `pathtrace serve` under systemd and never initiates anything.
@@ -18,12 +18,13 @@ Which release to use: for every field session, both machines run v1.1.0 (or a la
 1. Connect to the network and note what it is (class, venue).
 2. Close large downloads, sync clients and video calls on the laptop. Local traffic competes with the probe (interface counters are recorded, so it is visible, but it biases capacity).
 3. Plug in the laptop: power saving adds timing noise.
-4. Run `pathtrace doctor vm`. It exits 1 only when a session cannot work (old kernel, no key, the responder's port unreachable, intercepted or not tested for interception on every address family). Read the warnings too:
+4. Run `pathtrace doctor vm`. It exits 1 only when a session cannot work (kernel older than 6.1 or macOS older than 15, no key, the responder's port unreachable, intercepted or not tested for interception on every address family). Read the warnings too:
    - `tcp/<port> not intercepted` warns with an answer, or `tcp/<port> reachable` failed on every port: a captive portal. Log in through a browser, then run `doctor` again. If it warns `not tested`, the connection failed the second time; run `doctor` again. A trace taken behind an unopened portal records the portal, not the path.
    - `udp/<port> not refused` warns `refused`: this network (or the responder) rejects that UDP port. The session still runs and records the UDP classes on that port as blocked (all of them, over a TCP-only session, when the responder port itself is refused). `not refused` does not prove that UDP arrives: only a session can, so the probe's own result is the final word.
-   - `clock sync` warns: start an NTP daemon (chrony, or `timedatectl set-ntp true`) and wait until `doctor` reports it synchronised. Check the responder the same way once, with `pathtrace doctor` on it.
-   - `power` warns: the laptop is on battery (step 3). `cpu governor` warns: the governor pins the lowest frequency; switch to `schedutil` or `performance` for the session.
+   - `clock sync` warns: start an NTP daemon (chrony, or `timedatectl set-ntp true`) and wait until `doctor` reports it synchronised. On a Mac, turn on "Set time and date automatically" in System Settings > General > Date & Time. Check the responder the same way once, with `pathtrace doctor` on it.
+   - `power` warns: the laptop is on battery (step 3). `cpu governor` warns: the governor pins the lowest frequency; switch to `schedutil` or `performance` for the session. On a Mac, `doctor` does not show `power` yet (#78), `clocksource`, `cpu governor`, `offloads` or `wifi link stats`, which do not apply there; `sleep assertion` warns when the probe cannot keep the Mac from idle sleep, so keep it awake yourself (lid open, on power).
    - `offloads` warns: `rx-gro-list` or `rx-lro` is on for the egress interface, which changes what the probe records on this host. Run the `sudo ethtool -K …` command the warning prints (it lasts until reboot or until the interface is recreated), then run `doctor` again. Run `pathtrace doctor` on the responder too: its default-route interface is checked the same way. `rx-gro` and the segmentation offloads are listed but do not warn.
+   - `tunnel` warns: the route to the responder leaves through a tunnel (Tailscale, WireGuard, another VPN; `utun*` on a Mac). The session still runs, but per-transport treatment, policers, MTU, DSCP and ECN in the trace describe the tunnel, not the network under it. To record the network itself, disconnect the VPN or exclude the responder from it, then run `doctor` again.
    - `ipv6` warns: the network or the responder has no IPv6, so only IPv4 is tested (and the probe uses IPv4). Checks with an ` (ipv6)` suffix cover the second family when both exist.
 
 ## Run
