@@ -45,7 +45,7 @@ long stretches at high rates.
 ## Implications for PTF / probe
 - No PTF change: the lateness is already recorded per datagram (`tx_user_lag`) and as `stall` events.
 - Pacer and receiver threads: QoS class, then the time-constraint policy (0.5 ms computation, 1 ms constraint).
-- A clamp the policy cannot overcome is reported, not overridden: `doctor` `pacing` warns and `probe` adds a
-  note when a pacing-like thread wakes 1 ms or more late, naming darwinbg when `getpriority` reports it.
+- A clamp the policy cannot overcome is reported, not overridden: `doctor` `pacing` warns and `probe` prints a
+  warning before measuring when a pacing-like thread wakes 1 ms or more late, naming darwinbg when `getpriority` reports it.
 - `sleep_until_is_accurate` runs on macOS again; if the CI runner's clamp is `background` or darwinbg it fails
   there, which this note would then explain.
