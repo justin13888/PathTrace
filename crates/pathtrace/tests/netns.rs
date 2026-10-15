@@ -98,7 +98,7 @@ fn smoke_session_through_netem() {
         let rows = info["tables"][dir]["rows"].as_u64().unwrap_or(0);
         assert!(rows > 1000, "{dir}: {rows} rows");
     }
-    assert_eq!(info["ptf_version"], "1.1", "{info}");
+    assert_eq!(info["ptf_version"], "1.2", "{info}");
     // Every TX stamp joins its own transmission (probe.md §4.1).
     for dir in ["a_to_b", "b_to_a"] {
         let c = &info["merge_checks"][dir];
