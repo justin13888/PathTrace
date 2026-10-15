@@ -14,6 +14,7 @@ pub mod ethtool;
 pub mod host;
 pub mod netif;
 pub mod netlink;
+pub mod netpath;
 pub mod power;
 pub mod signal;
 pub mod tcp;
