@@ -236,8 +236,8 @@ pub fn auto_profile(metered: &str) -> &'static str {
 /// Line `probe` prints whenever `--profile auto` decides: the chosen profile, the egress
 /// interface, and the metered state. A state that is neither `yes…` nor `no…` (no
 /// NetworkManager, unmanaged interface, no macOS path through it, timeout) makes it a
-/// warning: `standard` was picked
-/// without knowing whether the link is capped, and phone hotspots are rarely flagged metered.
+/// warning: `standard` was picked without knowing whether the link is capped, and phone
+/// hotspots are rarely flagged metered on Linux.
 pub fn auto_profile_notice(iface: &str, metered: &str) -> String {
     let chosen = auto_profile(metered);
     let iface = if iface.is_empty() {
