@@ -67,10 +67,19 @@ if awk '$2 != "linux" && $2 != "macos" {bad=1} END {exit !bad}' "$out/target_os_
 elif ! grep -qw linux "$out/target_os_values.txt"; then say "FAIL pt-sys has no linux backend"; fail=1
 else say "PASS target_os names only linux and macos ($(awk '{printf "%s%s %s", sep, $2, $1; sep=", "}' "$out/target_os_values.txt"))"; fi
 # windows/unix as a cfg predicate anywhere inside cfg(...), cfg_attr(...) or cfg!(...), including
-# nested any/all/not and predicates rustfmt splits over several lines; string literals are ignored.
+# nested any/all/not and predicates rustfmt splits over several lines. Comments and string literals
+# are blanked in the whole file first (newlines kept, so line numbers hold), so text such as
+# "cfg(windows)" in a comment or a string is never a predicate. In Cargo.toml only comments are
+# blanked: a [target.'cfg(...)'] table header carries its predicate inside a TOML string.
 code 'target_family|target_vendor' >"$out/other_platform_cfg.txt"
 # shellcheck disable=SC2016 # the single-quoted program is Perl, not shell
 grep -rlE --include='*.rs' --include='Cargo.toml' 'cfg' crates xtask bench Cargo.toml | xargs perl -0777 -ne '
+  my $nl = sub { "\n" x ($_[0] =~ tr/\n//) };
+  if ($ARGV =~ /\.rs$/) {
+    s{(//[^\n]*)|(/\*(?:[^/*]++|/(?!\*)|\*(?!/)|(?2))*\*/)|((?<!\w)b?r(#*)".*?"\4)|("(?:[^"\\]|\\.)*")|(\x27(?:[^\x27\\\n]|\\[^\n]{1,9}?)\x27)}{defined $1 || defined $2 ? $nl->($&) : defined $6 ? "\x27 \x27" : "\"\"" . $nl->($&)}gse;
+  } else {
+    s{("(?:[^"\\\n]|\\.)*"|\x27[^\x27\n]*\x27)|#[^\n]*}{defined $1 ? $1 : ""}ge;
+  }
   while (/\b(cfg(?:_attr)?!?)\s*(\((?:[^()"]++|"(?:[^"\\]|\\.)*"|(?2))*\))/g) {
     my ($k, $m, $at) = ($1, $2, $-[0]); (my $p = $m) =~ s/"(?:[^"\\]|\\.)*"//g;
     if ($p =~ /(?<![\w"])(?:windows|unix)(?![\w"])/) { my $l = 1 + (substr($_, 0, $at) =~ tr/\n//); (my $s = $m) =~ s/\s+/ /g; print "$ARGV:$l:$k$s\n" }
