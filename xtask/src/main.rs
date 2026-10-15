@@ -41,7 +41,7 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
-    /// Regenerate the PTF conformance corpus (conformance/v1.0 and v1.1).
+    /// Regenerate the PTF conformance corpus (conformance/v1.0, v1.1 and v1.2).
     Corpus,
     /// Check the requirement → design → ADR → evidence chain.
     Audit {

@@ -1,5 +1,5 @@
 //! Conformance corpus generator (REQ-FMT-018): `conformance/<version>/*.ptf` + `expected.json`
-//! for v1.0 and v1.1.
+//! for v1.0, v1.1 and v1.2.
 //!
 //! Each case is a file plus its expected verdict: valid (with content digest) or invalid with an
 //! error kind (`pt_format::Error::kind`). Invalid files keep correct CRCs wherever the intended
@@ -160,6 +160,7 @@ type Cases = BTreeMap<String, (Vec<u8>, Option<&'static str>)>;
 pub fn generate(root: &Path) -> Result<()> {
     emit(&root.join("conformance/v1.0"), v1_0()?)?;
     emit(&root.join("conformance/v1.1"), v1_1())?;
+    emit(&root.join("conformance/v1.2"), v1_2())?;
     Ok(())
 }
 
@@ -908,6 +909,374 @@ fn additions_1_1() -> Vec<Section> {
         s(b"OBSV", txts_unmatched),
         s(b"CTXS", netstack),
         s(b"CTXS", qdisc),
+    ]
+}
+
+/// The PTF 1.2 corpus (header minor 2): every 1.2 addition of ptf-format.md's Versions table,
+/// with the types, canonical encodings, units and clocks of its Part III.
+fn v1_2() -> Cases {
+    let canon = WriteOptions::canonical();
+    let v12 = |sections| PtfFile {
+        major: 1,
+        minor: 2,
+        sections,
+    };
+    let mut cases = Cases::new();
+    cases.insert(
+        "valid-minimal.ptf".into(),
+        (write(&v12(vec![meta(Value::map())]), &canon), None),
+    );
+    cases.insert(
+        "valid-1-2-additions.ptf".into(),
+        (write(&v12(additions_1_2()), &canon), None),
+    );
+    cases.insert(
+        "valid-1-2-additions-uncompressed-no-index.ptf".into(),
+        (
+            write(
+                &v12(additions_1_2()),
+                &WriteOptions {
+                    zstd_level: None,
+                    compress_threshold: 0,
+                    index: false,
+                },
+            ),
+            None,
+        ),
+    );
+    cases
+}
+
+/// A small merged trace from a macOS initiator (a) reaching a Linux responder (b) through a
+/// Tailscale tunnel, carrying the PTF 1.2 additions: META `endpoints.<ep>.os_family`,
+/// `os_version`, `iface.tunnel` and `sockets[].icmp_errors`, and `source` on every clock domain;
+/// OBSV `tcpinfo_darwin`; CTXS `netstack.udp_fullsock` (macOS rising, Linux null) and `ifstats`
+/// with a nullable `tx_dropped`; EVNT `power_assertion` and an `iface_change` whose `iface`
+/// carries `tunnel`; PLCY and PATH with `PATH.overlay` and `overlay_limited` on the verdicts
+/// it qualifies.
+fn additions_1_2() -> Vec<Section> {
+    let socket = |linux: bool| {
+        Value::map()
+            .with("name", "main")
+            .with("kernel_rx", true)
+            .with("kernel_tx", linux)
+            .with("recv_buf", 786_896u64)
+            .with("send_buf", 9_216u64)
+            .with("rxq_ovfl", linux)
+            .with("tx_ids", if linux { "explicit" } else { "none" })
+            .with("icmp_errors", linux)
+    };
+    let tunnel = || {
+        Value::map()
+            .with("kind", "utun")
+            .with("provider", "tailscale")
+    };
+    let a = Value::map()
+        .with("os", "macOS 15.6")
+        .with("os_family", "darwin")
+        .with("os_version", "15.6")
+        .with("kernel", "24.6.0")
+        .with("arch", "aarch64")
+        .with("cpu", "Apple M2")
+        .with(
+            "iface",
+            Value::map()
+                .with("name", "utun4")
+                .with("mtu", 1280u64)
+                .with("tunnel", tunnel()),
+        )
+        .with("sockets", Value::Array(vec![socket(false)]));
+    let b = Value::map()
+        .with("os", "Ubuntu 24.04.1 LTS")
+        .with("os_family", "linux")
+        .with("os_version", "24.04")
+        .with("kernel", "6.8.0-45-generic")
+        .with("arch", "x86_64")
+        .with("clocksource", "tsc")
+        .with(
+            "iface",
+            Value::map().with("name", "eth0").with("mtu", 1500u64),
+        )
+        .with("sockets", Value::Array(vec![socket(true)]));
+    let clocks = [("a", "mach_absolute_time"), ("b", "CLOCK_MONOTONIC_RAW")]
+        .iter()
+        .fold(Value::map(), |m, (ep, mono)| {
+            m.with(
+                &format!("{ep}.mono"),
+                Value::map()
+                    .with("kind", "monotonic_raw")
+                    .with("endpoint", *ep)
+                    .with("source", *mono),
+            )
+            .with(
+                &format!("{ep}.real"),
+                Value::map()
+                    .with("kind", "realtime")
+                    .with("endpoint", *ep)
+                    .with("pii", "quasi")
+                    .with("source", "CLOCK_REALTIME"),
+            )
+        });
+    let m = meta(
+        Value::map()
+            .with("endpoints", Value::map().with("a", a).with("b", b))
+            .with("clocks", clocks),
+    );
+
+    let ep = |e: &str| Value::map().with("endpoint", e);
+    let t = |i: u64| 1_000_000_000 + i * 10_000_000;
+
+    // tcpinfo_darwin: three samples of a reference TCP flow, every struct field filled.
+    let n = 3usize;
+    let fields: [(&str, &str, [u64; 3]); 23] = [
+        ("state", "enum", [4, 4, 4]),
+        ("snd_wscale", "raw", [6, 6, 6]),
+        ("rcv_wscale", "raw", [7, 7, 7]),
+        ("options", "bitmask", [0x7, 0x7, 0x7]),
+        ("flags", "bitmask", [0x0, 0x0, 0x0]),
+        ("rto", "ms", [230, 228, 226]),
+        ("maxseg", "B", [1228, 1228, 1228]),
+        ("snd_ssthresh", "B", [1_073_725_440, 1_073_725_440, 98_240]),
+        ("snd_cwnd", "B", [14_736, 29_472, 49_120]),
+        ("snd_wnd", "B", [131_712, 262_144, 262_144]),
+        ("snd_sbbytes", "B", [0, 24_560, 49_120]),
+        ("rcv_wnd", "B", [131_072, 131_072, 131_072]),
+        ("rttcur", "ms", [31, 30, 33]),
+        ("srtt", "ms", [31, 31, 32]),
+        ("rttvar", "raw", [15, 12, 11]),
+        ("tfo", "raw", [0, 0, 0]),
+        ("txpackets", "count", [3, 25, 61]),
+        ("txbytes", "B", [517, 27_533, 71_741]),
+        ("txretransmitbytes", "B", [0, 0, 1_228]),
+        ("rxpackets", "count", [3, 14, 30]),
+        ("rxbytes", "B", [4_310, 4_310, 4_310]),
+        ("rxoutoforderbytes", "B", [0, 0, 0]),
+        ("txretransmitpackets", "count", [0, 0, 1]),
+    ];
+    let tcpinfo_darwin = fields
+        .iter()
+        .fold(
+            Table::new("tcpinfo_darwin", n)
+                .with(nu("flow", Enc::Rle, "id", &all(n, 20)))
+                .with(
+                    nu(
+                        "t",
+                        Enc::Delta2,
+                        "ns",
+                        &[Some(t(0)), Some(t(1)), Some(t(2))],
+                    )
+                    .clock("a.mono"),
+                )
+                .with(nu("optlen", Enc::Rle, "B", &all(n, 112))),
+            |tb, (name, unit, v)| tb.with(nu(name, Enc::Delta, unit, &v.map(Some))),
+        )
+        .with_attrs(ep("a"));
+
+    // netstack: the Linux counters null and udp_fullsock rising on macOS (a); the reverse on
+    // Linux (b).
+    let linux_cols = [
+        "udp_in_errors",
+        "udp_rcvbuf_errors",
+        "udp_sndbuf_errors",
+        "udp_in_csum_errors",
+        "udp6_in_errors",
+        "udp6_rcvbuf_errors",
+        "udp6_sndbuf_errors",
+        "udp6_in_csum_errors",
+        "softnet_dropped",
+        "softnet_squeezed",
+    ];
+    let netstack = |e: &str, linux: bool| {
+        let s = |i: u64| 1_000_000_000 + i * 1_000_000_000;
+        linux_cols
+            .iter()
+            .fold(
+                Table::new("netstack", 2).with(
+                    Column::new("t", Enc::Delta2, Values::U64(vec![s(0), s(1)]))
+                        .unit("ns")
+                        .clock(&format!("{e}.mono")),
+                ),
+                |tb, name| {
+                    let rows = if linux {
+                        [Some(4), Some(4)]
+                    } else {
+                        [None, None]
+                    };
+                    tb.with(nu(name, Enc::Delta, "count", &rows))
+                },
+            )
+            .with(nu(
+                "udp_fullsock",
+                Enc::Delta,
+                "count",
+                &if linux {
+                    [None, None]
+                } else {
+                    [Some(17), Some(19)]
+                },
+            ))
+            .with_attrs(ep(e))
+    };
+    let ifstats = Table::new("ifstats", 2)
+        .with(
+            Column::new("t", Enc::Delta2, Values::U64(vec![t(0), t(100)]))
+                .unit("ns")
+                .clock("a.mono"),
+        )
+        .with(
+            Column::new(
+                "rx_bytes",
+                Enc::Delta,
+                Values::U64(vec![9_000_000, 9_412_000]),
+            )
+            .unit("B"),
+        )
+        .with(
+            Column::new(
+                "tx_bytes",
+                Enc::Delta,
+                Values::U64(vec![3_000_000, 4_228_000]),
+            )
+            .unit("B"),
+        )
+        .with(Column::new("rx_packets", Enc::Delta, Values::U64(vec![9_100, 9_480])).unit("count"))
+        .with(Column::new("tx_packets", Enc::Delta, Values::U64(vec![4_200, 5_200])).unit("count"))
+        .with(Column::new("rx_dropped", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with(nu("tx_dropped", Enc::Delta, "count", &[None, None]))
+        .with(Column::new("rx_errors", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with(Column::new("tx_errors", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with_attrs(ep("a"));
+
+    let event = |t: u64, kind: &str, detail: Value| {
+        Value::map()
+            .with("t", t)
+            .with("clock", "a.mono")
+            .with("endpoint", "a")
+            .with("type", kind)
+            .with("detail", detail)
+    };
+    let events = Section::new(
+        b"EVNT",
+        0,
+        Value::map()
+            .with(
+                "events",
+                Value::Array(vec![
+                    event(
+                        t(0),
+                        "power_assertion",
+                        Value::map().with("held", true).with("error", Value::Null),
+                    ),
+                    event(
+                        t(50),
+                        "iface_change",
+                        Value::map().with(
+                            "iface",
+                            Value::map().with("mtu", 1280u64).with("tunnel", tunnel()),
+                        ),
+                    ),
+                ]),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+
+    // Derived: PLCY and PATH qualified by the overlay (probe.md §9.9).
+    let plcy = Section::new(
+        b"PLCY",
+        flags::DERIVED,
+        Value::map()
+            .with("method", "policy.matrix/1")
+            .with(
+                "classes",
+                Value::map().with(
+                    "udp/high-port",
+                    Value::map()
+                        .with("transport", "udp")
+                        .with("reachable", true)
+                        .with("overlay_limited", true),
+                ),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    let qualified = |status: &str, method: &str| {
+        Value::map()
+            .with("status", status)
+            .with("method", method)
+            .with("overlay_limited", true)
+    };
+    let direction = || {
+        Value::map()
+            .with(
+                "policer",
+                qualified("unknown", "policer.lossy-flat/2").with("reason", "no saturation"),
+            )
+            .with(
+                "mtu",
+                qualified("known", "mtu.ladder/1")
+                    .with("path_mtu", 1280u64)
+                    .with("blackhole", Value::Null),
+            )
+            .with("ecn", qualified("known", "tos.light-cycle/1"))
+            .with("dscp", qualified("known", "tos.light-cycle/1"))
+    };
+    let path = Section::new(
+        b"PATH",
+        flags::CRITICAL | flags::DERIVED,
+        Value::map()
+            .with(
+                "derivation",
+                Value::map().with(
+                    "methods",
+                    Value::Array(vec![
+                        Value::from("mtu.ladder/1"),
+                        Value::from("overlay.egress-iface/1"),
+                        Value::from("policer.lossy-flat/2"),
+                        Value::from("policy.matrix/1"),
+                        Value::from("tos.light-cycle/1"),
+                    ]),
+                ),
+            )
+            .with(
+                "directions",
+                Value::map()
+                    .with("a_to_b", direction())
+                    .with("b_to_a", direction()),
+            )
+            .with(
+                "overlay",
+                Value::map()
+                    .with("status", "known")
+                    .with("method", "overlay.egress-iface/1")
+                    .with(
+                        "source",
+                        Value::Array(vec![Value::from("META"), Value::from("EVNT")]),
+                    )
+                    .with("overlay", true)
+                    .with("endpoints", Value::Array(vec![Value::from("a")]))
+                    .with("kind", "utun")
+                    .with("provider", "tailscale")
+                    .with("mtu", 1280u64)
+                    .with("overlay_ns", 1_000_000_000u64),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+
+    let s = |kind: &[u8; 4], t: Table| Section::new(kind, 0, Map::new()).with_table(t);
+    vec![
+        m,
+        s(b"OBSV", tcpinfo_darwin),
+        s(b"CTXS", ifstats),
+        s(b"CTXS", netstack("a", false)),
+        s(b"CTXS", netstack("b", true)),
+        events,
+        plcy,
+        path,
     ]
 }
 
