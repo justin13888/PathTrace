@@ -1,7 +1,7 @@
 //! `pathtrace doctor`: preflight checks before a field session (REQ-PRB-025). The checks, which
 //! of them run on each platform, and why `doctor` opens no session: docs/design/cli.md.
 
-use std::io::{ErrorKind, Read, Write};
+use std::io::{self, ErrorKind, Read, Write};
 use std::net::{IpAddr, SocketAddr, TcpStream, UdpSocket};
 use std::path::Path;
 use std::process::ExitCode;
@@ -11,6 +11,7 @@ use pt_probe::config::{self, Responder};
 use pt_sys::PLATFORM;
 use pt_sys::clock::NtpState;
 use pt_sys::netif::{IfInfo, IfType};
+use pt_sys::power::{PowerSource, PowerState};
 use pt_sys::udp::{MAX_DATAGRAM, OutMsg, SockOpts, UdpSock};
 
 const TCP_TIMEOUT: Duration = Duration::from_secs(3);
@@ -205,6 +206,39 @@ fn power(supplies: &[Supply]) -> (bool, String) {
         ),
         Some(b) => (true, format!("battery {}", b.status)),
         None => (true, "no battery".into()),
+    }
+}
+
+/// The `power` check on macOS, from the providing power source and Low Power Mode, with the
+/// Linux check's wording where the facts are the same.
+fn mac_power(state: &io::Result<PowerState>) -> (bool, String) {
+    let s = match state {
+        Ok(s) => s,
+        Err(e) => return (false, format!("cannot read the power source: {e}")),
+    };
+    let (ok, source) = match &s.source {
+        PowerSource::Ac => (true, "on external power".to_string()),
+        PowerSource::Ups => (true, "on UPS power".to_string()),
+        PowerSource::Battery => (false, "on battery".to_string()),
+        PowerSource::Other(o) if o.is_empty() => (true, "no power source reported".to_string()),
+        PowerSource::Other(o) => (true, format!("power source {o}")),
+    };
+    match (ok, s.low_power_mode) {
+        (true, false) => (true, source),
+        (false, false) => (
+            false,
+            format!("{source}: plug in (power saving adds timing noise)"),
+        ),
+        (true, true) => (
+            false,
+            format!("{source}, Low Power Mode on: turn it off (power saving adds timing noise)"),
+        ),
+        (false, true) => (
+            false,
+            format!(
+                "{source}, Low Power Mode on: plug in and turn it off (power saving adds timing noise)"
+            ),
+        ),
     }
 }
 
@@ -734,11 +768,13 @@ fn local_checks(cfg: &Path) -> Vec<Check> {
         ),
     };
     check(&mut c, "clock sync", ok, d, false);
-    // macOS has no /sys/class/power_supply; its IOKit power check is #78.
-    if linux {
-        let (ok, d) = power(&read_supplies());
-        check(&mut c, "power", ok, d, false);
-    }
+    // macOS has no /sys/class/power_supply: it reads IOKit power sources instead.
+    let (ok, d) = if linux {
+        power(&read_supplies())
+    } else {
+        mac_power(&pt_sys::power::power_state())
+    };
+    check(&mut c, "power", ok, d, false);
     if PLATFORM.power_assertion {
         let (ok, d) = match pt_sys::power::prevent_idle_sleep("pathtrace doctor") {
             // The assertion is released when `_assertion` goes out of scope at the end of
@@ -882,6 +918,7 @@ mod tests {
                     "key",
                     "kernel timestamps",
                     "clock sync",
+                    "power",
                     "sleep assertion"
                 ]
             );
@@ -1003,6 +1040,46 @@ mod tests {
             ])
             .0
         );
+    }
+
+    #[test]
+    fn mac_power_states() {
+        let st = |source, low_power_mode| {
+            Ok(PowerState {
+                source,
+                low_power_mode,
+            })
+        };
+        assert_eq!(
+            mac_power(&st(PowerSource::Ac, false)),
+            (true, "on external power".into())
+        );
+        assert_eq!(
+            mac_power(&st(PowerSource::Ups, false)),
+            (true, "on UPS power".into())
+        );
+        // The same advice as a discharging battery on Linux.
+        assert_eq!(
+            mac_power(&st(PowerSource::Battery, false)),
+            (
+                false,
+                "on battery: plug in (power saving adds timing noise)".into()
+            )
+        );
+        let (ok, d) = mac_power(&st(PowerSource::Ac, true));
+        assert!(!ok && d.contains("Low Power Mode on: turn it off"), "{d}");
+        let (ok, d) = mac_power(&st(PowerSource::Battery, true));
+        assert!(
+            !ok && d.starts_with("on battery, Low Power Mode on: plug in"),
+            "{d}"
+        );
+        assert!(mac_power(&st(PowerSource::Other(String::new()), false)).0);
+        assert_eq!(
+            mac_power(&st(PowerSource::Other("Weird".into()), false)),
+            (true, "power source Weird".into())
+        );
+        let (ok, d) = mac_power(&Err(io::Error::other("boom")));
+        assert!(!ok && d.contains("boom"), "{d}");
     }
 
     #[test]
