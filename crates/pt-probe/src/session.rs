@@ -82,8 +82,13 @@ fn utc_now() -> String {
 /// The clock domains of an endpoint, each with the OS clock it is read from (PTF 1.2
 /// `source`, ptf-format.md §6; probe.md §9.1).
 fn clocks_value(role: Role) -> Value {
+    clocks_value_for(role, pt_sys::PLATFORM.os_family)
+}
+
+/// [`clocks_value`] for the platform `os_family` names.
+fn clocks_value_for(role: Role, os_family: &str) -> Value {
     let r = role.name();
-    let mono_source = if pt_sys::PLATFORM.os_family == "darwin" {
+    let mono_source = if os_family == "darwin" {
         "mach_absolute_time"
     } else {
         "CLOCK_MONOTONIC_RAW"
@@ -2504,6 +2509,48 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clock_domains_record_their_os_source() {
+        let source = |v: &Value, domain: &str| {
+            v.get(domain)
+                .and_then(|d| d.get("source"))
+                .and_then(Value::as_str)
+                .map(str::to_owned)
+        };
+        let linux = clocks_value_for(Role::A, "linux");
+        assert_eq!(
+            source(&linux, "a.mono").as_deref(),
+            Some("CLOCK_MONOTONIC_RAW")
+        );
+        assert_eq!(source(&linux, "a.real").as_deref(), Some("CLOCK_REALTIME"));
+        let darwin = clocks_value_for(Role::B, "darwin");
+        assert_eq!(
+            source(&darwin, "b.mono").as_deref(),
+            Some("mach_absolute_time")
+        );
+        assert_eq!(source(&darwin, "b.real").as_deref(), Some("CLOCK_REALTIME"));
+        assert_eq!(
+            clocks_value(Role::A),
+            clocks_value_for(Role::A, pt_sys::PLATFORM.os_family)
+        );
+    }
+
+    #[test]
+    fn sockets_record_whether_icmp_errors_are_observable() {
+        let s =
+            Arc::new(UdpSock::bind("127.0.0.1:0".parse().unwrap(), SockOpts::default()).unwrap());
+        let caps = s.caps();
+        let v = sockets_value(&[(Sock::Main, s)]);
+        let row = &v.as_array().unwrap()[0];
+        assert_eq!(row.get("name").and_then(Value::as_str), Some("main"));
+        assert_eq!(
+            row.get("icmp_errors").and_then(Value::as_bool),
+            Some(caps.icmp_errors)
+        );
+        // IP_RECVERR on Linux; macOS has no ICMP error queue (probe.md §9.5).
+        assert_eq!(caps.icmp_errors, pt_sys::PLATFORM.os_family != "darwin");
+    }
 
     #[test]
     fn budget_reserve_covers_the_planned_time_still_to_come() {
