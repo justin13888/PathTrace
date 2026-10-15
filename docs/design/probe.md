@@ -347,7 +347,7 @@ META `endpoint` already has `os` (a display name such as "Ubuntu 24.04.1 LTS"), 
 
 ### 9.10 Derivation changes
 
-These rules take effect with the implementation (#63), which moves them into derivation.md's method tables:
+These rules took effect with the implementation (#63) and are stated in full in derivation.md's method tables:
 
 | Method | Change |
 |---|---|
