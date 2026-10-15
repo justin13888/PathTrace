@@ -63,5 +63,6 @@ UDP classes (`udp/high-port`, `udp/443`, QUIC-shaped) are also probed for reacha
 - status: planned
 - spec: §2.2, §3, §6.8
 - adr: 0014
+- evidence: EXP-0007-r9
 
 Only Linux and macOS are supported targets. On Linux every role (initiator, responder, tooling) runs on x86_64 and aarch64, kernel 6.1 or newer. On macOS the initiator roles (every command except `serve` and `authorize`) run on aarch64, macOS 15 or newer. Platform-specific code exists only in `pt-sys`, behind `cfg(target_os)`; other crates see capabilities, never `cfg`. No code paths, configuration or CI exist for Windows, Android or iOS.
