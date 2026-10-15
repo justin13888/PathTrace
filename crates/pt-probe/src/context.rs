@@ -180,9 +180,37 @@ pub fn tunnel_fact(name: &str, index: u32, local: Option<IpAddr>) -> Option<Valu
     )
 }
 
-/// NetworkManager metered state via `nmcli` with a timeout (R-0013). Runs before measurement,
-/// never during. Returns `unknown` if NetworkManager is unavailable.
+/// The metered state of `iface` (probe.md §9.11). Runs before measurement, never during. On
+/// macOS it is Network.framework's path cost ([`metered_from_cost`]); on Linux, where that
+/// reader is unsupported, NetworkManager's state via `nmcli`. `unknown` when neither answers.
 pub fn metered(iface: &str) -> String {
+    match pt_sys::netpath::path_cost(iface, Duration::from_secs(2)) {
+        Ok(cost) => metered_from_cost(cost),
+        Err(e) if e.kind() == std::io::ErrorKind::Unsupported => nm_metered(iface),
+        Err(_) => "unknown".into(),
+    }
+}
+
+/// The metered state of a Network.framework path cost, in the vocabulary
+/// [`crate::plan::auto_profile`] reads: `yes (…)` naming the flags that are set, `no`, or
+/// `unknown` when the current path does not use the interface (cli.md, "Metered state on
+/// macOS").
+pub fn metered_from_cost(cost: Option<pt_sys::netpath::PathCost>) -> String {
+    let Some(c) = cost else {
+        return "unknown".into();
+    };
+    match (c.expensive, c.constrained) {
+        (true, true) => "yes (expensive, constrained)",
+        (true, false) => "yes (expensive)",
+        (false, true) => "yes (constrained)",
+        (false, false) => "no",
+    }
+    .into()
+}
+
+/// NetworkManager metered state via `nmcli` with a timeout (R-0013). Returns `unknown` if
+/// NetworkManager is unavailable.
+fn nm_metered(iface: &str) -> String {
     let child = std::process::Command::new("nmcli")
         .args(["-t", "-g", "GENERAL.METERED", "device", "show", iface])
         .stdout(std::process::Stdio::piped())
@@ -518,6 +546,34 @@ fn run(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use pt_sys::netpath::PathCost;
+
+    /// Expensive or constrained paths are metered, in the vocabulary `auto_profile` reads.
+    #[test]
+    fn path_cost_maps_to_metered_state() {
+        let cost = |expensive, constrained| {
+            metered_from_cost(Some(PathCost {
+                expensive,
+                constrained,
+            }))
+        };
+        assert_eq!(cost(false, false), "no");
+        assert_eq!(cost(true, false), "yes (expensive)");
+        assert_eq!(cost(false, true), "yes (constrained)");
+        assert_eq!(cost(true, true), "yes (expensive, constrained)");
+        assert_eq!(metered_from_cost(None), "unknown");
+        for (e, c) in [(true, false), (false, true), (true, true)] {
+            assert_eq!(crate::plan::auto_profile(&cost(e, c)), "light");
+        }
+        assert_eq!(crate::plan::auto_profile(&cost(false, false)), "standard");
+    }
+
+    /// An interface no path uses is `unknown` on macOS; Linux reads NetworkManager, which
+    /// knows no such device either.
+    #[test]
+    fn metered_unknown_for_absent_interface() {
+        assert_eq!(metered("pt-none0"), "unknown");
+    }
 
     fn at(name: &str, index: u32) -> Option<(String, u32)> {
         Some((name.to_string(), index))

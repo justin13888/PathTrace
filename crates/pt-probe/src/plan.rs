@@ -222,8 +222,9 @@ pub fn spec(
     }
 }
 
-/// Profile chosen by `--profile auto` from NetworkManager's metered state (REQ-PRB-016):
-/// `yes` and `yes (guessed)` select `light`; anything else (no, unknown, absent) `standard`.
+/// Profile chosen by `--profile auto` from the metered state (REQ-PRB-016): a state starting
+/// with `yes` (NetworkManager's `yes` and `yes (guessed)`, macOS's `yes (expensive)` and
+/// `yes (constrained)`) selects `light`; anything else (no, unknown, absent) `standard`.
 pub fn auto_profile(metered: &str) -> &'static str {
     if metered.trim_start().starts_with("yes") {
         "light"
@@ -234,7 +235,8 @@ pub fn auto_profile(metered: &str) -> &'static str {
 
 /// Line `probe` prints whenever `--profile auto` decides: the chosen profile, the egress
 /// interface, and the metered state. A state that is neither `yes…` nor `no…` (no
-/// NetworkManager, unmanaged interface, timeout) makes it a warning: `standard` was picked
+/// NetworkManager, unmanaged interface, no macOS path through it, timeout) makes it a
+/// warning: `standard` was picked
 /// without knowing whether the link is capped, and phone hotspots are rarely flagged metered.
 pub fn auto_profile_notice(iface: &str, metered: &str) -> String {
     let chosen = auto_profile(metered);
@@ -250,7 +252,7 @@ pub fn auto_profile_notice(iface: &str, metered: &str) -> String {
         let m = if m.is_empty() { "unknown" } else { m };
         format!(
             "warning: profile auto: {chosen}, but the metered state of {iface} is {m} \
-             (NetworkManager unavailable or not managing it); on a capped link \
+             (the system reported no metered state for it); on a capped link \
              (phone hotspot, roaming SIM, in-flight Wi-Fi) pass --profile light"
         )
     }
