@@ -101,4 +101,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat ./*.sha256 > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Static Linux binaries (x86_64, aarch64) for every role, and an Apple silicon macOS binary (aarch64, macOS 15 or newer) for the initiator. Verify with SHA256SUMS (sha256sum -c on Linux, shasum -a 256 -c on macOS)." ./*.tar.gz SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Static Linux binaries (x86_64, aarch64) for every role, and an Apple silicon macOS binary (aarch64, macOS 15 or newer) for the initiator. Verify with SHA256SUMS (sha256sum --ignore-missing -c SHA256SUMS on Linux, shasum -a 256 --ignore-missing -c SHA256SUMS on macOS)." ./*.tar.gz SHA256SUMS
