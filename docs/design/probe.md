@@ -356,3 +356,7 @@ These rules took effect with the implementation (#63) and are stated in full in 
 | `hostdrop.host-fullsock/1` | New: host drops at a receiver without `rxq_drops`, from `netstack.udp_fullsock` (§9.6) |
 | `hostdrop.rxq-gap/1`, `qdisc.drop-count/2` | Unchanged results, `unknown` reason text included; both already carry a `reason` on an `unknown` status (§9.6) |
 | `overlay.egress-iface/1` | New: `PATH.overlay` and the `overlay_limited` key (§9.9) |
+
+### 9.11 Metered state
+
+META `metered` (REQ-PRB-019) is read once per session, before measurement, for the egress interface toward the peer. On Linux it is NetworkManager's state (`nmcli`, R-0013). On macOS it is Network.framework's view of the current path: `yes (expensive)` (cellular, Personal Hotspot, or a network the user marked as expensive), `yes (constrained)` (Low Data Mode), `yes (expensive, constrained)`, or `no`, and `unknown` when the egress interface is not the path's primary interface or the path gives no answer within 2 s. `--profile auto` reads the same value, so a Mac on a Personal Hotspot selects `light`. The reader and its alternatives are in cli.md, "Metered state on macOS".
