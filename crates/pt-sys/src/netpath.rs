@@ -28,18 +28,33 @@ pub fn path_cost(_iface: &str, _timeout: Duration) -> io::Result<Option<PathCost
     Err(crate::unsupported("the Network.framework path cost"))
 }
 
-/// The cost of the system's current path when it is satisfied and uses `iface`, else `None`
-/// (no route, or a route through another interface). Waits at most `timeout` for the path
-/// update and fails with [`io::ErrorKind::TimedOut`] when none arrives. Unprivileged.
+/// The cost of the system's current path when it is satisfied and `iface` is its primary
+/// interface, else `None` (no route, or a route through another interface). Waits at most
+/// `timeout` for the path update and fails with [`io::ErrorKind::TimedOut`] when none arrives.
+/// Unprivileged.
 #[cfg(target_os = "macos")]
 pub fn path_cost(iface: &str, timeout: Duration) -> io::Result<Option<PathCost>> {
     let u = nw::current_path(timeout)?;
-    Ok(
-        (u.satisfied && u.ifaces.iter().any(|n| n == iface)).then_some(PathCost {
+    Ok(attribute(
+        u.satisfied,
+        PathCost {
             expensive: u.expensive,
             constrained: u.constrained,
-        }),
-    )
+        },
+        &u.ifaces,
+        iface,
+    ))
+}
+
+/// The path's flags belong to `iface` only when it is the path's primary interface: the first
+/// one `nw_path_enumerate_interfaces` lists, which enumerates in order of preference. The list
+/// also holds every other interface available to the path (observed `["en0", "en0", "utun5"]`
+/// with the default route on `en0`), so a split-tunnel VPN interface appears in it without
+/// carrying the path's traffic, and must not inherit the flags of the link under the default
+/// route.
+#[cfg(any(target_os = "macos", test))]
+fn attribute(satisfied: bool, cost: PathCost, ifaces: &[String], iface: &str) -> Option<PathCost> {
+    (satisfied && ifaces.first().is_some_and(|n| n == iface)).then_some(cost)
 }
 
 /// Network.framework's path monitor (`Network/path_monitor.h`, `Network/path.h`) and the
@@ -282,6 +297,34 @@ mod tests {
     fn unsupported_on_linux() {
         let e = path_cost("eth0", Duration::from_secs(1)).unwrap_err();
         assert_eq!(e.kind(), io::ErrorKind::Unsupported);
+    }
+
+    /// Only the primary (first enumerated) interface gets the path's flags: a split-tunnel
+    /// VPN interface that is merely available to the path reads as `None`.
+    #[test]
+    fn flags_belong_to_primary_interface_only() {
+        let cost = PathCost {
+            expensive: true,
+            constrained: false,
+        };
+        let ifaces: Vec<String> = ["en0", "en0", "utun5"].map(String::from).into();
+        assert_eq!(attribute(true, cost, &ifaces, "en0"), Some(cost));
+        assert_eq!(attribute(true, cost, &ifaces, "utun5"), None);
+        assert_eq!(attribute(true, cost, &ifaces, "en1"), None);
+        assert_eq!(attribute(false, cost, &ifaces, "en0"), None);
+        assert_eq!(attribute(true, cost, &[], "en0"), None);
+    }
+
+    /// No update within a zero timeout is `TimedOut` (mapped to `unknown` by `pt-probe`), and
+    /// the timed-out query's monitor, whose update may still arrive late, does not break the
+    /// next query: it still gets its own update.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn timeout_then_next_query_succeeds() {
+        let e = path_cost("pt-none0", Duration::ZERO).unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::TimedOut);
+        let c = path_cost("pt-none0", Duration::from_secs(5)).expect("a path update");
+        assert_eq!(c, None);
     }
 
     /// A path update arrives on any Mac, CI runners included, also with no route: a name no
