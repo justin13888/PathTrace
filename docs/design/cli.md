@@ -94,7 +94,7 @@ The table below lists the checks on Linux. macOS runs the subset and replacement
 | per family: `udp/<port> not refused` | no | the UDP test above, on the responder port and 443 |
 | per family: `tcp/<port> not intercepted` | no (`responder reachable` is the fatal summary) | an HTTP request (64 bytes or more, so the responder rejects it at once) on every port that took a connection; the responder never speaks HTTP, so any answer (`HTTP/` or other bytes) is a captive portal, transparent proxy or other middlebox, which also makes a TCP connect pass. When the request cannot be made (the second connect or the write fails) it warns `not tested`, and the port does not count as clean |
 | `responder reachable` | yes | on at least one family, the responder port took a TCP connection that was tested and that nothing intercepted; it fails only when the responder port is unreachable, intercepted or untested on every family, because `probe` falls back to the other family (probe.md §3.1) |
-| per family: `tunnel` | no | the egress interface toward the responder (or the default route) is a tunnel (probe.md §9.9): warns, naming the interface, the tunnel kind and provider, and that per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel rather than the network under it. `ok` (`not a tunnel`) when the interface is not a tunnel, like every other check; the check is new in 1.2, an additive row in text and JSON output |
+| per family: `tunnel` | no | the egress interface toward the responder (or the default route) is a tunnel (probe.md §9.9): warns, naming the interface, the tunnel kind (on Linux the sysfs device type such as `wireguard`, `tun` for a TUN/TAP device, or `ipip`, `ip6tnl`, `sit` from the ARP hardware type; on macOS the name prefix) and the provider (`tailscale` when the local address is in Tailscale's ranges), and that per-transport treatment, policers, MTU, DSCP and ECN will describe the tunnel rather than the network under it. `ok` (`not a tunnel`) when the interface is not a tunnel, like every other check; the check is new in 1.2, an additive row in text and JSON output |
 
 Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 reachable`); the other family's carry a ` (ipv6)` or ` (ipv4)` suffix. Run `doctor` without a responder on the responder host too: its clock sync, power, timestamps and offloads matter as much.
 
@@ -119,11 +119,11 @@ Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 rea
 
 | Check | Fatal | What it reads on macOS |
 |---|---|---|
-| `macos >= 15` | yes | sysctl `kern.osproductversion`; replaces `kernel >= 6.1` |
+| `macos >= 15` | yes | `ProductVersion` in `/System/Library/CoreServices/SystemVersion.plist`, the file `sw_vers` reads and the value sysctl `kern.osproductversion` returns, read as a file so the check needs no `unsafe` outside `pt-sys`; replaces `kernel >= 6.1` |
 | `key` | yes | as on Linux |
 | `kernel timestamps` | no | the loopback self-test with RX only; `ok` when kernel RX stamps were seen, and its detail says that TX times are user-space on macOS (probe.md §9.2) |
-| `clock sync` | no | `ntp_adjtime` with `modes = 0` (unprivileged, R-0017): synchronised when `STA_UNSYNC` is clear, with the estimated and maximum error, as on Linux |
-| `power` | no | IOKit power sources (`IOPSCopyPowerSourcesInfo`, `IOPSGetProvidingPowerSourceType`): warns on battery; also warns when Low Power Mode is on (`NSProcessInfo.isLowPowerModeEnabled`, read through the Objective-C runtime's C API from `pt-sys`, no new crate) |
+| `clock sync` | no | `ntp_adjtime` with `modes = 0` (unprivileged, R-0017): synchronised when `STA_UNSYNC` is clear, with the estimated and maximum error, as on Linux; when not, the advice names "Set time and date automatically" (System Settings > General > Date & Time) instead of an NTP daemon |
+| `power` | no | IOKit power sources (`IOPSCopyPowerSourcesInfo`, `IOPSGetProvidingPowerSourceType`): warns on battery; also warns when Low Power Mode is on (`NSProcessInfo.isLowPowerModeEnabled`, read through the Objective-C runtime's C API from `pt-sys`, no new crate). Not run until `pt-sys` has these readers (#78): macOS has no `/sys/class/power_supply`, so the Linux reader would report a MacBook as a desktop |
 | `sleep assertion` | no | creates and releases the `kIOPMAssertPreventUserIdleSystemSleep` assertion the probe holds (probe.md §9.4); warns when it cannot, because an idle sleep can then interrupt a session |
 | `resolve responder`, `ipv4`, `ipv6`, `responder reachable` | as on Linux | as on Linux (the route lookup uses a connected UDP socket and `getifaddrs`) |
 | per family: `egress interface` | no | as on Linux |
@@ -133,4 +133,4 @@ Checks of the first family `probe` would use keep their 1.0 names (`tcp/4433 rea
 
 - **Not run on macOS**: `clocksource` (one timebase), `cpu governor` (no cpufreq), `wifi link stats` (no Wi-Fi telemetry until #68) and `offloads` (no `SIOCETHTOOL`; the receive coalescing it warns about is Linux's). `doctor` without a responder on a Mac checks the same local facts; `doctor` on the Linux responder host is unchanged.
 - **Rationale**: hiding what cannot apply keeps the output a list of things the user can act on, and keeping names and states shared means one runbook section and one JSON consumer serve both platforms.
-- **Validated by**: unit tests of the platform check list and the macOS classifiers (#64); the macOS evidence (#66) runs `doctor --json` on a Mac with no fatal finding.
+- **Validated by**: unit tests in `crates/pathtrace/src/doctor.rs`: the platform check list (`local_check_list_per_platform`, which on a Mac also asserts no fatal finding but the missing key), the version floor, the RX-only timestamp verdict, the per-OS clock advice, and the tunnel classifiers; the macOS evidence (#66) runs `doctor --json` on a Mac with no fatal finding.
