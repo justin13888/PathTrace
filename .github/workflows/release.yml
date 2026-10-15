@@ -67,7 +67,9 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           bin="target/${{ matrix.target }}/release/pathtrace"
-          file "$bin" | tee /dev/stderr | grep -q 'Mach-O 64-bit executable arm64'
+          kind=$(file -b "$bin")
+          echo "$kind"
+          case "$kind" in "Mach-O 64-bit executable arm64"*) ;; *) exit 1 ;; esac
           "$bin" --version
           otool -L "$bin"
           ! otool -L "$bin" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/'
