@@ -78,3 +78,19 @@ jobs:
       - run: cargo nextest run --workspace --locked --no-tests=pass
       - name: Network-namespace integration tests
         run: cargo nextest run --workspace --locked --run-ignored ignored-only --no-tests=pass
+  # macOS runs the initiator roles (ADR 0014). Network-namespace tests stay on Linux:
+  # macOS has no network namespaces, so only the host build, lint and unit tests run here.
+  test-macos:
+    runs-on: macos-15
+    env:
+      MISE_RUSTUP_HOME: /Users/runner/.local/share/mise/rustup
+      MISE_CARGO_HOME: /Users/runner/.local/share/mise/cargo
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: macos-15
+      - name: Clippy on the macOS host (pt-sys macOS backend)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked --no-tests=pass

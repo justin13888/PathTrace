@@ -30,14 +30,23 @@ jobs:
             target: x86_64-unknown-linux-musl
           - runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
+          # macOS runs the initiator roles only (ADR 0014): no systemd unit in this archive.
+          - runner: macos-15
+            target: aarch64-apple-darwin
+            home: /Users/runner
     runs-on: ${{ matrix.runner }}
+    env:
+      MISE_RUSTUP_HOME: ${{ matrix.home || '/home/runner' }}/.local/share/mise/rustup
+      MISE_CARGO_HOME: ${{ matrix.home || '/home/runner' }}/.local/share/mise/cargo
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0
       - uses: jdx/mise-action@v5
-      - run: sudo apt-get install -y -qq musl-tools
+      - if: runner.os == 'Linux'
+        run: sudo apt-get install -y -qq musl-tools
       - name: Build static binary
+        if: runner.os == 'Linux'
         env:
           CC: musl-gcc
           RUSTFLAGS: -C target-feature=+crt-static
@@ -45,19 +54,36 @@ jobs:
           rustup target add "${{ matrix.target }}"
           cargo build --release --locked -p pathtrace --target "${{ matrix.target }}"
       - name: Check it is static and runs
+        if: runner.os == 'Linux'
         run: |
           bin="target/${{ matrix.target }}/release/pathtrace"
           file "$bin"
           "$bin" --version
           ! ldd "$bin" 2>/dev/null | grep -q '=>'
+      - name: Build binary (macOS)
+        if: runner.os == 'macOS'
+        run: cargo build --release --locked -p pathtrace --target "${{ matrix.target }}"
+      - name: Check it is arm64 and links only system libraries
+        if: runner.os == 'macOS'
+        run: |
+          bin="target/${{ matrix.target }}/release/pathtrace"
+          kind=$(file -b "$bin")
+          echo "$kind"
+          case "$kind" in "Mach-O 64-bit executable arm64"*) ;; *) exit 1 ;; esac
+          "$bin" --version
+          otool -L "$bin"
+          ! otool -L "$bin" | tail -n +2 | grep -vE '^[[:space:]]+/(usr/lib|System/Library)/'
       - name: Package
         run: |
           # Branch names in dry runs (workflow_dispatch) may contain "/".
           name="pathtrace-${GITHUB_REF_NAME//\//-}-${{ matrix.target }}"
           mkdir "$name"
-          cp "target/${{ matrix.target }}/release/pathtrace" LICENSE README.md deploy/pathtrace-responder.service "$name/"
+          cp "target/${{ matrix.target }}/release/pathtrace" LICENSE README.md "$name/"
+          # The responder (serve) runs on Linux only; its systemd unit ships only there.
+          if [ "$RUNNER_OS" = Linux ]; then cp deploy/pathtrace-responder.service "$name/"; fi
           tar czf "$name.tar.gz" "$name"
-          sha256sum "$name.tar.gz" > "$name.tar.gz.sha256"
+          # Same "<hash>  <file>" line on both: sha256sum (Linux) and shasum -a 256 (macOS).
+          if [ "$RUNNER_OS" = macOS ]; then shasum -a 256 "$name.tar.gz"; else sha256sum "$name.tar.gz"; fi > "$name.tar.gz.sha256"
       - uses: actions/upload-artifact@v5
         with:
           name: ${{ matrix.target }}
@@ -75,4 +101,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           cat ./*.sha256 > SHA256SUMS
-          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Static Linux binaries (x86_64, aarch64). Verify with SHA256SUMS." ./*.tar.gz SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --notes "Static Linux binaries (x86_64, aarch64) for every role, and an Apple silicon macOS binary (aarch64, macOS 15 or newer) for the initiator. Verify with SHA256SUMS (sha256sum --ignore-missing -c SHA256SUMS on Linux, shasum -a 256 --ignore-missing -c SHA256SUMS on macOS)." ./*.tar.gz SHA256SUMS

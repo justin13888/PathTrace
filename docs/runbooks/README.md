@@ -7,6 +7,6 @@ Step-by-step operational procedures for humans running PathTrace for real. Each 
 
 | Runbook | Purpose |
 |---|---|
-| [responder-deploy.md](responder-deploy.md) | Install the responder on a public VM, pair the laptop, verify with a smoke session |
-| [field-session.md](field-session.md) | Capture traces on real networks: labels, profiles, exit codes, sampling plan, privacy |
+| [responder-deploy.md](responder-deploy.md) | Install the responder on a Linux VM, install on a Linux or macOS laptop, pair them, verify with a smoke session; overlay (Tailscale) responder |
+| [field-session.md](field-session.md) | Capture traces on real networks from a Linux or macOS laptop: labels, profiles, exit codes, overlay checks, sampling plan, privacy |
 | [release.md](release.md) | Cut a release: version bump, dry run, annotated tag, gated publish, release evidence |
