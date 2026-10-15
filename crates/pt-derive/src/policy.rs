@@ -15,32 +15,30 @@ fn q(v: &mut [f64], p: f64) -> Option<f64> {
     Some(v[((v.len() - 1) as f64 * p).round() as usize])
 }
 
-/// UDP echo RTTs per flow (trace ns): echo arrival at the sender minus its transmission.
-fn echo_rtts(raw: &Raw, tb: &TimeBase) -> BTreeMap<i64, Vec<f64>> {
-    let mut out: BTreeMap<i64, Vec<f64>> = BTreeMap::new();
-    let (Some(echo), Some(pkt)) = (raw.table("echo[a]"), raw.table("pkt[a_to_b]")) else {
+/// UDP echoes per flow: how many arrived back at the sender, and their RTTs (trace ns: echo
+/// arrival minus the transmit time, which follows the direction rule SND, else SCHED, else
+/// user; `policy.matrix/2`). An echo whose transmit time is unknown counts as arrived and has
+/// no RTT.
+fn echo_rtts(raw: &Raw, tb: &TimeBase) -> BTreeMap<i64, (usize, Vec<f64>)> {
+    let mut out: BTreeMap<i64, (usize, Vec<f64>)> = BTreeMap::new();
+    let Some(echo) = raw.table("echo[a]") else {
         return out;
     };
-    let mut tx: BTreeMap<(i64, i64), i64> = BTreeMap::new();
-    for i in 0..pkt.n {
-        let (Some(f), Some(s)) = (pkt.get("flow", i), pkt.get("seq", i)) else {
-            continue;
-        };
-        let t = pkt
-            .get("tx_sched", i)
-            .map(|s| s + pkt.get("tx_snd_lag", i).unwrap_or(0));
-        if let Some(t) = t.and_then(|t| tb.real("a", t)) {
-            tx.insert((f, s), t);
-        }
-    }
+    let (pkts, _) = crate::dir::packets(raw, tb, "a_to_b");
+    let tx: BTreeMap<(i64, i64), i64> = pkts
+        .iter()
+        .filter_map(|p| Some(((p.flow, p.seq), p.tx?)))
+        .collect();
     for i in 0..echo.n {
         let (Some(f), Some(s), Some(r)) =
             (echo.get("flow", i), echo.get("seq", i), echo.get("rx", i))
         else {
             continue;
         };
+        let e = out.entry(f).or_default();
+        e.0 += 1;
         if let (Some(t), Some(r)) = (tx.get(&(f, s)), tb.real("a", r)) {
-            out.entry(f).or_default().push((r - t) as f64);
+            e.1.push((r - t) as f64);
         }
     }
     out
@@ -81,10 +79,9 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
         (11, 14, "udp/443"),
         (12, 15, "udp/443-quic"),
     ] {
-        let r = rtts.get(&flow).cloned().unwrap_or_default();
+        let (echoes, r) = rtts.get(&flow).cloned().unwrap_or_default();
         let mut rr = r.clone();
-        let min = rr.iter().copied().fold(f64::MAX, f64::min);
-        if r.is_empty() {
+        if echoes == 0 {
             classes = classes.with(
                 class,
                 Value::map()
@@ -93,7 +90,10 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
             );
             continue;
         }
-        udp_min_rtt = udp_min_rtt.min(min);
+        let min = rr.iter().copied().reduce(f64::min);
+        if let Some(m) = min {
+            udp_min_rtt = udp_min_rtt.min(m);
+        }
         let sat = flow_rate(raw, "a_to_b", sat_flow);
         classes = classes.with(
             class,
@@ -102,7 +102,7 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
                 .with("reachable", true)
                 .with("rtt_min_ns", min)
                 .with("rtt_median_ns", q(&mut rr, 0.5))
-                .with("echoes", r.len())
+                .with("echoes", echoes)
                 .with("rate_bps", sat.map(|s| s.0))
                 .with("loss", sat.map(|s| s.1))
                 .with(
@@ -208,7 +208,7 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
             continue;
         }
         let t = f.get("echo_delay_ns").and_then(Value::as_u64).unwrap_or(0);
-        let arrived = rtts.get(&(*id as i64)).is_some_and(|v| !v.is_empty());
+        let arrived = rtts.get(&(*id as i64)).is_some_and(|v| v.0 > 0);
         nat.push(
             Value::map()
                 .with("idle_s", t / 1_000_000_000)
@@ -217,7 +217,7 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
     }
     let rebinds = raw.events_of("nat_rebind").count();
     Value::map()
-        .with("method", "policy.matrix/1")
+        .with("method", "policy.matrix/2")
         .with("confidence", 0.8)
         .with("classes", classes)
         .with("secondary_family", Value::Array(secondary))
