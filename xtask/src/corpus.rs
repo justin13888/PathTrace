@@ -1187,7 +1187,7 @@ fn additions_1_2() -> Vec<Section> {
         b"PLCY",
         flags::DERIVED,
         Value::map()
-            .with("method", "policy.matrix/1")
+            .with("method", "policy.matrix/2")
             .with(
                 "classes",
                 Value::map().with(
@@ -1216,7 +1216,7 @@ fn additions_1_2() -> Vec<Section> {
             )
             .with(
                 "mtu",
-                qualified("known", "mtu.ladder/1")
+                qualified("known", "mtu.ladder/2")
                     .with("path_mtu", 1280u64)
                     .with("blackhole", Value::Null),
             )
@@ -1232,10 +1232,10 @@ fn additions_1_2() -> Vec<Section> {
                 Value::map().with(
                     "methods",
                     Value::Array(vec![
-                        Value::from("mtu.ladder/1"),
+                        Value::from("mtu.ladder/2"),
                         Value::from("overlay.egress-iface/1"),
                         Value::from("policer.lossy-flat/2"),
-                        Value::from("policy.matrix/1"),
+                        Value::from("policy.matrix/2"),
                         Value::from("tos.light-cycle/1"),
                     ]),
                 ),

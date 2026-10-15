@@ -1,5 +1,5 @@
 {
-  "valid-1-2-additions-uncompressed-no-index.ptf": {"valid": true, "content_digest": "c05c3e051eca1622c49f49063e2fa29a98e0f7b61defbaf091a3910f7f1c9ae4"},
-  "valid-1-2-additions.ptf": {"valid": true, "content_digest": "c05c3e051eca1622c49f49063e2fa29a98e0f7b61defbaf091a3910f7f1c9ae4"},
+  "valid-1-2-additions-uncompressed-no-index.ptf": {"valid": true, "content_digest": "5fac4f1ce4f384b0e7f9ecc44e3768472dfa053a4249cdad4485953c2cb3ca9b"},
+  "valid-1-2-additions.ptf": {"valid": true, "content_digest": "5fac4f1ce4f384b0e7f9ecc44e3768472dfa053a4249cdad4485953c2cb3ca9b"},
   "valid-minimal.ptf": {"valid": true, "content_digest": "2cab6b922f1e1fd027339790ea0fea5f3eeebd04ddf42881b1db5cca6a30ec17"}
 }
