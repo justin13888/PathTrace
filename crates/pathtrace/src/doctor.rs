@@ -744,6 +744,15 @@ fn local_checks(cfg: &Path) -> Vec<Check> {
         };
         check(&mut c, "sleep assertion", ok, d, false);
     }
+    if darwin() {
+        // A thread cannot rise above its process's QoS clamp or background policy, so measure
+        // whether the pacing policy took effect (probe.md §9.4).
+        let (ok, d) = match pt_sys::clock::pacing_check() {
+            Ok(p) => pt_probe::io::pacing_verdict(&p),
+            Err(e) => (false, format!("cannot run the pacing check: {e}")),
+        };
+        check(&mut c, "pacing", ok, d, false);
+    }
     if linux {
         let (driver, govs) = read_governors();
         let (ok, d) = governor(&driver, &govs);
@@ -873,7 +882,8 @@ mod tests {
                     "kernel timestamps",
                     "clock sync",
                     "power",
-                    "sleep assertion"
+                    "sleep assertion",
+                    "pacing"
                 ]
             );
             // A supported Mac has no fatal finding but the missing key.
