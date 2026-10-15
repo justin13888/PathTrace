@@ -58,6 +58,32 @@ fn read(
     .map_err(|e| format!("{} [{}]", e, e.kind()))
 }
 
+/// What `trace info` shows from PATH (cli.md): per direction `host_drops`, `local_qdisc_drops`
+/// and `tx_timestamps` (the counts of `PATH.<dir>.timestamps`: how many transmit times are
+/// `snd`, `sched` or `user`), and `overlay`. A field derivation could not establish is shown
+/// whole, with its `unknown` status and `reason` and no counts (probe.md §9.6).
+fn path_facts(f: &pt_format::PtfFile) -> serde_json::Value {
+    let head = f.sections.iter().find(|s| &s.kind == b"PATH");
+    let dirs = head.and_then(|s| s.get("directions"));
+    let per_dir = |get: &dyn Fn(&Value) -> Option<&Value>| {
+        dirs.map(|d| {
+            ["a_to_b", "b_to_a"]
+                .iter()
+                .filter_map(|dir| {
+                    let v = get(d.get(dir)?)?;
+                    Some((dir.to_string(), pt_format::jsonl::cbor_to_json(v)))
+                })
+                .collect::<serde_json::Map<_, _>>()
+        })
+    };
+    serde_json::json!({
+        "host_drops": per_dir(&|d: &Value| d.get("host_drops")),
+        "local_qdisc_drops": per_dir(&|d: &Value| d.get("local_qdisc_drops")),
+        "tx_timestamps": per_dir(&|d: &Value| d.get("timestamps").and_then(|t| t.get("counts"))),
+        "overlay": head.and_then(|s| s.get("overlay")).map(pt_format::jsonl::cbor_to_json),
+    })
+}
+
 pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
     match cmd {
         TraceCmd::Check { file, json } => {
@@ -144,23 +170,7 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                         .map_or(0, <[Value]>::len)
                 })
                 .sum::<usize>();
-            // Host-side losses from the derived layer, per direction (derivation.md, Host drops).
-            let path = f
-                .sections
-                .iter()
-                .find(|s| &s.kind == b"PATH")
-                .and_then(|s| s.get("directions"));
-            let host = |field: &str| {
-                path.map(|d| {
-                    ["a_to_b", "b_to_a"]
-                        .iter()
-                        .filter_map(|dir| {
-                            let v = d.get(dir)?.get(field)?;
-                            Some((dir.to_string(), pt_format::jsonl::cbor_to_json(v)))
-                        })
-                        .collect::<serde_json::Map<_, _>>()
-                })
-            };
+            let p = path_facts(&f);
             let summary = serde_json::json!({
                 "file": file.display().to_string(),
                 "ptf_version": format!("{}.{}", f.major, f.minor),
@@ -170,8 +180,10 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 "network_class": meta.get("network").and_then(|n| n.get("class")).and_then(Value::as_str),
                 "complete": meta.get("complete").and_then(Value::as_bool),
                 "merge_checks": meta.get("merge_checks").map(pt_format::jsonl::cbor_to_json),
-                "host_drops": host("host_drops"),
-                "local_qdisc_drops": host("local_qdisc_drops"),
+                "host_drops": p["host_drops"],
+                "local_qdisc_drops": p["local_qdisc_drops"],
+                "tx_timestamps": p["tx_timestamps"],
+                "overlay": p["overlay"],
                 "redaction": meta.get("redaction").and_then(Value::as_str),
                 "tool_commit": meta.get("tool").and_then(|t| t.get("git_commit")).and_then(Value::as_str),
                 "sections": kinds,
@@ -230,5 +242,43 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
             println!("{} content_digest={d}", out.display());
             Ok(ExitCode::SUCCESS)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn corpus(rel: &str) -> pt_format::PtfFile {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance")
+            .join(rel);
+        read(&p, false).unwrap().0
+    }
+
+    /// `trace info` shows the overlay fact of a 1.2 trace (cli.md).
+    #[test]
+    fn info_shows_the_overlay() {
+        let p = path_facts(&corpus("v1.2/valid-1-2-additions.ptf"));
+        assert_eq!(p["overlay"]["overlay"], true);
+        assert_eq!(p["overlay"]["provider"], "tailscale");
+    }
+
+    /// An unknown field shows its status and reason and no counts, never 0; the transmit
+    /// time sources are counted per direction.
+    #[test]
+    fn info_shows_unknown_counters_and_tx_sources() {
+        let f = corpus("v1.0-real/smoke-ipv6-netns-anonymous.ptf");
+        let f = pt_derive::apply(&f, &crate::derive_tool());
+        let p = path_facts(&f);
+        let q = &p["local_qdisc_drops"]["a_to_b"];
+        assert_eq!(q["status"], "unknown");
+        assert_eq!(q["reason"], "no qdisc counters recorded");
+        assert!(q.get("drops").is_none());
+        let h = &p["host_drops"]["b_to_a"];
+        assert_eq!(h["status"], "unknown");
+        assert!(h.get("packets").is_none());
+        assert!(p["tx_timestamps"]["a_to_b"]["snd"].as_u64().unwrap() > 0);
+        assert_eq!(p["overlay"]["status"], "unknown");
     }
 }
