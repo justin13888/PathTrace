@@ -351,7 +351,7 @@ fn tailscale_addr(ip: IpAddr) -> bool {
 
 /// The tunnel kind of interface `name` (probe.md §9.9): on macOS its name prefix (`utun`,
 /// `ipsec`, `tun`, `tap`); on Linux the sysfs device type (`wireguard`), `tun` for a TUN/TAP
-/// device, or the ARP hardware type of an IP-in-IP tunnel.
+/// device, or the ARP hardware type of an IP-in-IP, vti or GRE tunnel.
 fn tunnel_kind(name: &str) -> String {
     if darwin() {
         return name.trim_end_matches(|c: char| c.is_ascii_digit()).into();
@@ -370,9 +370,13 @@ fn linux_tunnel_kind(devtype: Option<&str>, tun: bool, arphrd: u32) -> String {
     match (devtype, tun, arphrd) {
         (Some(d), _, _) if !d.is_empty() => d.into(),
         (_, true, _) => "tun".into(),
-        (_, _, 768) => "ipip".into(),
-        (_, _, 769) => "ip6tnl".into(),
+        // ARPHRD_TUNNEL and ARPHRD_TUNNEL6 are shared by ipip/vti and ip6tnl/vti6; only the
+        // rtnetlink link kind (#63) tells them apart.
+        (_, _, 768) => "ipip or vti".into(),
+        (_, _, 769) => "ip6tnl or vti6".into(),
         (_, _, 776) => "sit".into(),
+        (_, _, 778) => "gre".into(),
+        (_, _, 823) => "ip6gre".into(),
         _ => "unknown".into(),
     }
 }
@@ -960,9 +964,11 @@ mod tests {
             "wireguard"
         );
         assert_eq!(linux_tunnel_kind(None, true, 65534), "tun");
-        assert_eq!(linux_tunnel_kind(None, false, 768), "ipip");
-        assert_eq!(linux_tunnel_kind(None, false, 769), "ip6tnl");
+        assert_eq!(linux_tunnel_kind(None, false, 768), "ipip or vti");
+        assert_eq!(linux_tunnel_kind(None, false, 769), "ip6tnl or vti6");
         assert_eq!(linux_tunnel_kind(Some(""), false, 776), "sit");
+        assert_eq!(linux_tunnel_kind(None, false, 778), "gre");
+        assert_eq!(linux_tunnel_kind(None, false, 823), "ip6gre");
         assert_eq!(linux_tunnel_kind(None, false, 1), "unknown");
     }
 
