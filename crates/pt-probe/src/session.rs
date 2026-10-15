@@ -1108,6 +1108,16 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         rec.event("power_assertion", power_assertion_detail(&held));
         held.ok()
     });
+    // On macOS a QoS clamp or background policy on this process caps the pacer whatever it
+    // requests; say so on stderr now, before measuring, even with -q (probe.md §9.4). It is
+    // not a note: a note marks the trace partial, and the session is complete, with the
+    // lateness recorded in the trace anyway.
+    if pt_sys::PLATFORM.os_family == "darwin"
+        && let Ok(p) = pt_sys::clock::pacing_check()
+        && let (false, d) = crate::io::pacing_verdict(&p)
+    {
+        eprintln!("warning: {d}");
+    }
 
     // Endpoint.
     let shared = Shared::new(Role::A, opts.profile.data_cap, opts.rate_cap_bps);
