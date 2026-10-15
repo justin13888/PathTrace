@@ -167,17 +167,36 @@ fn tunnel_provider(local: IpAddr) -> Option<&'static str> {
     tailscale.then_some("tailscale")
 }
 
-/// META `endpoint.iface.tunnel {kind, provider}` of interface `name` holding the local address
-/// `local`, or `None` when it is not a tunnel (PTF 1.2, probe.md §9.9).
-pub fn tunnel_fact(name: &str, index: u32, local: Option<IpAddr>) -> Option<Value> {
+/// A tunnel egress interface as probe.md §9.9 classifies it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tunnel {
+    /// The rtnetlink link kind on Linux, the name prefix on macOS.
+    pub kind: String,
+    /// The provider hint from the local address (`tailscale`), when one matches.
+    pub provider: Option<&'static str>,
+}
+
+/// The tunnel classification of interface `name` (index `index`) holding the local address
+/// `local`, or `None` when it is not a tunnel (probe.md §9.9). The one classifier behind META
+/// `endpoint.iface.tunnel` and `doctor`'s `tunnel` check.
+pub fn tunnel(name: &str, index: u32, local: Option<IpAddr>) -> Option<Tunnel> {
     // Without rtnetlink (macOS, or a failed query) the interface name decides.
     let link_kind = pt_sys::netlink::link_kind(index).ok();
     let kind = tunnel_kind(link_kind.as_ref().map(Option::as_deref), name)?;
-    Some(
+    Some(Tunnel {
+        kind,
+        provider: local.and_then(tunnel_provider),
+    })
+}
+
+/// META `endpoint.iface.tunnel {kind, provider}` of interface `name` holding the local address
+/// `local`, or `None` when it is not a tunnel (PTF 1.2, probe.md §9.9).
+pub fn tunnel_fact(name: &str, index: u32, local: Option<IpAddr>) -> Option<Value> {
+    tunnel(name, index, local).map(|t| {
         Value::map()
-            .with("kind", kind)
-            .with("provider", local.and_then(tunnel_provider)),
-    )
+            .with("kind", t.kind)
+            .with("provider", t.provider)
+    })
 }
 
 /// The metered state of `iface` (probe.md §9.11). Runs before measurement, never during. On
