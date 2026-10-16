@@ -84,11 +84,11 @@ For a MacBook capturing to a Linux responder that is reachable only over Tailsca
 2. Direct path, not DERP:
 
    ```sh
-   tailscale netcheck > tailscale-netcheck.txt
+   tailscale netcheck > "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-netcheck.txt"
    tailscale ping <host> | tee "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-ping.txt"
    ```
 
-   The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`. On `via DERP(<region>)` the traffic is relayed over TCP and a trace would record the relay: do not record. Run `tailscale ping` again (a direct path often comes up after a few pings); if it stays on DERP and `tailscale-netcheck.txt` shows `UDP: false`, this network blocks Tailscale's direct UDP, so record it without the overlay (a public responder) or not at all.
+   The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`. On `via DERP(<region>)` the traffic is relayed over TCP and a trace would record the relay: do not record. Run `tailscale ping` again (a direct path often comes up after a few pings); if it stays on DERP and the `*-tailscale-netcheck.txt` file just written shows `UDP: false`, this network blocks Tailscale's direct UDP, so record it without the overlay (a public responder) or not at all.
 3. Power: plug in, and turn off Low Power Mode (System Settings > Battery).
 4. Run everything from a Terminal window in the foreground, with other work closed: not from a launchd job, a CI runner, `taskpolicy` or a script started in the background. A process started that way runs under a QoS clamp or the background policy and caps the pacer.
 5. On the Mac, `pathtrace doctor vm-ts`. Every line must read `ok`, except these warnings:
@@ -151,7 +151,7 @@ Every probe packet, of every class and transport, travels inside one WireGuard U
 
 ### 5. Archive
 
-Each session directory `~/pathtrace-field/<date>-<class>-<link>/` keeps, per session: `<id>.a.ptflog`, `<id>.b.ptflog`, `<id>.ptf`, and the Tailscale snapshot (`tailscale-netcheck.txt` and the `*-tailscale-ping.txt` files from before and after), and `notes.txt` (the session id, venue, and any warning or failed row). A second session on the same network and day goes in the same directory: its files have their own `<id>`.
+Each session directory `~/pathtrace-field/<date>-<class>-<link>/` keeps, per session: `<id>.a.ptflog`, `<id>.b.ptflog`, `<id>.ptf`, and the Tailscale snapshot (the `*-tailscale-netcheck.txt` file from before and the `*-tailscale-ping.txt` files from before and after, each named by the UTC time it was taken), and `notes.txt` (the session id, venue, and any warning or failed row). A second session on the same network and day goes in the same directory: its files have their own `<id>`.
 
 The probe fetches the responder's log itself, as `<id>.b.ptflog`. If that and `fetch --resume` both fail (the session file is lost, or the responder's port is not reachable from where you are now), copy it from the responder over SSH (on the tailnet). The service keeps it as `b.ptflog` in `/var/lib/pathtrace/state/sessions/<session>/` for 14 days ([responder-deploy.md](responder-deploy.md#maintenance)), owned by the `pathtrace` user. Copy only `b.ptflog`: the `fetch_token` next to it is a secret.
 
