@@ -155,15 +155,9 @@ fn kernel_ok(release: &str) -> bool {
     ver.len() == 2 && (ver[0], ver[1]) >= (6, 1)
 }
 
-/// The `clock sync` verdict, with advice for this host's OS.
-fn clock_sync(s: &NtpState, darwin: bool) -> (bool, String) {
-    if darwin && !s.synced {
-        (
-            false,
-            "not synchronised: turn on \"Set time and date automatically\" (System Settings > General > Date & Time) and wait for sync"
-                .into(),
-        )
-    } else if s.synced {
+/// The `clock sync` verdict on Linux, from `adjtimex(2)`.
+fn clock_sync(s: &NtpState) -> (bool, String) {
+    if s.synced {
         (
             true,
             format!(
@@ -178,6 +172,17 @@ fn clock_sync(s: &NtpState, darwin: bool) -> (bool, String) {
                 .into(),
         )
     }
+}
+
+/// The `clock sync` verdict on macOS: always unknown. `timed` never writes `esterror`, resets
+/// `maxerror` to undocumented values and never sets `STA_UNSYNC` again once cleared, and its own
+/// state needs root (R-0019), so no `ntp_adjtime` figure is shown and nothing reads as synchronised.
+fn mac_clock_sync() -> (bool, String) {
+    (
+        false,
+        "sync state unknown: macOS does not report it to an unprivileged process; check that \"Set time and date automatically\" is on (System Settings > General > Date & Time)"
+            .into(),
+    )
 }
 
 /// One entry of `/sys/class/power_supply`.
@@ -714,12 +719,13 @@ fn local_checks(cfg: &Path) -> Vec<Check> {
             false,
         );
     }
-    let (ok, d) = match pt_sys::clock::ntp_state() {
-        Ok(s) => clock_sync(&s, !linux),
-        Err(e) => (
-            false,
-            format!("{}: {e}", if linux { "adjtimex" } else { "ntp_adjtime" }),
-        ),
+    let (ok, d) = if linux {
+        match pt_sys::clock::ntp_state() {
+            Ok(s) => clock_sync(&s),
+            Err(e) => (false, format!("adjtimex: {e}")),
+        }
+    } else {
+        mac_clock_sync()
     };
     check(&mut c, "clock sync", ok, d, false);
     // macOS has no /sys/class/power_supply: it reads IOKit power sources instead.
@@ -823,18 +829,26 @@ mod tests {
             esterror_us: 0,
             maxerror_us: 16_000_000,
         };
-        for darwin in [false, true] {
-            let (ok, d) = clock_sync(&synced, darwin);
-            assert!(ok && d.contains("120 us") && d.contains("4000 us"), "{d}");
-        }
-        let (ok, d) = clock_sync(&unsynced, false);
+        let (ok, d) = clock_sync(&synced);
+        assert_eq!(d, "synchronised (estimated error 120 us, maximum 4000 us)");
+        assert!(ok);
+        let (ok, d) = clock_sync(&unsynced);
         assert!(!ok && d.contains("NTP") && d.contains("chrony"), "{d}");
-        // No Linux daemon advice on macOS.
-        let (ok, d) = clock_sync(&unsynced, true);
+    }
+
+    /// macOS cannot show the sync state (R-0019): a warning with the Date & Time advice, no
+    /// `ntp_adjtime` figure, no Linux daemon advice, and never "synchronised".
+    #[test]
+    fn mac_clock_sync_is_unknown() {
+        let (ok, d) = mac_clock_sync();
+        assert!(!ok, "{d}");
+        assert!(d.starts_with("sync state unknown"), "{d}");
+        assert!(d.contains("System Settings > General > Date & Time"), "{d}");
         assert!(
-            !ok && d.contains("Date & Time") && !d.contains("chrony"),
+            !d.contains(" us") && !d.contains("error") && !d.contains("chrony"),
             "{d}"
         );
+        assert!(!d.contains("synchronised"), "{d}");
     }
 
     #[test]
@@ -896,6 +910,9 @@ mod tests {
                 );
                 assert!(!x.detail.contains("ethtool"), "{}", x.detail);
             }
+            // The row is the unknown verdict, whatever ntp_adjtime would say (R-0019).
+            let cs = c.iter().find(|x| x.name == "clock sync").unwrap();
+            assert_eq!((cs.ok, cs.detail.clone()), mac_clock_sync());
         } else {
             assert_eq!(
                 names,
