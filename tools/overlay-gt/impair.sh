@@ -23,6 +23,7 @@ SCHEDULE=$(dirname "$0")/schedule
 PORTS="4433 443 80"
 INSTALLED=0
 SCHED_COPY=
+PRIV=
 
 die() {
 	echo "impair: $*" >&2
@@ -65,13 +66,21 @@ for p in $PORTS; do
 	[ "$p" -ge 1 ] && [ "$p" -le 65535 ] || die "bad port $p"
 done
 [ -d "$CTL" ] && [ ! -L "$CTL" ] || die "--control must be an existing directory (not a link)"
+# Only the directory's owner may write in it; root touches it only as that owner (as_owner).
+[ -z "$(find "$CTL" -maxdepth 0 -perm /022)" ] || die "--control must not be group- or world-writable"
+OWNER_UID=$(stat -c %u "$CTL")
+OWNER_GID=$(stat -c %g "$CTL")
+command -v setpriv >/dev/null 2>&1 || die "setpriv (util-linux) is needed to touch $CTL as its owner"
 [ -f "$SCHEDULE" ] || die "no schedule at $SCHEDULE"
 for f in "$CTL"/*.step "$CTL"/*.ack "$CTL"/*.end "$CTL"/*.stats "$CTL"/done; do
 	[ -e "$f" ] && die "$CTL holds files of an earlier run ($f); use an empty directory"
 done
 
+# Root's own files live in a root-owned private directory, never in the control directory.
+PRIV=$(mktemp -d)
+chmod 0700 "$PRIV"
 # Schedule entries without comments or blank lines, copied so edits during the run do not apply.
-SCHED_COPY=$(mktemp)
+SCHED_COPY=$PRIV/schedule
 sed -e 's/#.*//' -e 's/[[:space:]]*$//' "$SCHEDULE" | grep -v '^[[:space:]]*$' >"$SCHED_COPY" || true
 STEPS=$(wc -l <"$SCHED_COPY" | tr -d ' ')
 [ "$STEPS" -gt 0 ] || die "schedule $SCHEDULE has no steps"
@@ -113,7 +122,7 @@ cleanup() {
 		echo "impair: removed the impairment; $DEV now has:" >&2
 		tc qdisc show dev "$DEV" >&2 || true
 	fi
-	[ -z "$SCHED_COPY" ] || rm -f "$SCHED_COPY"
+	[ -z "$PRIV" ] || rm -rf "$PRIV"
 	exit "$status"
 }
 trap cleanup EXIT
@@ -150,12 +159,20 @@ wait_for() {
 	done
 }
 
-# put NAME: stdin to CONTROL/NAME through a fresh file, renamed over whatever is there.
+# as_owner CMD...: runs CMD as the control directory's owner. The owner can swap any entry of
+# the directory for a link at any moment, so root never opens a path there itself: a link
+# followed with the owner's rights reaches nothing the owner could not already read or write.
+as_owner() {
+	setpriv --reuid="$OWNER_UID" --regid="$OWNER_GID" --clear-groups -- "$@"
+}
+
+# put NAME: stdin to CONTROL/NAME. It is built in the private directory, then written as the
+# owner through a fresh file renamed over whatever is there.
 put() {
-	tmp=$(mktemp "$CTL/.impair.XXXXXX")
-	cat >"$tmp"
-	chmod 0644 "$tmp"
-	mv -fT "$tmp" "$CTL/$1"
+	cat >"$PRIV/out"
+	# shellcheck disable=SC2016 # expanded by the owner's shell, from its arguments
+	as_owner sh -c 'umask 022 && t=$(mktemp "$1/.impair.XXXXXX") && cat >"$t" && chmod 0644 "$t" && mv -fT "$t" "$1/$2"' \
+		sh "$CTL" "$1" <"$PRIV/out"
 }
 
 qdisc_state() {
@@ -173,7 +190,7 @@ while [ "$i" -lt "$STEPS" ]; do
 	entry "$i"
 	wait_for "$CTL/$nn.step" || break
 	[ -f "$CTL/$nn.step" ] && [ ! -L "$CTL/$nn.step" ] || die "$nn.step is not a regular file"
-	got=$(head -n1 "$CTL/$nn.step" | tr -d '\r')
+	got=$(as_owner head -n1 -- "$CTL/$nn.step" | tr -d '\r')
 	[ "$got" = "$NAME" ] || die "step $nn: the initiator asked for another step than schedule entry $nn ($NAME)"
 	if [ "$SPEC" = none ]; then
 		args="limit 100000"
