@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/loss-random/01a1464c-0968-7420-9023-be5d3ff697e7.ptf
+content_digest: 40313b136021a97a322aa940583b7e6928ff19c20d32e89836ae6f335b2f578b
+packets a_to_b: 120744
+packets b_to_a: 120913
+session: 1c39e90b

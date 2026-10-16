@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/udp443-throttle/01a14655-bcfc-77f0-b406-7f959b844fdd.ptf
+content_digest: 3c7383c061fd6bdef9dee8b6f08b1ec099b1eb79819a79df2a3238c72a947ef9
+packets a_to_b: 38171
+packets b_to_a: 34824
+session: 673390b7

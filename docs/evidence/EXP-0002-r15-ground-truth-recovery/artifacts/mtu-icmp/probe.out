@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/mtu-icmp/01a14653-607c-7104-9a7d-183569eb5a98.ptf
+content_digest: 8fa5621736aa6eeb05ede1259878be3f1f6b68783d86377041fc35bf1bb57981
+packets a_to_b: 2575
+packets b_to_a: 28908
+session: a36ed992

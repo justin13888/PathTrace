@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/bufferbloat/01a14668-8f73-7255-9acd-7059571091e1.ptf
+content_digest: 4e449b6136c84d2e9e1583ad70f11588c7424fb23f6f05b0a4f73cd3e13fcf6d
+packets a_to_b: 48762
+packets b_to_a: 35065
+session: 19298211

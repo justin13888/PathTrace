@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/light/01a1465d-2842-73b5-86ac-2545d9e1f407.ptf
+content_digest: 1261d03b9ac5adcbea6415eb59fa7cfe3a5f0027f969cd2fb528c2954a1bffcc
+packets a_to_b: 2230
+packets b_to_a: 2214
+session: d8fdba8b

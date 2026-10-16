@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/deep/01a1465d-eb80-763c-a403-cceb756dde48.ptf
+content_digest: ce85a473117bdf02bf04b1d73324371ee83bf188092d2d90efd884f622271feb
+packets a_to_b: 69131
+packets b_to_a: 54844
+session: 6cc087ba
