@@ -107,6 +107,13 @@ snapshot() {
 	fi
 }
 
+# However this script ends, tell impair.sh to stop, so it removes the impairment at once
+# rather than at its timeout.
+trap 'rsh "touch $CTL/done" >/dev/null 2>&1 || true' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
 failed=0
 i=0
 while [ "$i" -lt "$STEPS" ]; do
@@ -153,7 +160,6 @@ while [ "$i" -lt "$STEPS" ]; do
 		failed=1
 	}
 done
-rsh "touch $CTL/done" || true
 echo "finished $(date -u +%Y-%m-%dT%H:%M:%SZ)" >>"$OUT/env.txt"
 echo "run: done; check with: cargo xtask overlay-gt check $OUT" >&2
 exit "$failed"
