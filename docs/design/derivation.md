@@ -66,4 +66,4 @@ Version 2 of `capacity.saturated-arrivals`, `queue.loss-onset`, `policer.lossy-f
 
 ## Validation
 
-Ground-truth recovery (REQ-DRV-013) and closure under netem replay (REQ-DRV-014) are evidence experiments that use `tools/netns/session.sh`. The sufficiency matrix in `simulator-requirements.md` records their results.
+Ground-truth recovery (REQ-DRV-013) and closure under netem replay (REQ-DRV-014) are evidence experiments that use `tools/netns/session.sh`. The sufficiency matrix in `simulator-requirements.md` records their results. Recovery by a macOS initiator over a real overlay path is checked by `tools/overlay-gt/` and `cargo xtask overlay-gt check` (overlay-ground-truth.md).
