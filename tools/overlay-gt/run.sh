@@ -142,7 +142,8 @@ while [ "$i" -lt "$STEPS" ]; do
 		id=$(basename "$a_log" .a.ptflog)
 		b_log=$scratch/$id.b.ptflog
 		if [ ! -f "$b_log" ] && [ -n "$REMOTE_STATE" ]; then
-			sess=$(sed -n 's/.*session: \([0-9a-f][0-9a-f]*\).*/\1/p' "$dir/probe.err" | head -n1)
+			# `pathtrace probe` prints "session: <id>" on stdout.
+			sess=$(sed -n 's/^session: \([0-9a-f][0-9a-f]*\)$/\1/p' "$dir/probe.out" | head -n1)
 			if [ -n "$sess" ]; then
 				scp -q -o BatchMode=yes "$SSH_HOST:$REMOTE_STATE/sessions/$sess/b.ptflog" "$b_log" ||
 					echo "run: step $nn: could not copy the responder log" >&2
