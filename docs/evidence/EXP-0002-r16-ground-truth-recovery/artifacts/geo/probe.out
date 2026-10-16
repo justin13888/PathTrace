@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/geo/01a14695-c321-7678-8666-934fed060f1e.ptf
+content_digest: 4264bd660aa7f9fe5467afcb74cc17aa88c63d3c1619f64b59dfcdd73d0c34c9
+packets a_to_b: 32339
+packets b_to_a: 32376
+session: 82e3097a

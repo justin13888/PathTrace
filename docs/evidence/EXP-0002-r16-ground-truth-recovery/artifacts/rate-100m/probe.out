@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rate-100m/01a14694-548a-7149-beb1-9301fe242bee.ptf
+content_digest: be35a2b306bafac02d692d29db3da2e9b31738e9446e52b2f523b075b0808a49
+packets a_to_b: 120845
+packets b_to_a: 97159
+session: 17e1282c

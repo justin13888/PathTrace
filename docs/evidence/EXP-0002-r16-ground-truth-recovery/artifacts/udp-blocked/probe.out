@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/udp-blocked/01a14688-2353-777a-855a-4b9c896591f8.ptf
+content_digest: d9f273bc5f38b2722ebc023f4fd28070188d51b262ab3e73c2bdccf12fd40b3d
+packets a_to_b: 0
+packets b_to_a: 0
+session: 7fbdc88f

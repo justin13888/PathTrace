@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/symmetric-delay/01a1467b-a65d-7496-a20d-f8b14dafda96.ptf
+content_digest: 06e8968c445e4770998d96725c6a7a582d3af5f2795d5a61e19e01b3a5ddfb2c
+packets a_to_b: 9499
+packets b_to_a: 9403
+session: 367e2e50

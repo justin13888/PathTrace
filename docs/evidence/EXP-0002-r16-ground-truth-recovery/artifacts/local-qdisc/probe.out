@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc/01a1469c-f962-70df-9037-b6fc05052088.ptf
+content_digest: d7764e18036f3ac6f3987951c392dd7df11b4858dbc2e7afaa2c79fcc2e12c78
+packets a_to_b: 5372
+packets b_to_a: 29225
+session: 0eea065a

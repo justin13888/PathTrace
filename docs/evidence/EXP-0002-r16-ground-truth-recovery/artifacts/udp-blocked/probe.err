@@ -1,0 +1,24 @@
+[pathtrace] handshake attempt 1 over UDP to 10.0.2.2:4433
+[pathtrace] handshake attempt 2 over UDP to 10.0.2.2:4433
+[pathtrace] handshake attempt 3 over UDP to 10.0.2.2:4433
+[pathtrace] no UDP handshake reply; trying TCP fallback
+session: 7fbdc88f (trace 01a14688-2353-777a-855a-4b9c896591f8; session file /var/home/justy/pt-lanes/86/target/groundtruth/udp-blocked/01a14688-2353-777a-855a-4b9c896591f8.session)
+[pathtrace] phase P0 background
+[pathtrace] skipping background (P0): UDP is blocked
+[pathtrace] phase P1 reachability
+[pathtrace] skipping udp classes (P1): UDP is blocked
+[pathtrace] phase P2 quiet
+[pathtrace] skipping quiet (P2): UDP is blocked
+[pathtrace] phase P3 chirps
+[pathtrace] skipping chirps (P3): UDP is blocked
+[pathtrace] phase P4 saturate a_to_b
+[pathtrace] skipping saturation (P4): UDP is blocked
+[pathtrace] phase P5 saturate b_to_a
+[pathtrace] skipping saturation (P5): UDP is blocked
+[pathtrace] phase P8 reference flows
+[pathtrace] skipping cbr (P8): UDP is blocked
+[pathtrace] phase P9 end
+[pathtrace] fetch attempt 1 via tcp/4433: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetch attempt 1 via tcp/443: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetched the responder log over TLS on tcp/4433
+note: UDP control blocked; session ran over TCP fallback (UDP classes recorded as blocked)

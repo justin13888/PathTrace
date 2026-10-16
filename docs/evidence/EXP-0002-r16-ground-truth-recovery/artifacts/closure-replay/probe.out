@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/closure-replay/01a1467a-1994-726e-a713-0ffc3927d674.ptf
+content_digest: d4fdd27a3569c851569dfd4fae64246e37b9e8d4b46c3a1efb712cfc69057d4b
+packets a_to_b: 48476
+packets b_to_a: 21993
+session: e9145eb5
