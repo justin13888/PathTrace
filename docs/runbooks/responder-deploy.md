@@ -6,7 +6,7 @@ Goal: a public Linux VM running `pathtrace serve` under systemd, paired with you
 
 - A Linux VM with a public IPv4 address (IPv6 too if available): x86_64 or aarch64, kernel ≥ 6.1 (Ubuntu 24.04, Debian 12 or newer). Prefer a region near where you travel; one region is fine.
 - Cloud firewall / security group open inbound for: UDP 4433, TCP 4433, TCP 443, UDP 443, TCP 80 ([deploy/README.md](../../deploy/README.md)).
-- Your laptop runs Linux (x86_64 or aarch64), kernel ≥ 6.1, or macOS 15 or newer on Apple silicon (aarch64). Only Linux and macOS are supported targets (ADR 0014): the laptop (initiator) may be either; the responder runs Linux only.
+- Your laptop runs Linux (x86_64 or aarch64), kernel ≥ 6.1, or macOS 15 or newer on Apple silicon (aarch64). Only Linux and macOS are supported targets (ADR 0014): the laptop (initiator) may be either; the responder (`serve`, `authorize`) needs Linux.
 - Reaching the responder only through Tailscale (no public ports): see [Overlay responder (Tailscale)](#overlay-responder-tailscale) instead of the cloud firewall rules.
 
 ## 1. Install the binary (both machines)
@@ -41,7 +41,7 @@ sudo install -m 0755 pathtrace-$VER-aarch64-apple-darwin/pathtrace /usr/local/bi
 pathtrace --version
 ```
 
-Expected: `pathtrace-…-aarch64-apple-darwin.tar.gz: OK`, then `pathtrace X.Y.Z`. The archive has no systemd unit: a Mac runs the initiator commands only (`serve` and `authorize` are Linux only).
+Expected: `pathtrace-…-aarch64-apple-darwin.tar.gz: OK`, then `pathtrace X.Y.Z`. The archive has no systemd unit: a Mac runs the initiator commands only (only Linux and macOS are supported targets, and `serve` and `authorize` need Linux).
 
 Gatekeeper: the binary is not notarized (#69). `curl` does not mark its downloads as quarantined, so the commands above run as is. If you downloaded the archive with a browser instead, macOS refuses to open the binary ("cannot be opened because the developer cannot be verified"); after the checksum passes, clear the quarantine flag with `xattr -d com.apple.quarantine /usr/local/bin/pathtrace` and run `pathtrace --version` again. Do not clear it for a binary whose checksum did not verify.
 
