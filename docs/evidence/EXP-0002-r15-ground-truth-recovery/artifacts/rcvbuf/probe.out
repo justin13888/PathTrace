@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rcvbuf/01a1466b-76dd-72c2-935b-bff8b59094bd.ptf
+content_digest: 4125490c8bebe10cd16bd85fed11ba5c917556e44f031c92e4096054b35face2
+packets a_to_b: 2904
+packets b_to_a: 15413
+session: c9768069

@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/tos-rewrite/01a14686-0a8b-7139-a2ff-622e96a7dfb4.ptf
+content_digest: c1b88b7c3256a4ca5000dc6a176abada72c1832815e1d63d475ae4eddec669b3
+packets a_to_b: 29020
+packets b_to_a: 28991
+session: d9cf7a12

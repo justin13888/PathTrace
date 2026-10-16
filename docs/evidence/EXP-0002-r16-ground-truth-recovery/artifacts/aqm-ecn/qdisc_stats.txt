@@ -1,0 +1,14 @@
+qdisc noqueue 0: dev lo root refcnt 2 
+ Sent 0 bytes 0 pkt (dropped 0, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc netem 86e4: dev ma0 root refcnt 17 limit 1000 delay 10ms seed 2852770467706769989
+ Sent 203636194 bytes 143748 pkt (dropped 148, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc htb 1: dev mb0 root refcnt 17 r2q 10 default 0x1 direct_packets_stat 0 direct_qlen 1000
+ Sent 78206441 bytes 58507 pkt (dropped 438, overlimits 51788 requeues 0) 
+ backlog 0b 0p requeues 0
+qdisc fq_codel 10: dev mb0 parent 1:1 limit 10240p flows 1024 quantum 1514 target 5ms interval 100ms memory_limit 32Mb ecn drop_batch 64 
+ Sent 78206441 bytes 58507 pkt (dropped 438, overlimits 0 requeues 0) 
+ backlog 0b 0p requeues 0
+  maxpacket 1514 drop_overlimit 0 new_flow_count 764 ecn_mark 10
+  new_flows_len 0 old_flows_len 1

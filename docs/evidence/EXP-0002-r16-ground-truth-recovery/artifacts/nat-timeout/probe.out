@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/nat-timeout/01a14688-8122-7585-b529-ba734d228efd.ptf
+content_digest: 0d24ff04c6a8e60876a0480b7960bcf50671237861f60f4b0a692d9d9b2508a3
+packets a_to_b: 120349
+packets b_to_a: 120506
+session: daa89171

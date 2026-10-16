@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc-predicted/01a1469d-9626-745b-938c-bd584f98a436.ptf
+content_digest: bfecd90483ed6321d46b2a952ac9356d0b6a05f3f7816c1a747124074bacfb6c
+packets a_to_b: 5327
+packets b_to_a: 29214
+session: 4dd8ab65

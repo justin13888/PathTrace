@@ -1,0 +1,2 @@
+a_to_b: tc qdisc add dev <dev> root netem delay 10.060ms rate 19851kbit limit 79
+b_to_a: tc qdisc add dev <dev> root netem delay 10.057ms rate 19851kbit limit 80

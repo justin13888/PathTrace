@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/loss-gemodel/01a1464d-81ee-7401-be80-f80456ec49b3.ptf
+content_digest: 64a1f40c647393483e4b5d01cec6bc404228cf5a352c475cec0f5de39463fb0d
+packets a_to_b: 120854
+packets b_to_a: 121022
+session: fa6feec6

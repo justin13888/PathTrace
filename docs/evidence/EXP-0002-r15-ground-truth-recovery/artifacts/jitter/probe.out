@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/jitter/01a1464b-67e3-71e5-b329-a04815df9f5c.ptf
+content_digest: 1a1489f0552b402df9c968d2bebb5a0adfd97b536add1b0d6882ab507f41e0cf
+packets a_to_b: 2937
+packets b_to_a: 29277
+session: 429c388a

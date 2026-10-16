@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rate-step/01a1464f-002f-75c0-a2bd-ba48f26b65dd.ptf
+content_digest: 24374d8e3e7cd7fc3bc4e24311665b45f86db762a6009574391960357ac0796e
+packets a_to_b: 38808
+packets b_to_a: 33092
+session: 28baa45e

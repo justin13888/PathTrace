@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/deadman/01a1468b-4502-77ad-b92f-8e511d890815.ptf
+content_digest: 71dc5189411b640beb15c67eee2f62a112af2037a5880f6cb0a92bd79ce8c425
+packets a_to_b: 48472
+packets b_to_a: 28535
+session: 6b7643d7

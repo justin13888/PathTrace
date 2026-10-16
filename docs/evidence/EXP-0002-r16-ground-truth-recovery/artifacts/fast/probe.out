@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/fast/01a1469b-0105-721b-8bde-230c6ac53aa7.ptf
+content_digest: 77bb6716409cd8c6c18ae9ffa8eae86a74036bd77437b889e94130e89ee5dc25
+packets a_to_b: 120227
+packets b_to_a: 120392
+session: 0539d958

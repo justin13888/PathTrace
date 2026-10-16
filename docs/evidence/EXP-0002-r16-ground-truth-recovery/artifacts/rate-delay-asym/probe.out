@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rate-delay-asym/01a14678-8ca5-7688-8166-b50747986545.ptf
+content_digest: 3f4a9014fe8143f87b10c17019dd5d2048d2ff7670fd2a6b029ace283b0dc54b
+packets a_to_b: 48480
+packets b_to_a: 21926
+session: 864ff3a1
