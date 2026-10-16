@@ -17,3 +17,4 @@ One document per component or cross-cutting concern. Written before the code it 
 | [probe.md](probe.md) | Probe and responder: threads, pairing, wire protocol, clocks, raw tables, phases, saturation control, robustness |
 | [cli.md](cli.md) | `pathtrace` commands, exit codes, CLI decisions |
 | [derivation.md](derivation.md) | Raw observations → path model: time base, per-direction fields, policy, reference results, exports |
+| [overlay-ground-truth.md](overlay-ground-truth.md) | Ground truth over a real overlay: netem on a Linux responder's tailnet egress, driven from a macOS initiator; checks and tolerances |

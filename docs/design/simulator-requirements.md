@@ -11,7 +11,7 @@ The emulator is deferred (ADR 0008). PTF 1.0 freezes the raw layer before any si
 Sufficiency is argued in three layers:
 
 1. **Requirements**: the inputs each simulator stage consumes. The source is draft spec §9.2, cross-checked first-hand against the representations used by Mahimahi (R-0001), CellReplay (R-0002), Pantheon (R-0004), netem (R-0005) and Rattan (R-0006). Literature is only used where it describes what an emulator consumes. It is never used as evidence that our probe measures correctly.
-2. **Recoverability**: ground-truth experiments. A namespace path with kernel-imposed, known impairments is captured by the probe and derived, and the result is compared with the truth.
+2. **Recoverability**: ground-truth experiments. A namespace path with kernel-imposed, known impairments is captured by the probe and derived, and the result is compared with the truth. The namespace path has both endpoints on Linux; a macOS initiator is checked the same way over a real overlay path to a Linux responder, with netem on the responder's tailnet egress (overlay-ground-truth.md, first run #66).
 3. **Closure**: the derived trace is exported to netem, re-imposed and re-captured, and the second trace must match the first. If the trace holds enough to reproduce what it measured on an independent emulator, the information is there.
 
 ## Anticipated simulator pipeline
