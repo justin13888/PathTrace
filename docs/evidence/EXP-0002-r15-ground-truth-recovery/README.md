@@ -13,7 +13,7 @@ Host load: the host was shared with other users' compile jobs for the whole run.
 
 ## Result (full table in `artifacts/results.md`)
 
-- Netns suite: 12 tests run, 12 passed (`artifacts/stdout.log`).
+- Netns suite: 12 tests run, 12 passed (`artifacts/stderr.log`).
 - Ground truth: every check passes except one. `aqm-ecn` derived the a→b discipline as `droptail` instead of `aqm_suspected`. Its other checks pass: ECT(0) and ECT(1) were marked by fq_codel, and capacity was 19.84 against 19.82 Mbit/s. The scenario ran from 16:05:38 to 16:07:10, one minute after the load peak of 37.
 - `geo-100m`: saturated time b→a 7.95 s (≥ 6.5), a→b 4.13 s (≥ 3), capacity within 0.1% both ways.
 - `rcvbuf`: 287 socket drops recorded (`rxq_drops`), all 287 attributed to the receiving host. This matches the responder's `RcvbufErrors` increase, and the drops were not taken for a policer.
