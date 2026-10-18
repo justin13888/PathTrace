@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rate-cap/01a14662-ccd5-7250-a053-39e746e7db92.ptf
+content_digest: 3a1ce53194e26d4bbd80b16acce0bf929de8dd43876aa89ebbdf66a9d10ceb62
+packets a_to_b: 3411
+packets b_to_a: 3388
+session: ef6eb66f

@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/mtu-blackhole/01a14653-f5b5-75a5-9857-8503122b39f7.ptf
+content_digest: 33241aba3ae7d1ed038e9c3696607365bff36c03d54b9d7ea925e48694894cff
+packets a_to_b: 5525
+packets b_to_a: 31853
+session: 9a1ed0aa

@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/ipv6/01a1468d-5db1-747f-a5a6-dc47b6b96044.ptf
+content_digest: 1283262beba7c2721a4b4311439a64d6d9de2a82586cf0442e692fda546769af
+packets a_to_b: 5632
+packets b_to_a: 5550
+session: d820021c
