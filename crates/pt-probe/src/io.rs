@@ -758,17 +758,20 @@ fn pacer_loop(
                     tos: due.tos,
                 })
                 .collect();
-            let t_user = mono_raw();
+            // Linux sends the batch in one `sendmmsg`, so this read stands for every datagram;
+            // macOS returns its own read before each datagram's `sendmsg` (probe.md §9.2).
+            let t_batch = mono_raw();
             // Send everything. A datagram the kernel rejects (e.g. EMSGSIZE above a cached PMTU)
             // is recorded and skipped, never the rest of the batch; a full send buffer skips the
             // rest of the batch, recorded too. Each sent datagram's OPT_ID comes from the send
             // outcome (probe.md §4.1).
-            let mut ok: Vec<Option<u32>> = vec![None; msgs.len()];
+            let mut ok: Vec<Option<(u32, u64)>> = vec![None; msgs.len()];
             let mut i = 0;
             while i < msgs.len() {
                 let o = s.send_batch(&msgs[i..]);
                 for (k, slot) in ok.iter_mut().skip(i).take(o.sent).enumerate() {
-                    *slot = Some(o.first_id.wrapping_add(k as u32));
+                    let t_user = o.t_user.get(k).copied().unwrap_or(t_batch);
+                    *slot = Some((o.first_id.wrapping_add(k as u32), t_user));
                 }
                 i += o.sent;
                 if !o.failed {
@@ -816,7 +819,9 @@ fn pacer_loop(
             let mut rows = Vec::with_capacity(items.len());
             let mut bytes = 0u64;
             for ((flow, due, _, _, _, phase), sent_id) in items.iter().zip(&ok) {
-                let Some(sent_id) = sent_id else { continue };
+                let Some((sent_id, t_user)) = *sent_id else {
+                    continue;
+                };
                 bytes += u64::from(due.size);
                 shared.flow_bytes.add(*flow, u64::from(due.size));
                 rows.push(vec![
@@ -828,7 +833,7 @@ fn pacer_loop(
                     Some(i64::from(due.train)),
                     Some(i64::from(due.train_idx)),
                     Some(i64::from(due.tos)),
-                    Some(i64::from(*sent_id)),
+                    Some(i64::from(sent_id)),
                     Some(due.t_intended as i64),
                     Some(t_user as i64 - due.t_intended as i64),
                 ]);

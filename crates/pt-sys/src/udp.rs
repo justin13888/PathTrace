@@ -255,6 +255,11 @@ pub struct SendOutcome {
     /// datagram, failed at once with an error that consumes no id. Ids are back to before
     /// that burn.
     pub unburned_id: Option<u32>,
+    /// Scheduling-clock time (`clock::mono_raw`) read immediately before each accepted
+    /// datagram's own `sendmsg`, one per datagram in `0..sent`. Empty when the whole batch
+    /// goes out in one system call (Linux `sendmmsg`), where the caller's single read before
+    /// the call stands for every datagram (docs/design/probe.md §9.2).
+    pub t_user: Vec<u64>,
 }
 
 impl SendOutcome {
@@ -695,9 +700,14 @@ impl UdpSock {
         let first_id = self.next_id.load(Ordering::Relaxed);
         let mut sent = 0;
         let mut error = None;
+        let mut t_user = Vec::with_capacity(msgs.len());
         for m in msgs {
+            let t = crate::clock::mono_raw();
             match self.sendmsg(m) {
-                Ok(()) => sent += 1,
+                Ok(()) => {
+                    sent += 1;
+                    t_user.push(t);
+                }
                 Err(e) => {
                     error = Some(e);
                     break;
@@ -713,6 +723,7 @@ impl UdpSock {
             error,
             burned_id: None,
             unburned_id: None,
+            t_user,
         }
     }
 
@@ -775,6 +786,7 @@ impl UdpSock {
                 error: None,
                 burned_id: None,
                 unburned_id: None,
+                t_user: Vec::new(),
             };
         }
         let mode = self.tx_id_mode();
@@ -815,6 +827,7 @@ impl UdpSock {
             error,
             burned_id: acct.burned_id,
             unburned_id: acct.unburned_id,
+            t_user: Vec::new(),
         }
     }
 
@@ -1554,9 +1567,15 @@ mod tests {
                 })
                 .collect();
             let before = crate::clock::realtime();
+            let m0 = crate::clock::mono_raw();
             let o = a.send_batch(&msgs);
+            let m1 = crate::clock::mono_raw();
             assert_eq!((o.sent, o.failed, o.first_id), (4, false, 0));
             assert_eq!(a.next_tx_id(), 4);
+            // One read before each datagram's own sendmsg, in order (probe.md §9.2).
+            assert_eq!(o.t_user.len(), 4);
+            assert!(o.t_user.is_sorted() && o.t_user[0] >= m0 && o.t_user[3] <= m1);
+            assert!(o.t_user[3] > o.t_user[0], "{:?}", o.t_user);
             let mut bufs = vec![[0u8; MAX_DATAGRAM]; 8];
             let mut got = Vec::new();
             for _ in 0..100 {
@@ -1620,6 +1639,8 @@ mod tests {
             Some(libc::EMSGSIZE)
         );
         assert_eq!((o.burned_id, o.unburned_id), (None, None));
+        // Only the accepted datagram has a send time.
+        assert_eq!(o.t_user.len(), 1);
         let o = a.send_batch(&batch[2..]);
         assert_eq!((o.sent, o.failed, o.first_id), (1, false, 1));
         assert!(a.send_batch(&[]).sent == 0 && a.next_tx_id() == 2);
