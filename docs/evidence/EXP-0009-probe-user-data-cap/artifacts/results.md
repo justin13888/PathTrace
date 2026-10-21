@@ -1,0 +1,10 @@
+| Scenario (simulator stages) | Check | Truth | Recovered | Pass |
+|---|---|---|---|---|
+| probe-data-cap (safety budget) | session complete | true | true | yes |
+| probe-data-cap (safety budget) | a UDP bytes sent within --data-cap (30 MB) | 30000000 | Some(29036487) | yes |
+| probe-data-cap (safety budget) | hard data cap not reached by a (allowances planned the budget) | 0 | 0 | yes |
+| probe-data-cap (safety budget) | b UDP bytes sent within --data-cap (30 MB) | 30000000 | Some(25317279) | yes |
+| probe-data-cap (safety budget) | hard data cap not reached by b (allowances planned the budget) | 0 | 0 | yes |
+| probe-data-cap (safety budget) | saturations P4 and P5 ran | 4 5 | [0, 1, 2, 3, 4, 5, 6, 7, 8, 9] | yes |
+| probe-data-cap (safety budget) | META records the requested cap | 30000000 | Some(30000000) | yes |
+| probe-data-cap | pkt table bytes/packet (canonical; applies to standard/deep sessions) | ≤ 8 | 6.996 over 42327 packets | yes |

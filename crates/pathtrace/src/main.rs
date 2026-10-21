@@ -223,6 +223,9 @@ struct ProbeArgs {
     /// Hard sending-rate cap, bit/s.
     #[arg(long, default_value_t = 500_000_000)]
     rate_cap: u64,
+    /// Hard per-session data cap for each endpoint, bytes; lowers the profile's, never raises it.
+    #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+    data_cap: Option<u64>,
     #[arg(short, long)]
     quiet: bool,
 }
@@ -435,7 +438,9 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
     } else {
         a.profile.clone()
     };
-    let profile = Profile::by_name(&profile_name).ok_or("unknown profile")?;
+    let profile = Profile::by_name(&profile_name)
+        .ok_or("unknown profile")?
+        .with_data_cap(a.data_cap);
     let opts = ProbeOpts {
         config_dir: cfg,
         out_dir: a.out.clone(),
@@ -450,6 +455,7 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
         tool: tool_info(),
         prefer_v6: a.ipv6,
         rate_cap_bps: a.rate_cap,
+        data_cap_user: a.data_cap,
         track_s: a.track_secs,
         verbose: !a.quiet,
     };

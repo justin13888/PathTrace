@@ -1,0 +1,15 @@
+[pathtrace] handshake attempt 1 over UDP to 10.0.2.2:4433
+session: 1cfe3889 (trace 01a15f40-5d8c-746b-9db1-e5b9351ba2c4; session file /var/mnt/scratch/golem/dev/pt-datacap/target/groundtruth/probe-data-cap/01a15f40-5d8c-746b-9db1-e5b9351ba2c4.session)
+[pathtrace] phase P0 background
+[pathtrace] phase P1 reachability
+[pathtrace] phase P2 quiet
+[pathtrace] phase P3 chirps
+[pathtrace] phase P4 saturate a_to_b
+[pathtrace] phase P5 saturate b_to_a
+[pathtrace] phase P6 saturate both
+[pathtrace] phase P7 class differential
+[pathtrace] phase P8 reference flows
+[pathtrace] phase P9 end
+[pathtrace] fetch attempt 1 via tcp/4433: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetch attempt 1 via tcp/443: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetched the responder log over TLS on tcp/4433

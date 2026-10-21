@@ -185,6 +185,8 @@ Standard profile (about 90 s of data phases):
 
 A phase whose allowance is under 1 MB is skipped and records `phase_skipped {reason: "budget"}`. The pacer of either endpoint stops a flow when its bytes reach `max_bytes` (`flow_stopped {reason: "allowance"}`), and the controller starts the overdrive early so that it fits in the allowance (§7). On fast paths, saturations therefore get shorter and every phase still runs. If a hard cap is reached anyway, the pacer stops every probe flow, the light flow included, and records a `budget_cap` event. Only the control traffic needed to finish the session continues, and it is still counted (EXP-0002-r2).
 
+The user can lower the cap with `probe --data-cap` (cli.md); the time plan stays the same, so a small cap on a fast path gives short saturations that reach the overdrive early. Capacity is then recorded with lower confidence, never measured at a lower rate.
+
 ## 7. Saturation controller
 
 The receiver reports feedback every 20 ms while a controlled or chirp flow arrives, otherwise every 200 ms (unreliable): per flow, the delivery rate since the previous report, and the queueing-delay estimate `q = (rx − t_intended) − min(rx − t_intended)` of the latest packet, which is valid for relative changes despite the unknown clock offset. The responder's reports also carry its bytes sent (`sent`). The queue target is q_target = max(10 ms, 3 MTU packet times at the delivery rate). The sender:
