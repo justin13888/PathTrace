@@ -79,6 +79,7 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 | [EXP-0008](EXP-0008-release-artefacts/) | Release v1.0.0: published static binaries verified end to end | pass | superseded by EXP-0008-r2 | REQ-REPO-009 |
 | [EXP-0008-r2](EXP-0008-r2-release-artefacts/) | Release v1.0.1: published static binaries verified end to end | pass | superseded by EXP-0008-r3 | REQ-REPO-009 |
 | [EXP-0008-r3](EXP-0008-r3-release-artefacts/) | Release v1.1.0: published static binaries verified end to end | pass | **current** | REQ-REPO-009 |
+| [EXP-0009](EXP-0009-probe-user-data-cap/) | probe --data-cap bounds both endpoints of a standard session on a 100 Mbit/s path | pass | **current** | REQ-PRB-014, REQ-PRB-016, REQ-SEC-001 |
 
 ## Planned
 

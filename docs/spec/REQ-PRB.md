@@ -96,7 +96,7 @@ An arrival counts as a delivery opportunity only while the sender demonstrably h
 ### REQ-PRB-014: Profiles with data caps
 - status: met
 - spec: §6.5, §3
-- evidence: EXP-0002-r14
+- evidence: EXP-0002-r14, EXP-0009
 
 Profiles: `smoke` (about 15 s, deployment check), `light` (2 MB or less), `standard` (200 MB or less, about 90 s), `deep` (standard plus a configurable tracking period with periodic short saturations). Phase durations shrink to fit the cap.
 
@@ -110,7 +110,7 @@ For each class (`udp/high-port`, `udp/443 opaque`, `udp/443 QUIC-shaped`, `tcp/4
 ### REQ-PRB-016: Safety limits
 - status: met
 - spec: §6.7
-- evidence: EXP-0002-r14, EXP-0006-r7
+- evidence: EXP-0002-r14, EXP-0006-r7, EXP-0009
 
 Every session has a hard data cap and a hard rate cap. Saturation is feedback-controlled to hold a standing queue, and a metered connection selects `light` automatically.
 
