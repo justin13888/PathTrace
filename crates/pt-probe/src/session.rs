@@ -272,6 +272,8 @@ pub struct ProbeOpts {
     /// Prefer IPv6 when the responder name resolves to both families.
     pub prefer_v6: bool,
     pub rate_cap_bps: u64,
+    /// `--data-cap` as requested, recorded in META; `profile.data_cap` already applies it.
+    pub data_cap_user: Option<u64>,
     /// Override the deep profile's tracking time.
     pub track_s: Option<u64>,
     /// Print progress lines to stderr.
@@ -1036,7 +1038,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
                 .with("send_buf", main.caps().send_buf),
         )
         .with("sockets", sockets_value(&socks));
-    let extra = Value::map()
+    let mut extra = Value::map()
         .with(
             "responder",
             Value::map()
@@ -1052,6 +1054,9 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         )
         .with("control", if tcp_ctrl.is_some() { "tcp" } else { "udp" })
         .with("test_hooks", test_hooks_value(&sopts));
+    if let Some(c) = opts.data_cap_user {
+        extra = extra.with("data_cap_user", c);
+    }
     let mut meta = obslog_meta(
         Role::A,
         &trace_id,

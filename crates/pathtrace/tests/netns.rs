@@ -629,3 +629,50 @@ fn forced_predicted_ids_join_exactly() {
         assert_eq!(c[format!("tx_reanchored_{ep}")], 0, "{c}");
     }
 }
+
+#[test]
+#[ignore = "needs unprivileged user+net namespaces: run via `mise run test-netns`"]
+fn user_data_cap_bounds_both_endpoints() {
+    // cli.md `probe --data-cap`: the cap lowers the profile's for both senders, the
+    // allowances plan within it (no hard-cap stop), and META records the request.
+    let cap: u64 = 6_000_000;
+    let (trace, info) = run_session_with(
+        "smoke",
+        "netem delay 10ms rate 20mbit limit 100",
+        "netem delay 10ms rate 20mbit limit 100",
+        &[("PROBE_ARGS", "--data-cap 6000000")],
+        "0",
+        "datacap",
+    );
+    assert_eq!(info["complete"], true, "{info}");
+    let ev = events(&trace);
+    for ep in ["a", "b"] {
+        let sent = ev
+            .iter()
+            .find(|e| e["type"] == "session_end" && e["endpoint"] == ep)
+            .and_then(|e| e["detail"]["bytes_sent"].as_u64());
+        assert!(sent.is_some_and(|b| b <= cap), "{ep}: {sent:?}");
+        assert!(
+            !ev.iter()
+                .any(|e| e["type"] == "budget_cap" && e["endpoint"] == ep),
+            "{ep} hit the hard cap"
+        );
+    }
+    assert!(
+        ev.iter()
+            .any(|e| e["type"] == "flow_stopped" && e["detail"]["reason"] == "allowance"),
+        "no saturation ended by its allowance"
+    );
+    let bin = env!("CARGO_BIN_EXE_pathtrace");
+    let dump = Command::new(bin)
+        .args(["trace", "dump"])
+        .arg(&trace)
+        .output()
+        .unwrap();
+    let meta = String::from_utf8_lossy(&dump.stdout)
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v["type"] == "META")
+        .expect("META");
+    assert_eq!(meta["head"]["extra"]["a"]["data_cap_user"], cap, "{meta}");
+}
