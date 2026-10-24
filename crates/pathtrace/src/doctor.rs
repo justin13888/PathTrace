@@ -8,7 +8,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use pt_probe::config::{self, Responder};
-use pt_probe::context::Tunnel;
+use pt_probe::context::{Supply, Tunnel};
 use pt_sys::PLATFORM;
 use pt_sys::clock::NtpState;
 use pt_sys::netif::{IfInfo, IfType};
@@ -185,18 +185,6 @@ fn mac_clock_sync() -> (bool, String) {
     )
 }
 
-/// One entry of `/sys/class/power_supply`.
-struct Supply {
-    /// `type`: Mains, Battery, USB, UPS, Wireless.
-    kind: String,
-    /// `scope`: `Device` for a peripheral's battery (mouse, headset), which says nothing about
-    /// this machine's power.
-    scope: String,
-    online: bool,
-    /// `status` of a battery: Charging, Discharging, Full, Not charging.
-    status: String,
-}
-
 fn power(supplies: &[Supply]) -> (bool, String) {
     let own: Vec<&Supply> = supplies.iter().filter(|s| s.scope != "Device").collect();
     if own.is_empty() {
@@ -246,29 +234,6 @@ fn mac_power(state: &io::Result<PowerState>) -> (bool, String) {
             ),
         ),
     }
-}
-
-fn read_supplies() -> Vec<Supply> {
-    let Ok(rd) = std::fs::read_dir("/sys/class/power_supply") else {
-        return Vec::new();
-    };
-    let attr = |d: &Path, a: &str| {
-        std::fs::read_to_string(d.join(a))
-            .unwrap_or_default()
-            .trim()
-            .to_string()
-    };
-    rd.flatten()
-        .map(|e| {
-            let d = e.path();
-            Supply {
-                kind: attr(&d, "type"),
-                scope: attr(&d, "scope"),
-                online: attr(&d, "online") == "1",
-                status: attr(&d, "status"),
-            }
-        })
-        .collect()
 }
 
 /// `powersave` pins the lowest frequency under generic cpufreq drivers; under `intel_pstate`
@@ -370,12 +335,9 @@ fn offloads(
 }
 
 /// Interface and local address of the default route, IPv4 first (a route lookup only: nothing
-/// is sent to the documentation addresses).
+/// is sent).
 fn default_route() -> Option<(String, IpAddr)> {
-    ["192.0.2.1:9", "[2001:db8::1]:9"].iter().find_map(|a| {
-        let ip = pt_sys::netif::local_addr_for(a.parse().expect("addr")).ok()?;
-        Some((pt_sys::netif::iface_with_addr(ip).ok().flatten()?, ip))
-    })
+    pt_probe::context::default_route(false).or_else(|| pt_probe::context::default_route(true))
 }
 
 /// The `tunnel` verdict for egress interface `name`: a tunnel warns, because what the probe
@@ -730,7 +692,7 @@ fn local_checks(cfg: &Path) -> Vec<Check> {
     check(&mut c, "clock sync", ok, d, false);
     // macOS has no /sys/class/power_supply: it reads IOKit power sources instead.
     let (ok, d) = if linux {
-        power(&read_supplies())
+        power(&pt_probe::context::read_supplies())
     } else {
         mac_power(&pt_sys::power::power_state())
     };

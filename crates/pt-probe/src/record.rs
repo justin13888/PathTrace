@@ -199,7 +199,8 @@ pub fn table_def(name: &str, r: Role) -> Option<(&'static [u8; 4], Vec<ColDef>)>
                 c("resp_nonce", Enc::Delta, "id").null(),
             ],
         ),
-        "ifstats" => (
+        // `ifstats_underlay` (PTF 1.3): the underlay beneath a tunnel egress (probe.md §4.5).
+        "ifstats" | "ifstats_underlay" => (
             b"CTXS",
             vec![
                 c("t", Enc::Delta2, "ns").clock(mono),
@@ -669,6 +670,21 @@ mod tests {
         let (_, ifs) = table_def("ifstats", Role::A).unwrap();
         let tx = ifs.iter().find(|c| c.name == "tx_dropped").unwrap();
         assert_eq!(tx.nullable, !pt_sys::PLATFORM.iface_tx_dropped);
+    }
+
+    /// PTF 1.3 schema (ptf-format.md): `ifstats_underlay` is a CTXS table with the columns
+    /// of `ifstats` (probe.md §4.5).
+    #[test]
+    fn ptf_1_3_schemas() {
+        let (kind, cols) = table_def("ifstats_underlay", Role::A).unwrap();
+        let (_, ifs) = table_def("ifstats", Role::A).unwrap();
+        assert_eq!(kind, b"CTXS");
+        let shape = |c: &[ColDef]| {
+            c.iter()
+                .map(|c| (c.name, c.unit, c.nullable))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(shape(&cols), shape(&ifs));
     }
 
     #[test]
