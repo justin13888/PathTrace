@@ -98,7 +98,15 @@ fn smoke_session_through_netem() {
         let rows = info["tables"][dir]["rows"].as_u64().unwrap_or(0);
         assert!(rows > 1000, "{dir}: {rows} rows");
     }
-    assert_eq!(info["ptf_version"], "1.2", "{info}");
+    assert_eq!(info["ptf_version"], "1.3", "{info}");
+    // PTF 1.3 host state on both endpoints (probe.md §4.5), and no suspend.
+    for ep in ["a", "b"] {
+        let h = &info["host_state"][ep];
+        assert!(h["clock_sync"]["status"].is_string(), "{ep}: {h}");
+        assert!(h["power"]["source"].is_string(), "{ep}: {h}");
+        assert!(h["pacing"]["best_late_ns"].is_u64(), "{ep}: {h}");
+        assert_eq!(info["host_suspend"][ep]["events"], 0, "{info}");
+    }
     // Every TX stamp joins its own transmission (probe.md §4.1).
     for dir in ["a_to_b", "b_to_a"] {
         let c = &info["merge_checks"][dir];
