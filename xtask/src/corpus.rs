@@ -985,7 +985,8 @@ fn v1_3() -> Cases {
 /// A small merged trace from a macOS initiator (a) on Wi-Fi beneath a tunnel reaching a Linux
 /// responder (b), carrying the PTF 1.3 additions (probe.md §4.5, ADR 0015): META
 /// `endpoints.<ep>.clock_sync`, `power`, `pacing` and, for the tunnelled initiator,
-/// `underlay`; CTXS `ifstats_underlay`; EVNT `host_state` and `underlay_change`.
+/// `underlay`; CTXS `ifstats_underlay`; EVNT `host_state` and `underlay_change`; derived
+/// `PATH.<dir>.path_change`.
 fn additions_1_3() -> Vec<Section> {
     let pacing = |late: u64| {
         Value::map()
@@ -1135,10 +1136,56 @@ fn additions_1_3() -> Vec<Section> {
             .cloned()
             .unwrap_or_default(),
     );
+    // Derived: a path change in each direction (pathchange.base-delay-step/1, derivation.md).
+    let change = |before: i64, after: i64| {
+        Value::map()
+            .with("status", "known")
+            .with("method", "pathchange.base-delay-step/1")
+            .with("confidence", 0.7)
+            .with("count", 1u64)
+            .with(
+                "changes",
+                Value::Array(vec![
+                    Value::map()
+                        .with("t", 31_000_000_000i64)
+                        .with("before_ns", before)
+                        .with("after_ns", after),
+                ]),
+            )
+            .with("source", Value::Array(vec![Value::from("base_delay")]))
+    };
+    let path = Section::new(
+        b"PATH",
+        flags::CRITICAL | flags::DERIVED,
+        Value::map()
+            .with(
+                "derivation",
+                Value::map().with(
+                    "methods",
+                    Value::Array(vec![Value::from("pathchange.base-delay-step/1")]),
+                ),
+            )
+            .with(
+                "directions",
+                Value::map()
+                    .with(
+                        "a_to_b",
+                        Value::map().with("path_change", change(118_000_000, 21_000_000)),
+                    )
+                    .with(
+                        "b_to_a",
+                        Value::map().with("path_change", change(-412_000_000, -506_000_000)),
+                    ),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
     vec![
         m,
         Section::new(b"CTXS", 0, Map::new()).with_table(ifstats_underlay),
         events,
+        path,
     ]
 }
 
