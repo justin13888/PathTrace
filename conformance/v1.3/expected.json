@@ -1,0 +1,5 @@
+{
+  "valid-1-3-additions-uncompressed-no-index.ptf": {"valid": true, "content_digest": "6f49d2c99407d0ad7474e48ce136d4881524f454a85be2fc92e03b53ee0e35e9"},
+  "valid-1-3-additions.ptf": {"valid": true, "content_digest": "6f49d2c99407d0ad7474e48ce136d4881524f454a85be2fc92e03b53ee0e35e9"},
+  "valid-minimal.ptf": {"valid": true, "content_digest": "2cab6b922f1e1fd027339790ea0fea5f3eeebd04ddf42881b1db5cca6a30ec17"}
+}
