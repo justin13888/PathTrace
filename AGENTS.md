@@ -77,6 +77,7 @@ Agent rulebook for PathTrace. Dense by design. CLAUDE.md is a symlink to this fi
 - Every packet the probe puts on the path is observed (probe flows, control datagrams as flows 250/251); unobserved traffic biases loss models (EXP-0002).
 - The pacer is the only sender on a UDP socket (OPT_ID numbering); never send from other threads.
 - Control messages must fit one datagram (DF is set): batch flow definitions, chunk feedback.
+- Trace metadata holds only generic, OS-observable facts; vendor/product names only as label values (`provider`, tags, label, class); never query vendor APIs; record anomalies by their observed effect (ADR 0015).
 
 ## PTF compatibility contract
 - Every PTF >= 1.0 file stays readable by every later pathtrace. Additive changes only in minor versions (new non-critical sections, new columns, new CBOR keys). Never reuse a key or column name with new meaning. Golden files of every release live in the conformance corpus and are tested forever.

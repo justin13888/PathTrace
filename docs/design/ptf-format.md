@@ -4,7 +4,7 @@
 - adr: 0008, 0009, 0011, 0014
 - research: R-0001, R-0002, R-0005, R-0007, R-0017
 
-This document is the normative specification of PTF 1.x (currently 1.2). An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
+This document is the normative specification of PTF 1.x (currently 1.3). An independent implementation must be possible from this document alone (REQ-FMT-018); `tools/ptf-py/` is written only from it. Keywords MUST, MUST NOT, SHOULD and MAY are used as in RFC 2119.
 
 ## Versions
 
@@ -13,12 +13,13 @@ This document is the normative specification of PTF 1.x (currently 1.2). An inde
 | 1.0 | pathtrace 1.0.0 | Initial format |
 | 1.1 | pathtrace 1.1.0 | Raw columns `rxq_drops` (`rx`, `pkt`, `dup`, `unmatched`, `echo`), `boot` (`pairs`), `req_nonce`/`resp_nonce` (`exchange`); `dup` keeps `rx_src` and `size`; raw tables `txts_unmatched` (OBSV), `netstack` and `qdisc` (CTXS); META `endpoint.sockets`, `endpoint.qdisc`, `endpoint.txqueuelen`, `session.t0_boot`, `merge_checks` (per direction `txts_joined`/`txts_implausible`, and per endpoint `txts_unmatched_<ep>`, `tx_unstamped_<ep>`, `txts_unexplained_<ep>`, `tx_reanchors_<ep>`, `tx_reanchored_<ep>`); FLOW `max_bytes`; new EVNT types (probe.md §5) |
 | 1.2 | pathtrace 1.2.0 | For the macOS initiator and overlay paths (ADR 0014, probe.md §9): META `endpoint.os_family`, `endpoint.os_version`, `endpoint.iface.tunnel`, `endpoint.sockets[].icmp_errors`, and a `source` key in each clock domain (§6); raw table `tcpinfo_darwin` (OBSV); raw column `udp_fullsock` (`netstack`); `ifstats` counters MAY be declared nullable; derived `PATH.overlay` and the `overlay_limited` key on the verdicts it qualifies; new EVNT type `power_assertion` |
+| 1.3 | pathtrace 1.2.0 | Host state and the link under a tunnel (ADR 0015, probe.md §4.5): META `endpoints.<ep>.clock_sync`, `power`, `pacing`, `underlay`; raw table `ifstats_underlay` (CTXS); new EVNT types `host_state`, `underlay_change`; derived `PATH.<dir>.path_change` (derivation.md) |
 
 A 1.1 reader reads 1.0 files: a column or table that is absent was not recorded by that version, which is different from a recorded zero or null. A 1.0 reader reads 1.1 files by skipping what it does not know.
 
-Golden files: `conformance/v1.0` holds the 1.0 corpus, `conformance/v1.1` the 1.1 corpus and `conformance/v1.2` the 1.2 corpus, all generated with `cargo xtask corpus`; the 1.1 corpus's `valid-1-1-additions*.ptf` carry the 1.1 columns, tables and META/FLOW keys of the table above (EVNT types are open strings and need no golden file), the 1.2 corpus's `valid-1-2-additions*.ptf` carry every 1.2 addition (a macOS initiator reaching a Linux responder through a tunnel, with `power_assertion` and a tunnel `iface_change` as example events and a PATH and PLCY qualified by the overlay), and `tools/ptf-py` reads every directory (EXP-0003-r4). The existing directories never change.
+Golden files: `conformance/v1.0` holds the 1.0 corpus, `conformance/v1.1` the 1.1 corpus, `conformance/v1.2` the 1.2 corpus and `conformance/v1.3` the 1.3 corpus, all generated with `cargo xtask corpus`; the 1.1 corpus's `valid-1-1-additions*.ptf` carry the 1.1 columns, tables and META/FLOW keys of the table above (EVNT types are open strings and need no golden file), the 1.2 corpus's `valid-1-2-additions*.ptf` carry every 1.2 addition (a macOS initiator reaching a Linux responder through a tunnel, with `power_assertion` and a tunnel `iface_change` as example events and a PATH and PLCY qualified by the overlay), the 1.3 corpus's `valid-1-3-additions*.ptf` carry every 1.3 addition, and `tools/ptf-py` reads every directory (EXP-0003-r4). The existing directories never change.
 
-The 1.2 additions are all non-critical: a 1.1 reader skips the unknown table, column and keys of a 1.2 file and reads the rest, and a 1.2 reader reads a file without them as one recorded before they existed. No existing column or key changes meaning; in particular `tcpinfo` keeps meaning Linux `struct tcp_info` and the clock domain kinds keep their names.
+The 1.3 additions are non-critical in the same way. The 1.2 additions are all non-critical: a 1.1 reader skips the unknown table, column and keys of a 1.2 file and reads the rest, and a 1.2 reader reads a file without them as one recorded before they existed. No existing column or key changes meaning; in particular `tcpinfo` keeps meaning Linux `struct tcp_info` and the clock domain kinds keep their names.
 
 The header minor is the highest minor whose additions the file may contain, in any layer. Re-deriving (`derive`, `merge`, `trace redact`) a file of an older minor writes the derived layer with the current tool and raises the header minor to the tool's (a 1.0 file becomes 1.1), because the new derived sections may use 1.1 additions; its raw layer keeps what it had, so a 1.1 raw column or table can still be absent from such a file. The minor of the tool that captured the raw layer is not recorded separately: `META.tool` (or `captured_by`) names the capturing pathtrace version, which maps to the minor in the table above.
 
@@ -320,6 +321,17 @@ META keys added in 1.2 (probe.md §9), all optional; a reader that finds one abs
 | `endpoints.<ep>.sockets[].icmp_errors` | bool | The socket can observe ICMP errors (Linux `IP_RECVERR`: `true`; macOS: `false`). When `false`, the absence of `icmp` events from that endpoint is not evidence that no ICMP error arrived |
 
 On macOS a socket also records `kernel_tx: false`, `tx_ids: "none"` and `rxq_ovfl: false`, values 1.1 already defines. The derived layer adds `PATH.overlay` (method `overlay.egress-iface/1`: `overlay` bool, `endpoints`, `kind`, `provider`, `mtu`, `overlay_ns`) and the key `overlay_limited: true` on the PLCY class entries and the per-direction `policer`, `mtu`, `ecn` and `dscp` fields when `overlay` is true (probe.md §9.9). A derived field whose input the platform could not observe has status `unknown` and a `reason`, and carries no count (P5).
+
+META keys added in 1.3 (probe.md §4.5, ADR 0015), all optional and generic. Each endpoint writes its own, and absence means not recorded:
+
+| Key | Values | Meaning |
+|---|---|---|
+| `endpoints.<ep>.clock_sync` | `{status: "synced" / "unsynced" / "unknown", est_error_us: int / null, max_error_us: int / null}` | Kernel NTP state when the log started (`adjtimex`). macOS: `unknown`, errors null |
+| `endpoints.<ep>.power` | `{source: "ac" / "battery" / "ups" / "none" / "unknown" / tstr, low_power: bool / null}` | Power source and low-power mode when the log started |
+| `endpoints.<ep>.pacing` | `{best_late_ns: uint / null, policy_error: tstr / null, background: bool / null}` | Least wake lateness of five 2 ms pacer-like sleeps, the error from requesting the pacing scheduling policy, and the macOS background policy (always false on Linux); `best_late_ns` and `background` are null and `policy_error` holds the error when the check could not run |
+| `endpoints.<ep>.underlay` | iface map as `iface` (without `tunnel`) / null; absent when `iface` is not a tunnel | The interface the default route of the session's address family uses beneath the tunnel; `name` is `pii: quasi` |
+
+EVNT types added in 1.3: `host_state {clock_sync, power}` (values as the META keys, when either changed; checked every 10 s) and `underlay_change {from, to, iface}` (names `pii: quasi`, `iface` as `underlay` without `name`). CTXS table `ifstats_underlay` (1.3): columns and encodings as `ifstats`, for the underlay interface. Its counter series restarts at each `underlay_change`.
 
 ## Derived series (SERS, critical + derived)
 

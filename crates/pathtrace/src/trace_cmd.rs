@@ -84,6 +84,69 @@ fn path_facts(f: &pt_format::PtfFile) -> serde_json::Value {
     })
 }
 
+/// What `trace info` shows of each endpoint's host (cli.md): `host_suspend {events,
+/// suspended_ns}` from the EVNT `stall {cause: "suspend"}` events (probe.md §4.3), and
+/// `host_state` from META `clock_sync`, `power` and `pacing` (PTF 1.3, probe.md §4.5) with the
+/// number of `host_state` events, null where META has none of them. An observation log has one
+/// endpoint, its `role`.
+fn host_facts(f: &pt_format::PtfFile, meta: &Value) -> (serde_json::Value, serde_json::Value) {
+    let role = meta.get("role").and_then(Value::as_str);
+    let eps: Vec<&str> = match role {
+        Some(r) => vec![r],
+        None => vec!["a", "b"],
+    };
+    let events: Vec<&Value> = f
+        .sections
+        .iter()
+        .filter(|s| &s.kind == b"EVNT")
+        .filter_map(|s| s.get("events").and_then(Value::as_array))
+        .flatten()
+        .collect();
+    let of = |e: &Value, ep: &str| e.get("endpoint").and_then(Value::as_str).or(role) == Some(ep);
+    let mut suspend = serde_json::Map::new();
+    let mut state = serde_json::Map::new();
+    for ep in eps {
+        let (n, ns) = events
+            .iter()
+            .filter(|e| of(e, ep) && e.get("type").and_then(Value::as_str) == Some("stall"))
+            .filter_map(|e| e.get("detail"))
+            .filter(|d| d.get("cause").and_then(Value::as_str) == Some("suspend"))
+            .fold((0u64, 0u64), |(n, ns), d| {
+                (
+                    n + 1,
+                    ns + d.get("suspended_ns").and_then(Value::as_u64).unwrap_or(0),
+                )
+            });
+        suspend.insert(
+            ep.to_string(),
+            serde_json::json!({"events": n, "suspended_ns": ns}),
+        );
+        let facts = match role {
+            Some(_) => meta.get("endpoint"),
+            None => meta.get("endpoints").and_then(|e| e.get(ep)),
+        };
+        let get = |k: &str| {
+            facts
+                .and_then(|f| f.get(k))
+                .map(pt_format::jsonl::cbor_to_json)
+        };
+        let (cs, pw, pc) = (get("clock_sync"), get("power"), get("pacing"));
+        let v = if cs.is_none() && pw.is_none() && pc.is_none() {
+            serde_json::Value::Null
+        } else {
+            let changes = events
+                .iter()
+                .filter(|e| {
+                    of(e, ep) && e.get("type").and_then(Value::as_str) == Some("host_state")
+                })
+                .count();
+            serde_json::json!({"clock_sync": cs, "power": pw, "pacing": pc, "changes": changes})
+        };
+        state.insert(ep.to_string(), v);
+    }
+    (suspend.into(), state.into())
+}
+
 pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
     match cmd {
         TraceCmd::Check { file, json } => {
@@ -171,6 +234,7 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 })
                 .sum::<usize>();
             let p = path_facts(&f);
+            let (host_suspend, host_state) = host_facts(&f, &meta);
             let summary = serde_json::json!({
                 "file": file.display().to_string(),
                 "ptf_version": format!("{}.{}", f.major, f.minor),
@@ -184,6 +248,8 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
                 "local_qdisc_drops": p["local_qdisc_drops"],
                 "tx_timestamps": p["tx_timestamps"],
                 "overlay": p["overlay"],
+                "host_suspend": host_suspend,
+                "host_state": host_state,
                 "redaction": meta.get("redaction").and_then(Value::as_str),
                 "tool_commit": meta.get("tool").and_then(|t| t.get("git_commit")).and_then(Value::as_str),
                 "sections": kinds,
@@ -262,6 +328,24 @@ mod tests {
         let p = path_facts(&corpus("v1.2/valid-1-2-additions.ptf"));
         assert_eq!(p["overlay"]["overlay"], true);
         assert_eq!(p["overlay"]["provider"], "tailscale");
+    }
+
+    /// `trace info` shows each endpoint's host state and suspended time (cli.md, PTF 1.3).
+    #[test]
+    fn info_shows_host_state_and_suspend() {
+        let f = corpus("v1.3/valid-1-3-additions.ptf");
+        let meta = Value::Map(f.sections[0].head().cloned().unwrap_or_default());
+        let (suspend, state) = host_facts(&f, &meta);
+        assert_eq!(suspend["a"]["events"], 0);
+        assert_eq!(state["a"]["clock_sync"]["status"], "unknown");
+        assert_eq!(state["a"]["changes"], 1);
+        assert_eq!(state["b"]["clock_sync"]["status"], "synced");
+        assert_eq!(state["b"]["power"]["source"], "none");
+        assert_eq!(state["b"]["changes"], 0);
+        // A trace captured before 1.3 has no host state.
+        let f = corpus("v1.2/valid-1-2-additions.ptf");
+        let meta = Value::Map(f.sections[0].head().cloned().unwrap_or_default());
+        assert!(host_facts(&f, &meta).1["a"].is_null());
     }
 
     /// An unknown field shows its status and reason and no counts, never 0; the transmit

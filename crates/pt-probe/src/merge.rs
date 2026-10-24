@@ -1144,7 +1144,7 @@ pub fn merge_file(
             let target = match name.as_str() {
                 "tx" | "txts" | "rx" => continue,
                 "pairs" | "exchange" => &mut clok,
-                "ifstats" | "wifi" | "netstack" | "qdisc" => &mut ctxs,
+                "ifstats" | "ifstats_underlay" | "wifi" | "netstack" | "qdisc" => &mut ctxs,
                 _ => &mut obsv_tables,
             };
             target.extend(chunks(name, &t.cols, &attrs));

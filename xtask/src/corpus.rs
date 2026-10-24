@@ -161,6 +161,7 @@ pub fn generate(root: &Path) -> Result<()> {
     emit(&root.join("conformance/v1.0"), v1_0()?)?;
     emit(&root.join("conformance/v1.1"), v1_1())?;
     emit(&root.join("conformance/v1.2"), v1_2())?;
+    emit(&root.join("conformance/v1.3"), v1_3())?;
     Ok(())
 }
 
@@ -945,6 +946,247 @@ fn v1_2() -> Cases {
         ),
     );
     cases
+}
+
+/// The PTF 1.3 corpus (header minor 3): every 1.3 addition of ptf-format.md's Versions table.
+fn v1_3() -> Cases {
+    let canon = WriteOptions::canonical();
+    let v13 = |sections| PtfFile {
+        major: 1,
+        minor: 3,
+        sections,
+    };
+    let mut cases = Cases::new();
+    cases.insert(
+        "valid-minimal.ptf".into(),
+        (write(&v13(vec![meta(Value::map())]), &canon), None),
+    );
+    cases.insert(
+        "valid-1-3-additions.ptf".into(),
+        (write(&v13(additions_1_3()), &canon), None),
+    );
+    cases.insert(
+        "valid-1-3-additions-uncompressed-no-index.ptf".into(),
+        (
+            write(
+                &v13(additions_1_3()),
+                &WriteOptions {
+                    zstd_level: None,
+                    compress_threshold: 0,
+                    index: false,
+                },
+            ),
+            None,
+        ),
+    );
+    cases
+}
+
+/// A small merged trace from a macOS initiator (a) on Wi-Fi beneath a tunnel reaching a Linux
+/// responder (b), carrying the PTF 1.3 additions (probe.md §4.5, ADR 0015): META
+/// `endpoints.<ep>.clock_sync`, `power`, `pacing` and, for the tunnelled initiator,
+/// `underlay`; CTXS `ifstats_underlay`; EVNT `host_state` and `underlay_change`; derived
+/// `PATH.<dir>.path_change`.
+fn additions_1_3() -> Vec<Section> {
+    let pacing = |late: u64| {
+        Value::map()
+            .with("best_late_ns", late)
+            .with("policy_error", Value::Null)
+            .with("background", false)
+    };
+    let power =
+        |source: &str, low: Value| Value::map().with("source", source).with("low_power", low);
+    let a = Value::map()
+        .with("os_family", "darwin")
+        .with(
+            "iface",
+            Value::map()
+                .with("name", "utun4")
+                .with("type", "tunnel")
+                .with("mtu", 1280u64)
+                .with(
+                    "tunnel",
+                    Value::map()
+                        .with("kind", "utun")
+                        .with("provider", Value::Null),
+                ),
+        )
+        .with(
+            "clock_sync",
+            Value::map()
+                .with("status", "unknown")
+                .with("est_error_us", Value::Null)
+                .with("max_error_us", Value::Null),
+        )
+        .with("power", power("ac", Value::Bool(false)))
+        .with("pacing", pacing(41_000))
+        .with(
+            "underlay",
+            Value::map()
+                .with("name", "en0")
+                .with("index", 11u64)
+                .with("type", "wifi")
+                .with("driver", Value::Null)
+                .with("mtu", 1500u64)
+                .with("usb", false),
+        );
+    let b = Value::map()
+        .with("os_family", "linux")
+        .with(
+            "iface",
+            Value::map()
+                .with("name", "eth0")
+                .with("type", "ethernet")
+                .with("mtu", 1500u64),
+        )
+        .with(
+            "clock_sync",
+            Value::map()
+                .with("status", "synced")
+                .with("est_error_us", 120i64)
+                .with("max_error_us", 4_500i64),
+        )
+        .with("power", power("none", Value::Null))
+        .with("pacing", pacing(58_000));
+    let m = meta(Value::map().with("endpoints", Value::map().with("a", a).with("b", b)));
+
+    let t = |i: u64| 1_000_000_000 + i * 100_000_000;
+    let ifstats_underlay = Table::new("ifstats_underlay", 2)
+        .with(
+            Column::new("t", Enc::Delta2, Values::U64(vec![t(0), t(1)]))
+                .unit("ns")
+                .clock("a.mono"),
+        )
+        .with(
+            Column::new(
+                "rx_bytes",
+                Enc::Delta,
+                Values::U64(vec![12_000_000, 12_350_000]),
+            )
+            .unit("B"),
+        )
+        .with(
+            Column::new(
+                "tx_bytes",
+                Enc::Delta,
+                Values::U64(vec![4_000_000, 4_190_000]),
+            )
+            .unit("B"),
+        )
+        .with(
+            Column::new("rx_packets", Enc::Delta, Values::U64(vec![10_000, 10_260])).unit("count"),
+        )
+        .with(Column::new("tx_packets", Enc::Delta, Values::U64(vec![5_000, 5_150])).unit("count"))
+        .with(Column::new("rx_dropped", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with(nu("tx_dropped", Enc::Delta, "count", &[None, None]))
+        .with(Column::new("rx_errors", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with(Column::new("tx_errors", Enc::Delta, Values::U64(vec![0, 0])).unit("count"))
+        .with_attrs(Value::map().with("endpoint", "a"));
+
+    let event = |t: u64, ep: &str, kind: &str, detail: Value| {
+        Value::map()
+            .with("t", t)
+            .with("clock", format!("{ep}.mono"))
+            .with("endpoint", ep)
+            .with("type", kind)
+            .with("detail", detail)
+    };
+    let pii = |v: &str| Value::map().with("value", v).with("pii", "quasi");
+    let events = Section::new(
+        b"EVNT",
+        0,
+        Value::map()
+            .with(
+                "events",
+                Value::Array(vec![
+                    event(
+                        t(3),
+                        "a",
+                        "underlay_change",
+                        Value::map()
+                            .with("from", pii("en0"))
+                            .with("to", pii("en7"))
+                            .with(
+                                "iface",
+                                Value::map()
+                                    .with("index", 19u64)
+                                    .with("type", "usb-tether")
+                                    .with("driver", Value::Null)
+                                    .with("mtu", 1500u64)
+                                    .with("usb", false),
+                            ),
+                    ),
+                    event(
+                        t(5),
+                        "a",
+                        "host_state",
+                        Value::map()
+                            .with(
+                                "clock_sync",
+                                Value::map()
+                                    .with("status", "unknown")
+                                    .with("est_error_us", Value::Null)
+                                    .with("max_error_us", Value::Null),
+                            )
+                            .with("power", power("battery", Value::Bool(false))),
+                    ),
+                ]),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    // Derived: a path change in each direction (pathchange.base-delay-step/1, derivation.md).
+    let change = |before: i64, after: i64| {
+        Value::map()
+            .with("status", "known")
+            .with("method", "pathchange.base-delay-step/1")
+            .with("confidence", 0.7)
+            .with("count", 1u64)
+            .with(
+                "changes",
+                Value::Array(vec![
+                    Value::map()
+                        .with("t", 31_000_000_000i64)
+                        .with("before_ns", before)
+                        .with("after_ns", after),
+                ]),
+            )
+            .with("source", Value::Array(vec![Value::from("base_delay")]))
+    };
+    let path = Section::new(
+        b"PATH",
+        flags::CRITICAL | flags::DERIVED,
+        Value::map()
+            .with(
+                "derivation",
+                Value::map().with(
+                    "methods",
+                    Value::Array(vec![Value::from("pathchange.base-delay-step/1")]),
+                ),
+            )
+            .with(
+                "directions",
+                Value::map()
+                    .with(
+                        "a_to_b",
+                        Value::map().with("path_change", change(118_000_000, 21_000_000)),
+                    )
+                    .with(
+                        "b_to_a",
+                        Value::map().with("path_change", change(-412_000_000, -506_000_000)),
+                    ),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    vec![
+        m,
+        Section::new(b"CTXS", 0, Map::new()).with_table(ifstats_underlay),
+        events,
+        path,
+    ]
 }
 
 /// A small merged trace from a macOS initiator (a) reaching a Linux responder (b) through a

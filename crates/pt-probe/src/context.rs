@@ -10,7 +10,9 @@ use std::time::Duration;
 use pt_format::{Key, Value};
 use pt_sys::clock::ClockPair;
 use pt_sys::clock::{mono_raw, pair};
-use pt_sys::netif::{IfType, if_stats, iface_info, iface_with_addr, local_addr_for, stack_stats};
+use pt_sys::netif::{
+    IfInfo, IfType, if_stats, iface_info, iface_with_addr, local_addr_for, stack_stats,
+};
 use pt_sys::netlink::{Nl80211, QdiscReader, RtMonitor};
 
 use crate::record::{Recorder, pii};
@@ -313,6 +315,182 @@ pub fn egress_facts(name: &str) -> (Value, Option<u32>) {
     (v, i.txqueuelen)
 }
 
+/// One entry of `/sys/class/power_supply` (Linux).
+#[derive(Debug, Clone)]
+pub struct Supply {
+    /// `type`: Mains, Battery, USB, UPS, Wireless.
+    pub kind: String,
+    /// `scope`: `Device` for a peripheral's battery (mouse, headset), which says nothing about
+    /// this machine's power.
+    pub scope: String,
+    pub online: bool,
+    /// `status` of a battery: Charging, Discharging, Full, Not charging.
+    pub status: String,
+}
+
+/// The entries of `/sys/class/power_supply`; empty where it does not exist (macOS, most VMs).
+pub fn read_supplies() -> Vec<Supply> {
+    let Ok(rd) = std::fs::read_dir("/sys/class/power_supply") else {
+        return Vec::new();
+    };
+    let attr = |d: &std::path::Path, a: &str| {
+        std::fs::read_to_string(d.join(a))
+            .unwrap_or_default()
+            .trim()
+            .to_string()
+    };
+    rd.flatten()
+        .map(|e| {
+            let d = e.path();
+            Supply {
+                kind: attr(&d, "type"),
+                scope: attr(&d, "scope"),
+                online: attr(&d, "online") == "1",
+                status: attr(&d, "status"),
+            }
+        })
+        .collect()
+}
+
+/// The power source `supplies` describe, in META `power.source` terms (probe.md §4.5): `none`
+/// when this machine reports no supply of its own, `ac` (or `ups`) when an external supply is
+/// online, `battery` when only a battery is left.
+pub fn supply_source(supplies: &[Supply]) -> &'static str {
+    let own: Vec<&Supply> = supplies.iter().filter(|s| s.scope != "Device").collect();
+    if own.is_empty() {
+        return "none";
+    }
+    if let Some(s) = own.iter().find(|s| s.kind != "Battery" && s.online) {
+        return if s.kind == "UPS" { "ups" } else { "ac" };
+    }
+    if own.iter().any(|s| s.kind == "Battery") {
+        "battery"
+    } else {
+        "unknown"
+    }
+}
+
+/// META `power.source` of a macOS providing power source.
+fn darwin_source(s: &pt_sys::power::PowerSource) -> String {
+    use pt_sys::power::PowerSource;
+    match s {
+        PowerSource::Ac => "ac".into(),
+        PowerSource::Battery => "battery".into(),
+        PowerSource::Ups => "ups".into(),
+        PowerSource::Other(o) if o.is_empty() => "none".into(),
+        PowerSource::Other(o) => o.clone(),
+    }
+}
+
+/// META `endpoint.power {source, low_power}` and the `power` of `host_state` (PTF 1.3,
+/// probe.md §4.5).
+pub fn power_fact() -> Value {
+    if pt_sys::PLATFORM.os_family == "darwin" {
+        return match pt_sys::power::power_state() {
+            Ok(s) => Value::map()
+                .with("source", darwin_source(&s.source))
+                .with("low_power", s.low_power_mode),
+            Err(_) => Value::map()
+                .with("source", "unknown")
+                .with("low_power", Value::Null),
+        };
+    }
+    let low = read("/sys/firmware/acpi/platform_profile").map(|p| p == "low-power");
+    Value::map()
+        .with("source", supply_source(&read_supplies()))
+        .with("low_power", low)
+}
+
+/// META `endpoint.clock_sync {status, est_error_us, max_error_us}` and the `clock_sync` of
+/// `host_state` (PTF 1.3, probe.md §4.5). macOS does not maintain the kernel NTP fields
+/// (R-0019), so its state is unknown.
+pub fn clock_sync_fact() -> Value {
+    let unknown = || {
+        Value::map()
+            .with("status", "unknown")
+            .with("est_error_us", Value::Null)
+            .with("max_error_us", Value::Null)
+    };
+    if pt_sys::PLATFORM.os_family == "darwin" {
+        return unknown();
+    }
+    match pt_sys::clock::ntp_state() {
+        Ok(s) => Value::map()
+            .with("status", if s.synced { "synced" } else { "unsynced" })
+            .with("est_error_us", s.esterror_us)
+            .with("max_error_us", s.maxerror_us),
+        Err(_) => unknown(),
+    }
+}
+
+/// META `endpoint.pacing {best_late_ns, policy_error, background}` (PTF 1.3, probe.md §4.5).
+/// `best_late_ns` and `background` are null when the check could not run.
+pub fn pacing_fact(p: &std::io::Result<pt_sys::clock::PacingCheck>) -> Value {
+    match p {
+        Ok(p) => Value::map()
+            .with("best_late_ns", p.best_late_ns)
+            .with("policy_error", p.policy.as_ref().map(|e| e.to_string()))
+            .with("background", p.background),
+        Err(e) => Value::map()
+            .with("best_late_ns", Value::Null)
+            .with("policy_error", e.to_string())
+            .with("background", Value::Null),
+    }
+}
+
+/// The interface and local address of the default route of one address family: a route
+/// lookup to a documentation address, nothing is sent.
+pub fn default_route(v6: bool) -> Option<(String, IpAddr)> {
+    let a: SocketAddr = if v6 { "[2001:db8::1]:9" } else { "192.0.2.1:9" }
+        .parse()
+        .expect("addr");
+    let ip = local_addr_for(a).ok()?;
+    Some((iface_with_addr(ip).ok().flatten()?, ip))
+}
+
+/// The underlay beneath egress interface `egress` (probe.md §4.5): the default-route
+/// interface of the family, unless it is `egress` itself or another tunnel.
+fn underlay_of(egress: &str, v6: bool) -> Option<(String, IpAddr)> {
+    default_route(v6)
+        .filter(|(n, ip)| n != egress && tunnel(n, iface_info(n).index, Some(*ip)).is_none())
+}
+
+/// META `endpoint.underlay` (PTF 1.3, probe.md §4.5) for egress interface `egress` holding
+/// `local`: `None` (key absent) when the egress is not a tunnel, `Null` when no distinct
+/// underlay resolves, else the underlay's interface facts.
+pub fn underlay_facts(egress: &str, local: IpAddr) -> Option<Value> {
+    tunnel(egress, iface_info(egress).index, Some(local))?;
+    Some(match underlay_of(egress, local.is_ipv6()) {
+        Some((name, ip)) => iface_facts(&name, Some(ip)),
+        None => Value::Null,
+    })
+}
+
+/// The PTF 1.3 host facts of an endpoint for META (`clock_sync`, `power`, `pacing`, and
+/// `underlay` when the egress `iface` holding `local` is a tunnel; probe.md §4.5), with the
+/// result of the endpoint's pacing check.
+pub fn host_state_facts(
+    facts: Value,
+    iface: &str,
+    local: IpAddr,
+    pacing: &std::io::Result<pt_sys::clock::PacingCheck>,
+) -> Value {
+    let v = facts
+        .with("clock_sync", clock_sync_fact())
+        .with("power", power_fact())
+        .with("pacing", pacing_fact(pacing));
+    match underlay_facts(iface, local) {
+        Some(u) => v.with("underlay", u),
+        None => v,
+    }
+}
+
+/// What a `host_state` event compares (probe.md §4.5): the sync status and the power fact.
+/// The NTP error estimates move on every read, so they are recorded but not compared.
+fn host_state_key(clock_sync: &Value, power: &Value) -> (Option<Value>, Value) {
+    (clock_sync.get("status").cloned(), power.clone())
+}
+
 fn pair_row(p: &ClockPair) -> Vec<Option<i64>> {
     vec![
         Some(p.mono as i64),
@@ -384,6 +562,43 @@ fn route_to(peer: IpAddr) -> Option<(IpAddr, String)> {
     Some((local, name))
 }
 
+fn is_tunnel(i: &IfInfo) -> bool {
+    tunnel(&i.name, i.index, None).is_some()
+}
+
+/// The underlay of the followed interface `i` when it is a tunnel (probe.md §4.5).
+fn underlay_info(i: &IfInfo, v6: bool) -> Option<IfInfo> {
+    if !is_tunnel(i) {
+        return None;
+    }
+    underlay_of(&i.name, v6).map(|(n, _)| iface_info(&n))
+}
+
+/// The Wi-Fi link the path crosses: the followed interface, else its underlay (probe.md §4.5).
+fn wifi_iface<'a>(info: Option<&'a IfInfo>, under: Option<&'a IfInfo>) -> Option<&'a IfInfo> {
+    info.filter(|i| i.kind == IfType::Wifi)
+        .or(under.filter(|u| u.kind == IfType::Wifi))
+}
+
+/// One `ifstats` / `ifstats_underlay` row of interface `name` at `t`.
+fn ifstats_row(t: u64, name: &str) -> Option<Vec<Option<i64>>> {
+    let s = if_stats(name)?;
+    Some(vec![
+        Some(t as i64),
+        Some(s.rx_bytes as i64),
+        Some(s.tx_bytes as i64),
+        Some(s.rx_packets as i64),
+        Some(s.tx_packets as i64),
+        Some(s.rx_dropped as i64),
+        // A counter the platform lacks is unknown, never 0 (probe.md §9.6).
+        pt_sys::PLATFORM
+            .iface_tx_dropped
+            .then_some(s.tx_dropped as i64),
+        Some(s.rx_errors as i64),
+        Some(s.tx_errors as i64),
+    ])
+}
+
 fn open_wifi(rec: &Recorder) -> Option<Nl80211> {
     match Nl80211::open() {
         Ok(n) => Some(n),
@@ -408,17 +623,22 @@ fn run(
     let mut follow = Follow {
         cur: info.as_ref().map(|i| (i.name.clone(), i.index)),
     };
+    // The underlay beneath a tunnel egress (probe.md §4.5), followed like the egress.
+    let v6 = peer.is_some_and(|p| p.is_ipv6());
+    let mut under = info.as_ref().and_then(|i| underlay_info(i, v6));
     let mut nl = None;
     let mut wifi_tried = false;
-    if wifi && info.as_ref().is_some_and(|i| i.kind == IfType::Wifi) {
+    if wifi && wifi_iface(info.as_ref(), under.as_ref()).is_some() {
         wifi_tried = true;
         nl = open_wifi(&rec);
     }
+    let mut host_last = host_state_key(&clock_sync_fact(), &power_fact());
     let rt = RtMonitor::open().ok();
     let mut qd = QdiscReader::open().ok();
     let mut tick = 0u64;
     let mut wifi_rows = Vec::new();
     let mut if_rows = Vec::new();
+    let mut under_rows = Vec::new();
     let mut pair_rows = Vec::new();
     let mut stack_rows = Vec::new();
     let mut qdisc_rows = Vec::new();
@@ -457,28 +677,15 @@ fn run(
                 v(u64::from(q.backlog)),
             ]);
         }
-        if let Some(i) = info.as_ref()
-            && let Some(s) = if_stats(&i.name)
-        {
-            if_rows.push(vec![
-                Some(t as i64),
-                Some(s.rx_bytes as i64),
-                Some(s.tx_bytes as i64),
-                Some(s.rx_packets as i64),
-                Some(s.tx_packets as i64),
-                Some(s.rx_dropped as i64),
-                // A counter the platform lacks is unknown, never 0 (probe.md §9.6).
-                pt_sys::PLATFORM
-                    .iface_tx_dropped
-                    .then_some(s.tx_dropped as i64),
-                Some(s.rx_errors as i64),
-                Some(s.tx_errors as i64),
-            ]);
+        if let Some(r) = info.as_ref().and_then(|i| ifstats_row(t, &i.name)) {
+            if_rows.push(r);
+        }
+        if let Some(r) = under.as_ref().and_then(|u| ifstats_row(t, &u.name)) {
+            under_rows.push(r);
         }
         if tick.is_multiple_of(10) {
             pair_rows.push(pair_row(&pair(8)));
-            if let (Some(n), Some(i)) = (nl.as_mut(), info.as_ref())
-                && i.kind == IfType::Wifi
+            if let (Some(n), Some(i)) = (nl.as_mut(), wifi_iface(info.as_ref(), under.as_ref()))
                 && let Ok(w) = n.sample(i.index)
             {
                 let bss = w.bssid.map(|b| {
@@ -499,6 +706,7 @@ fn run(
                 ]);
             }
             rec.rows("ifstats", std::mem::take(&mut if_rows));
+            rec.rows("ifstats_underlay", std::mem::take(&mut under_rows));
             rec.rows("netstack", std::mem::take(&mut stack_rows));
             rec.rows("qdisc", std::mem::take(&mut qdisc_rows));
             rec.rows("wifi", std::mem::take(&mut wifi_rows));
@@ -544,11 +752,55 @@ fn run(
                         local,
                     ),
                 );
-                if wifi && to.kind == IfType::Wifi && nl.is_none() && !wifi_tried {
-                    wifi_tried = true;
-                    nl = open_wifi(&rec);
-                }
                 info = Some(to);
+            }
+        }
+        if recheck {
+            let now = info.as_ref().and_then(|i| underlay_info(i, v6));
+            let tunnel_egress = info.as_ref().is_some_and(is_tunnel);
+            // An unresolved underlay keeps the current one while the egress is still a tunnel
+            // (as §4.4); an egress that is no longer a tunnel has none.
+            let changed = match (&under, &now) {
+                (Some(a), Some(b)) => a.name != b.name || a.index != b.index,
+                (None, Some(_)) => true,
+                (Some(_), None) => !tunnel_egress,
+                (None, None) => false,
+            };
+            if changed {
+                let iface = now.as_ref().map(|u| {
+                    let mut v = iface_facts(&u.name, None);
+                    if let Value::Map(m) = &mut v {
+                        m.remove(&Key::from("name"));
+                    }
+                    v
+                });
+                rec.event(
+                    "underlay_change",
+                    Value::map()
+                        .with("from", pii(under.as_ref().map(|u| u.name.clone()), "quasi"))
+                        .with("to", pii(now.as_ref().map(|u| u.name.clone()), "quasi"))
+                        .with("iface", iface),
+                );
+                under = now;
+            }
+        }
+        if wifi
+            && nl.is_none()
+            && !wifi_tried
+            && wifi_iface(info.as_ref(), under.as_ref()).is_some()
+        {
+            wifi_tried = true;
+            nl = open_wifi(&rec);
+        }
+        if tick > 0 && tick.is_multiple_of(100) {
+            let (cs, pw) = (clock_sync_fact(), power_fact());
+            let key = host_state_key(&cs, &pw);
+            if key != host_last {
+                rec.event(
+                    "host_state",
+                    Value::map().with("clock_sync", cs).with("power", pw),
+                );
+                host_last = key;
             }
         }
         tick += 1;
@@ -556,6 +808,7 @@ fn run(
     }
     pair_rows.push(pair_row(&pair(8)));
     rec.rows("ifstats", if_rows);
+    rec.rows("ifstats_underlay", under_rows);
     rec.rows("netstack", stack_rows);
     rec.rows("qdisc", qdisc_rows);
     rec.rows("wifi", wifi_rows);
@@ -735,5 +988,106 @@ mod tests {
         } else {
             assert!(f.get("clocksource").is_some());
         }
+    }
+
+    fn supply(kind: &str, scope: &str, online: bool, status: &str) -> Supply {
+        Supply {
+            kind: kind.into(),
+            scope: scope.into(),
+            online,
+            status: status.into(),
+        }
+    }
+
+    /// META `power.source` from `/sys/class/power_supply` (probe.md §4.5).
+    #[test]
+    fn supply_sources() {
+        assert_eq!(supply_source(&[]), "none");
+        // A mouse battery says nothing about this machine.
+        assert_eq!(
+            supply_source(&[supply("Battery", "Device", false, "Discharging")]),
+            "none"
+        );
+        let bat = || supply("Battery", "", false, "Discharging");
+        assert_eq!(supply_source(&[supply("Mains", "", true, ""), bat()]), "ac");
+        // USB-C power delivery reports as USB, not Mains.
+        assert_eq!(supply_source(&[supply("USB", "", true, ""), bat()]), "ac");
+        assert_eq!(supply_source(&[supply("UPS", "", true, "")]), "ups");
+        assert_eq!(
+            supply_source(&[supply("Mains", "", false, ""), bat()]),
+            "battery"
+        );
+        assert_eq!(supply_source(&[supply("Mains", "", false, "")]), "unknown");
+    }
+
+    /// A `host_state` event marks a change of sync status or power, not the NTP error
+    /// estimates that move on every read (probe.md §4.5).
+    #[test]
+    fn host_state_compares_status_and_power() {
+        let cs = |status: &str, est: i64| {
+            Value::map()
+                .with("status", status)
+                .with("est_error_us", est)
+                .with("max_error_us", est * 2)
+        };
+        let pw = |source: &str| Value::map().with("source", source).with("low_power", false);
+        let base = host_state_key(&cs("synced", 10), &pw("ac"));
+        assert_eq!(base, host_state_key(&cs("synced", 250), &pw("ac")));
+        assert_ne!(base, host_state_key(&cs("unsynced", 10), &pw("ac")));
+        assert_ne!(base, host_state_key(&cs("synced", 10), &pw("battery")));
+    }
+
+    /// The host facts every endpoint records (PTF 1.3): known shapes on both platforms, and
+    /// no `underlay` key for an egress that is not a tunnel.
+    #[test]
+    fn host_state_facts_shape() {
+        let (local, name) = route_to("127.0.0.1".parse().unwrap()).unwrap();
+        let f = host_state_facts(Value::map(), &name, local, &pt_sys::clock::pacing_check());
+        let status = f
+            .get("clock_sync")
+            .and_then(|c| c.get("status"))
+            .and_then(Value::as_str);
+        assert!(
+            matches!(status, Some("synced" | "unsynced" | "unknown")),
+            "{status:?}"
+        );
+        if pt_sys::PLATFORM.os_family == "darwin" {
+            assert_eq!(status, Some("unknown"));
+        }
+        assert!(f.get("power").and_then(|p| p.get("source")).is_some());
+        assert!(
+            f.get("pacing")
+                .and_then(|p| p.get("best_late_ns"))
+                .is_some()
+        );
+        assert!(f.get("underlay").is_none());
+        assert!(underlay_facts(&name, local).is_none());
+    }
+
+    /// The Wi-Fi link sampled is the followed interface's, else its underlay's (probe.md §4.5).
+    #[test]
+    fn wifi_follows_the_underlay_of_a_tunnel() {
+        let i = |name: &str, kind| IfInfo {
+            name: name.into(),
+            index: 1,
+            kind,
+            driver: None,
+            mtu: None,
+            usb: false,
+            txqueuelen: None,
+        };
+        let wlan = i("wlan0", IfType::Wifi);
+        let tun = i("utun4", IfType::Tunnel);
+        let eth = i("eth0", IfType::Ethernet);
+        assert_eq!(
+            wifi_iface(Some(&wlan), None).map(|x| x.name.as_str()),
+            Some("wlan0")
+        );
+        assert_eq!(
+            wifi_iface(Some(&tun), Some(&wlan)).map(|x| x.name.as_str()),
+            Some("wlan0")
+        );
+        assert!(wifi_iface(Some(&tun), Some(&eth)).is_none());
+        assert!(wifi_iface(Some(&tun), None).is_none());
     }
 }
