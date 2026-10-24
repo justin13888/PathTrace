@@ -328,7 +328,7 @@ META keys added in 1.3 (probe.md §4.5, ADR 0015), all optional and generic. Eac
 |---|---|---|
 | `endpoints.<ep>.clock_sync` | `{status: "synced" / "unsynced" / "unknown", est_error_us: int / null, max_error_us: int / null}` | Kernel NTP state when the log started (`adjtimex`). macOS: `unknown`, errors null |
 | `endpoints.<ep>.power` | `{source: "ac" / "battery" / "ups" / "none" / "unknown" / tstr, low_power: bool / null}` | Power source and low-power mode when the log started |
-| `endpoints.<ep>.pacing` | `{best_late_ns: uint, policy_error: tstr / null, background: bool}` | Least wake lateness of five 2 ms pacer-like sleeps, the error from requesting the pacing scheduling policy, and the macOS background policy (always false on Linux) |
+| `endpoints.<ep>.pacing` | `{best_late_ns: uint / null, policy_error: tstr / null, background: bool / null}` | Least wake lateness of five 2 ms pacer-like sleeps, the error from requesting the pacing scheduling policy, and the macOS background policy (always false on Linux); `best_late_ns` and `background` are null and `policy_error` holds the error when the check could not run |
 | `endpoints.<ep>.underlay` | iface map as `iface` (without `tunnel`) / null; absent when `iface` is not a tunnel | The interface the default route of the session's address family uses beneath the tunnel; `name` is `pii: quasi` |
 
 EVNT types added in 1.3: `host_state {clock_sync, power}` (values as the META keys, when either changed; checked every 10 s) and `underlay_change {from, to, iface}` (names `pii: quasi`, `iface` as `underlay` without `name`). CTXS table `ifstats_underlay` (1.3): columns and encodings as `ifstats`, for the underlay interface. Its counter series restarts at each `underlay_change`.
