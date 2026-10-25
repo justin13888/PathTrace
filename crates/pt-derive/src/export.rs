@@ -3,8 +3,6 @@
 
 use pt_format::{Column, Enc, Key, Map, PtfFile, Section, Table, Value, Values, flags};
 
-use crate::raw::Raw;
-
 /// Mahimahi's per-opportunity byte quantum in code (R-0001: 1504, not the documented 1500).
 pub const MAHIMAHI_QUANTUM: u64 = 1504;
 
@@ -73,10 +71,43 @@ pub fn netem_args(f: &PtfFile, dir: &str) -> Option<String> {
     Some(format!("netem {}", parts.join(" ")))
 }
 
+/// Method id of the Mahimahi export.
+pub const MAHIMAHI_EXPORT_METHOD: &str = "export.mahimahi/2";
+
+/// One direction's Mahimahi export (`export.mahimahi/2`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct MahimahiExport {
+    /// Trace lines: ms since the first opportunity, one 1504-byte opportunity per line.
+    pub lines: Vec<u64>,
+    /// Sidecar describing the gaps filled at the median saturated rate (derivation.md "Exports").
+    /// `None` when there is nothing to export.
+    pub sidecar: Option<Value>,
+    /// Human-readable notes for stderr.
+    pub notes: Vec<String>,
+}
+
+/// The `saturated` capacity segments (t0, t1) of a direction, sorted, and its median rate.
+fn saturated_segments(f: &PtfFile, dir: &str) -> (Vec<(i64, i64)>, Option<f64>) {
+    let cap = dir_fields(f, dir).and_then(|d| d.get("capacity"));
+    let mut segs: Vec<(i64, i64)> = cap
+        .and_then(|c| c.get("segments"))
+        .and_then(Value::as_array)
+        .unwrap_or_default()
+        .iter()
+        .filter(|s| s.get("quality").and_then(Value::as_str) == Some("saturated"))
+        .filter_map(|s| Some((s.get("t0")?.as_i64()?, s.get("t1")?.as_i64()?)))
+        .filter(|(a, b)| b >= a)
+        .collect();
+    segs.sort();
+    let rate =
+        num(cap.and_then(|c| c.get("median_rate_bps"))).filter(|r| r.is_finite() && *r > 0.0);
+    (segs, rate)
+}
+
 /// Mahimahi trace lines (ms timestamps, one 1504-byte opportunity per line) from a direction's
-/// delivery opportunities (`export.mahimahi/1`). Returns (lines, notes).
-pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> (Vec<u64>, Vec<String>) {
-    let raw = Raw::load(f);
+/// delivery opportunities, with the gaps between saturated segments filled at the median
+/// saturated rate (`export.mahimahi/2`).
+pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> MahimahiExport {
     let mut notes = Vec::new();
     let mut opps: Vec<(i64, i64)> = Vec::new();
     for s in f.sections.iter().filter(|s| &s.kind == b"SERS") {
@@ -96,30 +127,102 @@ pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> (Vec<u64>, Vec<String>) {
             }
         }
     }
-    let _ = raw;
     if opps.is_empty() {
         notes.push(format!(
             "{dir}: no saturated delivery opportunities; nothing to export"
         ));
-        return (Vec::new(), notes);
+        return MahimahiExport {
+            lines: Vec::new(),
+            sidecar: None,
+            notes,
+        };
     }
     opps.sort();
     let t0 = opps[0].0;
+    let t_end = opps[opps.len() - 1].0;
+    let to_ms = |t: i64| ((t - t0).max(0) / 1_000_000) as u64;
+    let (segs, rate) = saturated_segments(f, dir);
+    let reason = match rate {
+        None => Some("no positive median_rate_bps in PATH capacity"),
+        Some(_) if segs.is_empty() => Some("no saturated segments in PATH capacity"),
+        Some(_) => None,
+    };
+    // Synthetic opportunities in each gap between consecutive saturated segments, inside the
+    // exported timeline (first to last measured opportunity), both gap ends excluded.
+    let mut fill: Vec<i64> = Vec::new();
+    let mut filled = Vec::new();
+    if let (Some(r), None) = (rate, reason) {
+        let period = MAHIMAHI_QUANTUM as f64 * 8.0 * 1e9 / r;
+        for w in segs.windows(2) {
+            let (g0, g1) = (w[0].1.max(t0), w[1].0.min(t_end));
+            if g1 <= g0 {
+                continue;
+            }
+            let n0 = fill.len();
+            let mut k = 1u64;
+            loop {
+                let t = g0 + (k as f64 * period) as i64;
+                if t >= g1 {
+                    break;
+                }
+                fill.push(t);
+                k += 1;
+            }
+            if fill.len() > n0 {
+                filled.push(
+                    Value::map()
+                        .with("start_ms", to_ms(g0))
+                        .with("end_ms", to_ms(g1)),
+                );
+            }
+        }
+    }
     let mut lines = Vec::new();
     let mut carry: u64 = 0;
     for (t, b) in &opps {
         carry += *b as u64;
-        let ms = ((t - t0).max(0) / 1_000_000) as u64;
         while carry >= MAHIMAHI_QUANTUM {
-            lines.push(ms);
+            lines.push(to_ms(*t));
             carry -= MAHIMAHI_QUANTUM;
         }
     }
-    notes.push(format!(
-        "{dir}: {} opportunities, from saturated windows only. Gaps between windows stay in the timeline as periods without opportunities (Mahimahi treats them as zero capacity); capacity there is unknown, not zero",
-        lines.len()
-    ));
-    (lines, notes)
+    let measured = lines.len();
+    lines.extend(fill.iter().map(|t| to_ms(*t)));
+    lines.sort_unstable();
+    let mut sidecar = Value::map()
+        .with("method", MAHIMAHI_EXPORT_METHOD)
+        .with("dir", dir)
+        .with("quantum_bytes", MAHIMAHI_QUANTUM)
+        .with("t0_ns", t0)
+        .with("lines", lines.len())
+        .with("measured_lines", measured)
+        .with("filled_lines", fill.len())
+        .with(
+            "fill_rate_bps",
+            match (rate, reason) {
+                (Some(r), None) => Value::from(r),
+                _ => Value::Null,
+            },
+        )
+        .with("filled", Value::Array(filled.clone()));
+    if let Some(why) = reason {
+        sidecar = sidecar.with("reason", why);
+    }
+    notes.push(match reason {
+        None => format!(
+            "{dir}: {} opportunities: {measured} measured in saturated windows, {} filled at the median saturated rate ({:.1} Mbit/s) in {} gaps where capacity is unknown, not measured",
+            lines.len(),
+            fill.len(),
+            rate.unwrap_or(0.0) / 1e6,
+            filled.len()
+        ),
+        Some(why) => format!("{dir}: {measured} opportunities, nothing filled ({why})"),
+    });
+    MahimahiExport {
+        lines,
+        sidecar: Some(sidecar),
+        notes,
+    }
 }
 
 /// Import a Mahimahi trace (ms timestamps, one 1504-byte opportunity per line) as a minimal PTF
@@ -249,10 +352,112 @@ mod tests {
     fn mahimahi_roundtrip() {
         let up = "0\n0\n1\n2\n2\n2\n5\n";
         let f = import_mahimahi(up, None, "test").unwrap();
-        let (lines, _) = mahimahi_lines(&f, "a_to_b");
-        assert_eq!(lines, vec![0, 0, 1, 2, 2, 2, 5]);
+        let e = mahimahi_lines(&f, "a_to_b");
+        // One saturated segment over the whole import: nothing to fill.
+        assert_eq!(e.lines, vec![0, 0, 1, 2, 2, 2, 5]);
+        let sc = e.sidecar.unwrap();
+        assert_eq!(sc.get("filled_lines").and_then(Value::as_u64), Some(0));
+        assert_eq!(
+            sc.get("filled").and_then(Value::as_array).map(<[_]>::len),
+            Some(0)
+        );
+        assert!(sc.get("reason").is_none());
         let mut buf = Vec::new();
         pt_format::write(&f, &pt_format::WriteOptions::canonical(), &mut buf).unwrap();
         assert!(pt_format::read(&buf, pt_format::ReadOptions::default()).is_ok());
+    }
+
+    /// A trace with two saturated windows (0-100 ms and 1000-1100 ms, one 1504-byte
+    /// opportunity per ms) and the given PATH capacity for a_to_b.
+    fn two_windows(capacity: Value) -> PtfFile {
+        let ts: Vec<i64> = (0..100)
+            .chain(1000..1100)
+            .map(|ms| ms * 1_000_000)
+            .collect();
+        let n = ts.len();
+        let mut t = Table::new("capacity_opps", n).with_attrs(Value::map().with("dir", "a_to_b"));
+        t.columns.push(
+            Column::new("t", Enc::Delta2, Values::I64(ts))
+                .unit("ns")
+                .clock("trace"),
+        );
+        t.columns
+            .push(Column::new("bytes", Enc::Rle, Values::U64(vec![MAHIMAHI_QUANTUM; n])).unit("B"));
+        let path = Value::map().with(
+            "directions",
+            Value::map().with("a_to_b", Value::map().with("capacity", capacity)),
+        );
+        PtfFile {
+            major: pt_format::container::MAJOR,
+            minor: pt_format::container::MINOR,
+            sections: vec![
+                Section::new(
+                    b"PATH",
+                    flags::CRITICAL | flags::DERIVED,
+                    path.as_map().cloned().unwrap(),
+                ),
+                Section::new(b"SERS", flags::CRITICAL | flags::DERIVED, Map::new()).with_table(t),
+            ],
+        }
+    }
+
+    fn seg(t0_ms: i64, t1_ms: i64) -> Value {
+        Value::map()
+            .with("t0", t0_ms * 1_000_000)
+            .with("t1", t1_ms * 1_000_000)
+            .with("quality", "saturated")
+            .with("workload", "heavy")
+    }
+
+    #[test]
+    fn mahimahi_fills_gap_at_median_rate() {
+        // 1504 B per ms = 12.032 Mbit/s; the fill emits one opportunity per ms in the gap.
+        let rate = MAHIMAHI_QUANTUM as f64 * 8.0 * 1e3;
+        let f = two_windows(
+            Value::map()
+                .with("median_rate_bps", rate)
+                .with("segments", Value::Array(vec![seg(0, 99), seg(1000, 1099)])),
+        );
+        let e = mahimahi_lines(&f, "a_to_b");
+        // Gap 99 ms .. 1000 ms, both ends excluded: 100..=999 are filled.
+        assert_eq!(e.lines, (0..1100).collect::<Vec<u64>>());
+        let sc = e.sidecar.unwrap();
+        assert_eq!(
+            sc.get("method").and_then(Value::as_str),
+            Some("export.mahimahi/2")
+        );
+        assert_eq!(sc.get("measured_lines").and_then(Value::as_u64), Some(200));
+        assert_eq!(sc.get("filled_lines").and_then(Value::as_u64), Some(900));
+        assert_eq!(sc.get("lines").and_then(Value::as_u64), Some(1100));
+        assert_eq!(sc.get("fill_rate_bps").and_then(Value::as_f64), Some(rate));
+        let filled = sc.get("filled").and_then(Value::as_array).unwrap();
+        assert_eq!(filled.len(), 1);
+        assert_eq!(filled[0].get("start_ms").and_then(Value::as_u64), Some(99));
+        assert_eq!(filled[0].get("end_ms").and_then(Value::as_u64), Some(1000));
+    }
+
+    #[test]
+    fn mahimahi_without_rate_does_not_fill() {
+        let f = two_windows(
+            Value::map().with("segments", Value::Array(vec![seg(0, 99), seg(1000, 1099)])),
+        );
+        let e = mahimahi_lines(&f, "a_to_b");
+        assert_eq!(e.lines.len(), 200);
+        let sc = e.sidecar.unwrap();
+        assert_eq!(sc.get("filled_lines").and_then(Value::as_u64), Some(0));
+        assert_eq!(sc.get("fill_rate_bps"), Some(&Value::Null));
+        assert!(sc.get("reason").and_then(Value::as_str).is_some());
+    }
+
+    #[test]
+    fn mahimahi_nothing_to_export() {
+        let f = PtfFile {
+            major: pt_format::container::MAJOR,
+            minor: pt_format::container::MINOR,
+            sections: Vec::new(),
+        };
+        let e = mahimahi_lines(&f, "a_to_b");
+        assert!(e.lines.is_empty());
+        assert!(e.sidecar.is_none());
     }
 }
