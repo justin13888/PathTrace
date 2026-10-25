@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/policer/01a14650-8b7c-7264-a251-6947d7866150.ptf
+content_digest: 1e3003182c3c51b58bc4ea53e2fe449d2c5a707079a2bb9227026c13c8e026f8
+packets a_to_b: 19486
+packets b_to_a: 121331
+session: 3a436ed1

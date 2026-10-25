@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/aqm-ecn/01a14682-d799-767a-adf4-cbc1cace51c7.ptf
+content_digest: ce3ce2e60f5231b0834ddce05d625d9a187bac63be0234c5fc65d0989a8670f4
+packets a_to_b: 47885
+packets b_to_a: 121409
+session: 3eeaca71

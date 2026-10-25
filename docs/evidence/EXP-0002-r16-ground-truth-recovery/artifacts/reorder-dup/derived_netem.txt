@@ -1,0 +1,2 @@
+a_to_b: tc qdisc add dev <dev> root netem delay 9.994ms 0.015ms distribution normal
+b_to_a: tc qdisc add dev <dev> root netem delay 10.009ms

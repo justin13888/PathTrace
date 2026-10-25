@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/data-cap/01a1465b-ecb6-7250-ab97-d6e0c057adf4.ptf
+content_digest: 04963d5f463124dd4f04f4352570234bc6a70aab2792b5588c8d88a75efd31c2
+packets a_to_b: 5158
+packets b_to_a: 1797
+session: f44bf0c6

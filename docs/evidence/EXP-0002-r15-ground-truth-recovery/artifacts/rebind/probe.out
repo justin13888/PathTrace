@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/rebind/01a14659-0248-706e-9679-6d591b5ca56c.ptf
+content_digest: d9dec5d90b83b7387ab4f96ea176f003033d3d50473259286397d92fa20fd422
+packets a_to_b: 120341
+packets b_to_a: 120504
+session: ea4a4125

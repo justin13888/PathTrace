@@ -1,0 +1,11 @@
+[pathtrace] handshake attempt 1 over UDP to 10.0.2.2:4433
+session: d69388d2 (trace 01a1468e-0828-734b-82d6-88f95d15fcac; session file /var/home/justy/pt-lanes/86/target/groundtruth/light/01a1468e-0828-734b-82d6-88f95d15fcac.session)
+[pathtrace] phase P0 background
+[pathtrace] phase P1 reachability
+[pathtrace] phase P2 quiet
+[pathtrace] phase P3 chirps
+[pathtrace] waiting 16 s for NAT binding probes
+[pathtrace] phase P9 end
+[pathtrace] fetch attempt 1 via tcp/4433: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetch attempt 1 via tcp/443: peer closed connection without sending TLS close_notify: https://docs.rs/rustls/latest/rustls/manual/_03_howto/index.html#unexpected-eof
+[pathtrace] fetched the responder log over TLS on tcp/4433

@@ -1,0 +1,5 @@
+trace: /var/home/justy/pt-lanes/86/target/groundtruth/reorder-dup/01a1469e-337b-7547-a5a0-3e6011ee4327.ptf
+content_digest: 34134eff3a79418db90b9850bbecd26d9149d1043116c5c8714f6c67ea07e758
+packets a_to_b: 29124
+packets b_to_a: 29125
+session: d584866b

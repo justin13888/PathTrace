@@ -1,0 +1,82 @@
+   Compiling pathtrace v1.1.0 (/var/home/justy/pt-lanes/86/crates/pathtrace)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.12s
+────────────
+ Nextest run ID a6f78011-ff5e-4854-9ad5-6406f2cf5da8 with nextest profile: default
+    Starting 12 tests across 11 binaries (185 tests skipped)
+        PASS [  29.218s] ( 1/12) pathtrace::netns tcp_fallback_session_sends_no_udp
+        PASS [  38.598s] ( 2/12) pathtrace::netns interrupted_session_ends_gracefully_and_stays_fetchable
+        PASS [  38.691s] ( 3/12) pathtrace::netns responder_signal_ends_the_session_for_both
+        PASS [  43.771s] ( 4/12) pathtrace::netns second_initiator_is_told_busy
+        PASS [  43.796s] ( 5/12) pathtrace::netns ipv6_without_a_route_falls_back_to_ipv4
+        PASS [  44.113s] ( 6/12) pathtrace::netns smoke_session_through_netem
+        PASS [  44.153s] ( 7/12) pathtrace::netns forced_predicted_ids_join_exactly
+        PASS [  44.641s] ( 8/12) pathtrace::netns lost_handshake_reply_is_resent
+        PASS [  44.723s] ( 9/12) pathtrace::netns responder_log_fetchable_after_responder_killed_mid_session
+        PASS [  47.039s] (10/12) pathtrace::netns ipv6_udp_timeout_falls_back_to_ipv4_udp
+        PASS [  47.178s] (11/12) pathtrace::netns tcp_fallback_tries_each_family
+        PASS [  55.537s] (12/12) pathtrace::netns fetch_resume_uses_pinned_tls_and_falls_back_to_443
+────────────
+     Summary [  55.540s] 12 tests run: 12 passed, 185 skipped
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-delay-asym/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-delay-asym/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/closure-replay/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/closure-replay/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/symmetric-delay/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/symmetric-delay/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/jitter/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/jitter/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/loss-random/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/loss-random/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/loss-gemodel/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/loss-gemodel/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-step/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-step/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/policer/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/policer/i/key
+Warning: sch_htb: quantum of class 10001 is big. Consider r2q change.
+created /var/home/justy/pt-lanes/86/target/groundtruth/aqm-ecn/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/aqm-ecn/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/mtu-icmp/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/mtu-icmp/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/mtu-blackhole/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/mtu-blackhole/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/tos-rewrite/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/tos-rewrite/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/udp443-throttle/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/udp443-throttle/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/udp-blocked/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/udp-blocked/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/nat-timeout/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/nat-timeout/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rebind/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rebind/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/deadman/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/deadman/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/data-cap/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/data-cap/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/ipv6/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/ipv6/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/light/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/light/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/deep/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/deep/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-cap/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-cap/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-100m/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rate-100m/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/geo/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/geo/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/geo-100m/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/geo-100m/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/bufferbloat/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/bufferbloat/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/fast/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/fast/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rcvbuf/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/rcvbuf/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc-predicted/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/local-qdisc-predicted/i/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/reorder-dup/r/key
+created /var/home/justy/pt-lanes/86/target/groundtruth/reorder-dup/i/key
