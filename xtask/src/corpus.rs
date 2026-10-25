@@ -1,5 +1,5 @@
 //! Conformance corpus generator (REQ-FMT-018): `conformance/<version>/*.ptf` + `expected.json`
-//! for v1.0, v1.1 and v1.2.
+//! for v1.0 through v1.4.
 //!
 //! Each case is a file plus its expected verdict: valid (with content digest) or invalid with an
 //! error kind (`pt_format::Error::kind`). Invalid files keep correct CRCs wherever the intended
@@ -162,6 +162,7 @@ pub fn generate(root: &Path) -> Result<()> {
     emit(&root.join("conformance/v1.1"), v1_1())?;
     emit(&root.join("conformance/v1.2"), v1_2())?;
     emit(&root.join("conformance/v1.3"), v1_3())?;
+    emit(&root.join("conformance/v1.4"), v1_4())?;
     Ok(())
 }
 
@@ -980,6 +981,257 @@ fn v1_3() -> Cases {
         ),
     );
     cases
+}
+
+/// The PTF 1.4 corpus (header minor 4): every 1.4 addition of ptf-format.md's Versions table.
+fn v1_4() -> Cases {
+    let canon = WriteOptions::canonical();
+    let v14 = |sections| PtfFile {
+        major: 1,
+        minor: 4,
+        sections,
+    };
+    let mut cases = Cases::new();
+    cases.insert(
+        "valid-minimal.ptf".into(),
+        (write(&v14(vec![meta(Value::map())]), &canon), None),
+    );
+    cases.insert(
+        "valid-1-4-additions.ptf".into(),
+        (write(&v14(additions_1_4()), &canon), None),
+    );
+    cases.insert(
+        "valid-1-4-additions-uncompressed-no-index.ptf".into(),
+        (
+            write(
+                &v14(additions_1_4()),
+                &WriteOptions {
+                    zstd_level: None,
+                    compress_threshold: 0,
+                    index: false,
+                },
+            ),
+            None,
+        ),
+    );
+    cases
+}
+
+/// A small trace merged from a log pair, carrying the PTF 1.4 additions (ptf-format.md, 1.4
+/// additions): OBSV `pkt.tx_id` and `pkt.tx_id_offset` (the last two of four transmissions
+/// re-anchored by −1 after a recorded burn the kernel did not take) and `txts_unmatched.joined`
+/// (a joined stamp kept for a value in a column merge does not know); META `merged_from[].meta`
+/// with the responder's own `trace_id`, `created_utc` and `network`, its label also pointed at by
+/// the trace's `pii`; FLOW `merged_from` with the responder's definition of a flow both logs
+/// define; EVNT `merged_from` with a head key merge does not know.
+fn additions_1_4() -> Vec<Section> {
+    let clocks = |ep: &str| {
+        Value::map()
+            .with(
+                &format!("{ep}.mono"),
+                Value::map()
+                    .with("kind", "monotonic_raw")
+                    .with("endpoint", ep),
+            )
+            .with(
+                &format!("{ep}.real"),
+                Value::map()
+                    .with("kind", "realtime")
+                    .with("endpoint", ep)
+                    .with("pii", "quasi"),
+            )
+    };
+    let mut all_clocks = clocks("a").as_map().cloned().unwrap_or_default();
+    all_clocks.extend(clocks("b").as_map().cloned().unwrap_or_default());
+    let log_pii = |net: bool| {
+        let p = Value::map().with("/endpoint/peer_addr", "id");
+        if net {
+            p.with("/network/label", "id")
+        } else {
+            p
+        }
+    };
+    let own_a = Value::map()
+        .with("kind", "obslog")
+        .with("clocks", clocks("a"))
+        .with("redaction", "full")
+        .with("pii", log_pii(true));
+    let own_b = Value::map()
+        .with("kind", "obslog")
+        .with("trace_id", "01890000-0000-7000-8000-00000000000b")
+        .with("created_utc", "2026-10-25T12:00:01Z")
+        .with(
+            "network",
+            Value::map().with("class", "office").with("label", "lab-b"),
+        )
+        .with("clocks", clocks("b"))
+        .with("redaction", "full")
+        .with("pii", log_pii(true));
+    let from = |role: &str, digest: char, own: Value| {
+        Value::map()
+            .with("role", role)
+            .with("content_digest", digest.to_string().repeat(64))
+            .with("stopped", Value::Null)
+            .with("meta", own)
+    };
+    let m = meta(
+        Value::map()
+            .with("trace_id", "01890000-0000-7000-8000-00000000000a")
+            .with("created_utc", "2026-10-25T12:00:00Z")
+            .with(
+                "network",
+                Value::map().with("class", "home").with("label", "home-a"),
+            )
+            .with("clocks", Value::Map(all_clocks))
+            .with(
+                "endpoints",
+                Value::map()
+                    .with("a", Value::map().with("peer_addr", "192.0.2.2:4433"))
+                    .with("b", Value::map().with("peer_addr", "198.51.100.1:50000")),
+            )
+            .with(
+                "merged_from",
+                Value::Array(vec![from("a", 'a', own_a), from("b", 'b', own_b)]),
+            )
+            .with("complete", true)
+            .with(
+                "pii",
+                Value::map()
+                    .with("/network/label", "id")
+                    .with("/endpoints/a/peer_addr", "id")
+                    .with("/endpoints/b/peer_addr", "id")
+                    .with("/merged_from/1/meta/network/label", "id"),
+            ),
+    );
+    let flow = |id: u64, sender: &str| {
+        Value::map()
+            .with("id", id)
+            .with("kind", "udp")
+            .with("sender", sender)
+    };
+    let flows = Section::new(
+        b"FLOW",
+        0,
+        Value::map()
+            .with("flows", Value::Array(vec![flow(1, "a"), flow(2, "b")]))
+            .with(
+                "merged_from",
+                Value::Array(vec![
+                    Value::map(),
+                    Value::map().with(
+                        "flows",
+                        Value::Array(vec![flow(1, "a").with("note", "responder's definition")]),
+                    ),
+                ]),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+    let events = Section::new(
+        b"EVNT",
+        0,
+        Value::map()
+            .with(
+                "events",
+                Value::Array(vec![
+                    Value::map()
+                        .with("t", 1_013_010_000u64)
+                        .with("clock", "a.mono")
+                        .with("endpoint", "a")
+                        .with("type", "send_partial")
+                        .with(
+                            "detail",
+                            Value::map()
+                                .with("sock", 0u64)
+                                .with("burned_id", 3u64)
+                                .with("tx_ids", "predicted"),
+                        ),
+                ]),
+            )
+            .with(
+                "merged_from",
+                Value::Array(vec![
+                    Value::map(),
+                    Value::map().with(
+                        "heads",
+                        Value::Array(vec![Value::map().with("future_key", "from b")]),
+                    ),
+                ]),
+            )
+            .as_map()
+            .cloned()
+            .unwrap_or_default(),
+    );
+
+    // Four packets a → b on a predicted socket, one call each, 1 ms apart; ids 3 and 4 were
+    // logged one too high (a burn at 3 that consumed nothing) and joined one lower.
+    let n = 4usize;
+    let user: Vec<u64> = [0u64, 1, 2, 4]
+        .iter()
+        .map(|c| 1_010_000_000 + c * 1_000_000)
+        .collect();
+    let sched: Vec<u64> = user.iter().map(|u| 1_000_000_000 + u + 5_000).collect();
+    let pkt = Table::new("pkt", n)
+        .with(Column::new("flow", Enc::Rle, Values::U64(vec![1; n])).unit("id"))
+        .with(Column::new("seq", Enc::Delta, Values::U64(vec![0, 1, 2, 3])).unit("count"))
+        .with(Column::new("size", Enc::Rle, Values::U64(vec![1228; n])).unit("B"))
+        .with(Column::new("tx_sock", Enc::Rle, Values::U64(vec![0; n])).unit("id"))
+        .with(
+            Column::new("tx_intended", Enc::Delta2, Values::U64(user))
+                .unit("ns")
+                .clock("a.mono"),
+        )
+        .with(
+            Column::new("tx_sched", Enc::Delta2, Values::U64(sched.clone()))
+                .unit("ns")
+                .clock("a.real"),
+        )
+        .with(ni(
+            "tx_snd_lag",
+            Enc::Varint,
+            "ns",
+            &[Some(7_000), None, None, None],
+        ))
+        .with(
+            Column::new(
+                "rx",
+                Enc::Delta2,
+                Values::U64(sched.iter().map(|s| s + 9_000_000).collect()),
+            )
+            .unit("ns")
+            .clock("b.real"),
+        )
+        .with(Column::new("tx_id", Enc::Delta, Values::U64(vec![0, 1, 3, 4])).unit("id"))
+        .with(Column::new("tx_id_offset", Enc::Rle, Values::I64(vec![0, 0, -1, -1])).unit("count"))
+        .with_attrs(
+            Value::map()
+                .with("dir", "a_to_b")
+                .with("sender", "a")
+                .with("receiver", "b"),
+        );
+    // Id 0's SND stamp, joined (`tx_snd_lag`), kept again for its value in `future_ts`.
+    let txts_unmatched = Table::new("txts_unmatched", 1)
+        .with(Column::new("sock", Enc::Rle, Values::U64(vec![0])).unit("id"))
+        .with(Column::new("id", Enc::Delta, Values::U64(vec![0])).unit("id"))
+        .with(
+            Column::new("kind", Enc::Rle, Values::U64(vec![1]))
+                .unit("enum")
+                .with_meta(
+                    "enum",
+                    Value::Array(vec![Value::from("sched"), Value::from("snd")]),
+                ),
+        )
+        .with(
+            Column::new("real", Enc::Delta2, Values::U64(vec![sched[0] + 7_000]))
+                .unit("ns")
+                .clock("a.real"),
+        )
+        .with(Column::new("future_ts", Enc::Rle, Values::U64(vec![9])))
+        .with(Column::new("joined", Enc::Rle, Values::U64(vec![1])).unit("count"))
+        .with_attrs(Value::map().with("endpoint", "a"));
+    let s = |t: Table| Section::new(b"OBSV", 0, Map::new()).with_table(t);
+    vec![m, flows, s(pkt), s(txts_unmatched), events]
 }
 
 /// A small merged trace from a macOS initiator (a) on Wi-Fi beneath a tunnel reaching a Linux
