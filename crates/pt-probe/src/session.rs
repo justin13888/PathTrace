@@ -292,17 +292,42 @@ pub struct ProbeOpts {
 /// arrivals (issue #106).
 pub const MAX_TRACK_ROUNDS: u64 = 150;
 
+/// Seconds of one tracking round's saturation (`run_phases` P10, `Profile::saturation_s`).
+const TRACK_SAT_S: f64 = 3.0;
+
 /// Whether profile `p` (its data cap already lowered by `--data-cap`) can run `track_s`
-/// seconds of tracking: at most [`MAX_TRACK_ROUNDS`] rounds, and background traffic over the
-/// planned session (at a 1500-byte MTU, the most a session uses) within the cap
-/// (docs/design/probe.md §6, Tracking). The error names the largest tracking time that fits.
+/// seconds of tracking: at most [`MAX_TRACK_ROUNDS`] rounds, background traffic over the
+/// planned session (at a 1500-byte MTU, the most a session uses) within the cap, and every
+/// tracking round's share of what the cap leaves after background traffic and the P8 reserve
+/// at least [`crate::plan::MIN_ALLOWANCE`], so that no round is skipped for budget
+/// (docs/design/probe.md §6, Tracking). Both senders are checked against the initiator's
+/// cap (the responder's is known only after the handshake). The error names the largest
+/// tracking time that fits.
 pub fn check_track(p: &Profile, track_s: u64) -> Result<(), String> {
     if track_s == 0 {
         return Ok(());
     }
-    let fits_cap =
-        |t: u64| crate::plan::background_bps(p, 1500) * p.planned_s(t) <= p.data_cap as f64;
-    let fits = |t: u64| Profile::track_rounds(t) <= MAX_TRACK_ROUNDS && fits_cap(t);
+    let cap = p.data_cap as f64;
+    let bg = |t: u64| crate::plan::background_bps(p, 1500) * p.planned_s(t);
+    let fits_cap = |t: u64| bg(t) <= cap;
+    // Every saturation of a sender gets the same share per second of what the cap leaves
+    // after background traffic and the P8 reserve (`plan::allowance`), so a tracking round
+    // gets `TRACK_SAT_S / saturation_s` of it, or more when an earlier saturation spent less.
+    let rounds_fit = |t: u64| {
+        if Profile::track_rounds(t) == 0 {
+            return true;
+        }
+        let refs = if p.refs {
+            crate::plan::ref_tcp_bytes(p.data_cap) + crate::plan::REF_CBR_BYTES
+        } else {
+            0
+        };
+        let avail = cap - bg(t) - refs as f64;
+        let sat_s = p.saturation_s(Role::A, t).max(p.saturation_s(Role::B, t));
+        avail * TRACK_SAT_S / sat_s >= crate::plan::MIN_ALLOWANCE as f64
+    };
+    let fits =
+        |t: u64| Profile::track_rounds(t) <= MAX_TRACK_ROUNDS && fits_cap(t) && rounds_fit(t);
     if fits(track_s) {
         return Ok(());
     }
@@ -312,15 +337,25 @@ pub fn check_track(p: &Profile, track_s: u64) -> Result<(), String> {
         .unwrap_or(0);
     let why = if Profile::track_rounds(track_s) > MAX_TRACK_ROUNDS {
         format!("more than {MAX_TRACK_ROUNDS} tracking rounds (one per 60 s)")
-    } else {
+    } else if !fits_cap(track_s) {
         format!(
             "background traffic past the {} profile's {} B data cap",
             p.name, p.data_cap
         )
+    } else {
+        format!(
+            "tracking rounds the {} profile's {} B data cap leaves under {} B each, so they would be skipped",
+            p.name,
+            p.data_cap,
+            crate::plan::MIN_ALLOWANCE
+        )
     };
-    Err(format!(
-        "--track-secs {track_s} needs {why}; at most {max} s fits"
-    ))
+    let fits = if Profile::track_rounds(max) == 0 {
+        format!("at most {max} s fits, which runs no tracking round")
+    } else {
+        format!("at most {max} s fits")
+    };
+    Err(format!("--track-secs {track_s} needs {why}; {fits}"))
 }
 
 #[derive(Debug, Clone)]
@@ -1851,7 +1886,7 @@ fn run_phases(
             let sender = if i % 2 == 0 { Role::A } else { Role::B };
             // Every round has a flow id of its own (i < MAX_TRACK_ROUNDS = 150).
             let id = ids::TRACK0 + i as u8;
-            if let Some(s) = ctx.heavy(id, sender, 10, 3.0) {
+            if let Some(s) = ctx.heavy(id, sender, 10, TRACK_SAT_S) {
                 ctx.start(vec![s], 50);
             }
             ctx.sleep(3.0);
@@ -2570,6 +2605,59 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 mod tests {
     use super::*;
 
+    /// Smallest tracking-round allowance of the initiator over a session of profile `p` with
+    /// `track_s` of tracking, when background traffic runs at its planned rate (1500-byte MTU)
+    /// and every saturation spends its whole allowance (`plan::allowance`, as `Ctx::allow`).
+    fn min_track_allowance(p: &Profile, track_s: u64) -> u64 {
+        let bg = (crate::plan::background_bps(p, 1500) * p.planned_s(track_s)) as u64;
+        let refs = if p.refs {
+            crate::plan::ref_tcp_bytes(p.data_cap) + crate::plan::REF_CBR_BYTES
+        } else {
+            0
+        };
+        let rounds = Profile::track_rounds(track_s).div_ceil(2);
+        let mut sats = vec![
+            p.sat_s,
+            p.both_s,
+            p.class_sat_s,
+            p.class_sat_s,
+            p.class_sat_s,
+        ];
+        sats.retain(|&s| s > 0.0);
+        let first_round = sats.len();
+        sats.extend((0..rounds).map(|_| TRACK_SAT_S));
+        let (mut spent, mut left, mut min) = (0, p.saturation_s(Role::A, track_s), u64::MAX);
+        for (i, s) in sats.into_iter().enumerate() {
+            // Background bytes already sent plus those still reserved stay `bg`; the P8
+            // reserve is held before P8 and spent by it after.
+            let a = crate::plan::allowance(p.data_cap, spent, bg + refs, s, left);
+            spent += a;
+            left -= s;
+            if i >= first_round {
+                min = min.min(a);
+            }
+        }
+        min
+    }
+
+    #[test]
+    fn admitted_tracking_rounds_are_never_skipped_for_budget() {
+        for n in ["smoke", "light", "standard", "deep"] {
+            let p = Profile::by_name(n).unwrap();
+            for t in (60..=9000).step_by(60) {
+                let skipped = min_track_allowance(&p, t) < crate::plan::MIN_ALLOWANCE;
+                let fits_ids = Profile::track_rounds(t) <= MAX_TRACK_ROUNDS;
+                if check_track(&p, t).is_ok() {
+                    assert!(!skipped, "{n}: {t} s admitted but a round is skipped");
+                } else if fits_ids
+                    && crate::plan::background_bps(&p, 1500) * p.planned_s(t) <= p.data_cap as f64
+                {
+                    assert!(skipped, "{n}: {t} s refused although every round fits");
+                }
+            }
+        }
+    }
+
     #[test]
     fn track_bounds_refuse_wrapping_ids_and_overfull_caps() {
         let p = |n: &str| Profile::by_name(n).unwrap();
@@ -2587,18 +2675,30 @@ mod tests {
                 .unwrap_err()
                 .ends_with("at most 9059 s fits")
         );
-        // light: 15.4 kB/s of background over (35 s + tracking) within 2 MB.
-        assert_eq!(check_track(&p("light"), 60), Ok(()));
+        // light: 15.4 kB/s of background over (35 s + tracking) leaves a single round's 3 s
+        // under 1 MB of its 2 MB cap, so no tracking round fits.
+        assert_eq!(check_track(&p("light"), 59), Ok(()));
+        assert_eq!(
+            check_track(&p("light"), 60),
+            Err("--track-secs 60 needs tracking rounds the light profile's 2000000 B data cap leaves under 1000000 B each, so they would be skipped; at most 59 s fits, which runs no tracking round".into())
+        );
         assert_eq!(
             check_track(&p("light"), 600),
-            Err("--track-secs 600 needs background traffic past the light profile's 2000000 B data cap; at most 94 s fits".into())
+            Err("--track-secs 600 needs background traffic past the light profile's 2000000 B data cap; at most 59 s fits, which runs no tracking round".into())
         );
-        // standard: 36.4 kB/s over (106 s + tracking) within 200 MB.
-        assert_eq!(check_track(&p("standard"), 5388), Ok(()));
+        // standard: what 200 MB leaves after 36.4 kB/s of background over (106 s + tracking)
+        // and the 26.25 MB P8 reserve, shared over the saturation seconds, is 1 MB a round.
+        assert_eq!(check_track(&p("standard"), 3623), Ok(()));
         assert!(
-            check_track(&p("standard"), 5389)
+            check_track(&p("standard"), 3624)
                 .unwrap_err()
-                .ends_with("at most 5388 s fits")
+                .ends_with("so they would be skipped; at most 3623 s fits")
+        );
+        // smoke: 50 MB, no P8.
+        assert!(
+            check_track(&p("smoke"), 100_000)
+                .unwrap_err()
+                .ends_with("at most 890 s fits")
         );
         // A lowered cap lowers the bound: deep's default 600 s does not fit in 10 MB.
         let small = p("deep").with_data_cap(Some(10_000_000));

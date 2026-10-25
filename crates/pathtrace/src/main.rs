@@ -213,7 +213,8 @@ struct ProbeArgs {
     #[arg(long, default_value = "auto", value_parser = ["auto", "smoke", "light", "standard", "deep"])]
     profile: String,
     /// Tracking duration, seconds (deep default 600): one short saturation per minute, at most
-    /// 150 rounds (under 9060 s); refused when its background traffic would not fit the data cap.
+    /// 150 rounds (under 9060 s); refused when the data cap cannot hold its background traffic
+    /// and a full byte allowance for every round.
     #[arg(long)]
     track_secs: Option<u64>,
     /// Output directory for logs and the trace.
