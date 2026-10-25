@@ -61,7 +61,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         .cloned()
         .collect();
     let methods = [
-        "clock.pairs-piecewise/1",
+        clock::PAIRS_METHOD,
         clock::OFFSET_METHOD,
         "delay.light-window-min/1",
         "jitter.light-residual/1",
@@ -113,8 +113,8 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         .with(
             "clock",
             Value::map()
-                .with("a", tb.a.to_value("clock.pairs-piecewise/1"))
-                .with("b", tb.b.to_value("clock.pairs-piecewise/1"))
+                .with("a", tb.a.to_value(clock::PAIRS_METHOD))
+                .with("b", tb.b.to_value(clock::PAIRS_METHOD))
                 .with(
                     "offset",
                     tb.off.as_ref().map_or(

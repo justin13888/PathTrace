@@ -482,10 +482,10 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
             .and_then(|(f, r)| {
                 let f = pt_derive::apply(&f, &derive_tool());
                 let d = pt_probe::merge::write_trace(&f, &trace)?;
-                Ok((d, r))
+                Ok((d, r, trace_cmd::suspend_warnings(&f)))
             });
     match merged {
-        Ok((digest, r)) => {
+        Ok((digest, r, suspended)) => {
             println!("trace: {}", trace.display());
             println!("content_digest: {digest}");
             for (dir, n) in &r.pkt_rows {
@@ -506,6 +506,11 @@ fn probe(cfg: PathBuf, a: ProbeArgs) -> Result<ExitCode, String> {
                         c.unexplained
                     );
                 }
+            }
+            // A suspend leaves the trace complete (exit 0), but its delays across the suspend
+            // are unreliable (probe.md §4.3).
+            for w in &suspended {
+                eprintln!("{w}");
             }
             if r.logs.iter().any(|l| l.stopped.is_some()) {
                 partial = true;
