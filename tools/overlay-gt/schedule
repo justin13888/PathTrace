@@ -1,0 +1,10 @@
+# Overlay ground-truth schedule (docs/design/overlay-ground-truth.md).
+# One step per line: a name ([A-Za-z0-9._-]), then the netem arguments impair.sh applies to the
+# probe's responder -> initiator traffic, or `none`. The first step must be `none`: every later
+# step is compared with it. Steps run in file order; `#` starts a comment.
+baseline         none
+delay40          delay 40ms limit 100000
+delay40-jitter5  delay 40ms 5ms distribution normal limit 100000
+loss2            loss 2% limit 100000
+rate20           rate 20mbit limit 1000
+delay30-loss1    delay 30ms loss 1% limit 100000

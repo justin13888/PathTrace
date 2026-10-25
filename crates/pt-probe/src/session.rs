@@ -129,6 +129,12 @@ fn obslog_meta(
     pii.insert(Key::from("/endpoint/addr"), Value::from("id"));
     pii.insert(Key::from("/endpoint/peer_addr"), Value::from("id"));
     pii.insert(Key::from("/endpoint/iface/name"), Value::from("quasi"));
+    if facts
+        .get("underlay")
+        .is_some_and(|u| u.get("name").is_some())
+    {
+        pii.insert(Key::from("/endpoint/underlay/name"), Value::from("quasi"));
+    }
     let mut head = Value::map()
         .with("kind", "obslog")
         .with("role", role.name())
@@ -272,6 +278,8 @@ pub struct ProbeOpts {
     /// Prefer IPv6 when the responder name resolves to both families.
     pub prefer_v6: bool,
     pub rate_cap_bps: u64,
+    /// `--data-cap` as requested, recorded in META; `profile.data_cap` already applies it.
+    pub data_cap_user: Option<u64>,
     /// Override the deep profile's tracking time.
     pub track_s: Option<u64>,
     /// Print progress lines to stderr.
@@ -1020,6 +1028,7 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     // Observation log.
     std::fs::create_dir_all(&opts.out_dir)?;
     let log_a = opts.out_dir.join(format!("{trace_id}.a.ptflog"));
+    let pacing = pt_sys::clock::pacing_check();
     let facts = context::host_facts()
         .with("addr", local_ip.to_string())
         .with("peer_addr", dst.to_string())
@@ -1036,7 +1045,8 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
                 .with("send_buf", main.caps().send_buf),
         )
         .with("sockets", sockets_value(&socks));
-    let extra = Value::map()
+    let facts = context::host_state_facts(facts, &iface, local_ip, &pacing);
+    let mut extra = Value::map()
         .with(
             "responder",
             Value::map()
@@ -1052,6 +1062,9 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
         )
         .with("control", if tcp_ctrl.is_some() { "tcp" } else { "udp" })
         .with("test_hooks", test_hooks_value(&sopts));
+    if let Some(c) = opts.data_cap_user {
+        extra = extra.with("data_cap_user", c);
+    }
     let mut meta = obslog_meta(
         Role::A,
         &trace_id,
@@ -1113,8 +1126,8 @@ pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
     // not a note: a note marks the trace partial, and the session is complete, with the
     // lateness recorded in the trace anyway.
     if pt_sys::PLATFORM.os_family == "darwin"
-        && let Ok(p) = pt_sys::clock::pacing_check()
-        && let (false, d) = crate::io::pacing_verdict(&p)
+        && let Ok(p) = &pacing
+        && let (false, d) = crate::io::pacing_verdict(p)
     {
         eprintln!("warning: {d}");
     }
@@ -2341,6 +2354,7 @@ fn responder_session(
                 .with("send_buf", main.caps().send_buf),
         )
         .with("sockets", sockets_value(&socks));
+    let facts = context::host_state_facts(facts, &iface, local_ip, &pt_sys::clock::pacing_check());
     let mut meta = obslog_meta(
         Role::B,
         &trace_id,

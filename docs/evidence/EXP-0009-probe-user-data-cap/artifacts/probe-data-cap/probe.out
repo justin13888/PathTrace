@@ -1,0 +1,5 @@
+trace: /var/mnt/scratch/golem/dev/pt-datacap/target/groundtruth/probe-data-cap/01a15f40-5d8c-746b-9db1-e5b9351ba2c4.ptf
+content_digest: dc1140bd5451bfc63dfe9f8810b458de1cb9535b65409f1904e8f3472d07eed6
+packets a_to_b: 21102
+packets b_to_a: 21225
+session: 1cfe3889

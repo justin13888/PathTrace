@@ -96,7 +96,7 @@ An arrival counts as a delivery opportunity only while the sender demonstrably h
 ### REQ-PRB-014: Profiles with data caps
 - status: met
 - spec: §6.5, §3
-- evidence: EXP-0002-r16
+- evidence: EXP-0002-r16, EXP-0009
 
 Profiles: `smoke` (about 15 s, deployment check), `light` (2 MB or less), `standard` (200 MB or less, about 90 s), `deep` (standard plus a configurable tracking period with periodic short saturations). Phase durations shrink to fit the cap.
 
@@ -110,7 +110,7 @@ For each class (`udp/high-port`, `udp/443 opaque`, `udp/443 QUIC-shaped`, `tcp/4
 ### REQ-PRB-016: Safety limits
 - status: met
 - spec: §6.7
-- evidence: EXP-0002-r16, EXP-0006-r7
+- evidence: EXP-0002-r16, EXP-0006-r7, EXP-0009
 
 Every session has a hard data cap and a hard rate cap. Saturation is feedback-controlled to hold a standing queue, and a metered connection selects `light` automatically.
 
@@ -237,3 +237,11 @@ After an interface switch, both endpoints keep sampling the interface that carri
 - adr: 0014
 
 A `probe` session from a macOS initiator against a Linux responder records every packet the probe sends and receives, as on Linux: each RX time with its stamp source (kernel where the platform gives one), each TX time from user space next to the send call, every time column in a declared clock domain, and clock pairs relating the domains. Facts macOS cannot observe (kernel TX stamps, error-queue path-MTU and send-error reports, per-socket receive drops, egress qdisc and interface output-queue drops) are recorded as unknown, never as zero, and derivation and `trace info` treat them as unknown.
+
+### REQ-PRB-034: Host state and the link under a tunnel
+- status: planned
+- spec: new
+- design: docs/design/probe.md
+- adr: 0015
+
+Each endpoint records, in generic terms, its kernel clock-sync state and error, its power source and low-power mode, and the result of its pacing check when its log starts, and records a change of clock-sync state or power source during the session. When the egress toward the peer is a tunnel, it records the interface the default route uses beneath it, follows changes of that interface, and samples its counters. A fact the platform cannot observe is recorded as unknown. `trace info` shows each endpoint's suspended time and host state.

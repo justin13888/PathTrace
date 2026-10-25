@@ -1,0 +1,12 @@
+# Experiment definition. Committed before the run; never edited after the run.
+id = "EXP-0009"
+title = "probe --data-cap bounds both endpoints of a standard session on a 100 Mbit/s path"
+hypothesis = """A standard session with `probe --data-cap 30000000` through a 100 Mbit/s, 10 ms namespace \
+path completes; each endpoint sends at most 30 MB (UDP bytes in its session_end); neither endpoint reaches \
+the hard cap (no budget_cap event: the per-saturation allowances planned within the lowered cap); the \
+single-direction saturations P4 and P5 still run; and META records the requested cap as \
+extra.a.data_cap_user."""
+command = "cargo run --release --locked -q -p xtask -- groundtruth probe-data-cap --jobs 1"
+covers = ["crates/pt-probe/src/plan.rs", "crates/pt-probe/src/session.rs", "crates/pt-probe/src/io.rs", "crates/pathtrace/src/main.rs", "tools/netns", "xtask/src/groundtruth.rs"]
+requirements = ["REQ-PRB-014", "REQ-PRB-016", "REQ-SEC-001"]
+supersedes = []

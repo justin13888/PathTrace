@@ -26,3 +26,4 @@ One file per decision that is hard to reverse, affects compatibility, or departs
 | [0012](0012-timestamp-clock-domains.md) | Packet timestamps: kernel software stamps in CLOCK_REALTIME, recorded raw with clock pairs | accepted |
 | [0013](0013-requirement-refinements-from-evidence.md) | Refining requirements from evidence before they are first met | accepted |
 | [0014](0014-linux-and-macos.md) | Linux and macOS are the only supported targets; macOS runs the initiator | accepted |
+| [0015](0015-trace-metadata-scope.md) | Trace metadata records generic facts; vendor names are labels only | accepted |

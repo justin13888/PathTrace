@@ -264,6 +264,52 @@ fn in_any(t: i64, iv: &[(i64, i64)]) -> bool {
     iv.iter().any(|(a, b)| t >= *a && t <= *b)
 }
 
+/// Steps of the unloaded base delay (`pathchange.base-delay-step/1`, derivation.md): `segs` are
+/// the `base_delay` segments (t, delay ns) whose ±5 s window overlaps no loaded interval.
+/// Returns (t, median before, median after) per change, in time order.
+pub fn path_changes(segs: &[(i64, i64)]) -> Option<Vec<(i64, i64, i64)>> {
+    const W: usize = 10;
+    if segs.len() < 2 * W {
+        return None;
+    }
+    let med = |s: &[(i64, i64)]| {
+        let mut v: Vec<i64> = s.iter().map(|x| x.1).collect();
+        v.sort_unstable();
+        v[v.len() / 2]
+    };
+    let mean = |s: &[(i64, i64)]| s.iter().map(|x| x.1 as f64).sum::<f64>() / s.len() as f64;
+    // One-way delay carries the unknown clock offset, so the threshold is absolute: 10 ms, or
+    // five times the median absolute segment-to-segment difference on a noisier path.
+    let mut diffs: Vec<i64> = segs.windows(2).map(|w| (w[1].1 - w[0].1).abs()).collect();
+    diffs.sort_unstable();
+    let limit = (10_000_000f64).max(5.0 * diffs[diffs.len() / 2] as f64);
+    // (score, index, before, after) of every boundary whose median step exceeds the
+    // threshold. The medians gate (robust to outliers); the mean step ranks, because it peaks
+    // at the step itself where the medians plateau over several boundaries.
+    let mut cands: Vec<(f64, usize, i64, i64)> = (W..=segs.len() - W)
+        .filter_map(|k| {
+            let (b, a) = (med(&segs[k - W..k]), med(&segs[k..k + W]));
+            let d = (a - b).abs() as f64;
+            let dm = (mean(&segs[k..k + W]) - mean(&segs[k - W..k])).abs();
+            (d > limit).then_some((dm / limit, k, b, a))
+        })
+        .collect();
+    cands.sort_by(|x, y| y.0.total_cmp(&x.0).then(x.1.cmp(&y.1)));
+    let mut taken: Vec<(usize, i64, i64)> = Vec::new();
+    for (_, k, b, a) in cands {
+        if taken.iter().all(|(j, _, _)| k.abs_diff(*j) >= W) {
+            taken.push((k, b, a));
+        }
+    }
+    taken.sort_unstable();
+    Some(
+        taken
+            .into_iter()
+            .map(|(k, b, a)| (segs[k].0, b, a))
+            .collect(),
+    )
+}
+
 /// Derived output of one direction.
 #[derive(Debug, Default)]
 pub struct DirOut {
@@ -536,6 +582,41 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 .with("source", src(&["pkt"])),
             None => field("unknown", "delay.light-window-min/1", 0.0)
                 .with("reason", "no received light-flow packets"),
+        },
+    );
+    // --- path change (steps of the unloaded base delay) ---
+    let s5 = 5_000_000_000i64;
+    let unloaded: Vec<(i64, i64)> = segs
+        .iter()
+        .copied()
+        .filter(|(t, _)| {
+            ![&loaded[..], others_loaded].iter().any(|iv| {
+                iv.iter()
+                    .any(|(a, b)| *a <= t + s5 + 1_000_000_000 && *b >= t - s5)
+            })
+        })
+        .collect();
+    f = f.with(
+        "path_change",
+        match path_changes(&unloaded) {
+            Some(ch) => field("known", "pathchange.base-delay-step/1", 0.7)
+                .with("count", ch.len())
+                .with(
+                    "changes",
+                    Value::Array(
+                        ch.iter()
+                            .map(|(t, b, a)| {
+                                Value::map()
+                                    .with("t", *t)
+                                    .with("before_ns", *b)
+                                    .with("after_ns", *a)
+                            })
+                            .collect(),
+                    ),
+                )
+                .with("source", src(&["base_delay"])),
+            None => field("unknown", "pathchange.base-delay-step/1", 0.0)
+                .with("reason", "fewer than 20 s of unloaded base delay"),
         },
     );
     if !segs.is_empty() {
@@ -1459,6 +1540,46 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn segs(levels: &[(usize, i64)]) -> Vec<(i64, i64)> {
+        let mut v = Vec::new();
+        for (n, ms) in levels {
+            for _ in 0..*n {
+                let t = v.len() as i64 * 1_000_000_000;
+                // ±1 ms of noise around the level.
+                v.push((t, ms * 1_000_000 + (t / 1_000_000_000 % 3 - 1) * 1_000_000));
+            }
+        }
+        v
+    }
+
+    /// `pathchange.base-delay-step/1`: a step beyond max(5 ms, 20%) is a change, noise and
+    /// small drifts are not, and too short a series is unknown (derivation.md).
+    #[test]
+    fn path_change_finds_base_delay_steps() {
+        assert!(path_changes(&segs(&[(19, 200)])).is_none());
+        assert_eq!(path_changes(&segs(&[(60, 200)])).unwrap(), vec![]);
+        // A relay (230 ms) giving way to a direct path (40 ms) at 30 s.
+        let ch = path_changes(&segs(&[(30, 230), (40, 40)])).unwrap();
+        assert_eq!(ch.len(), 1, "{ch:?}");
+        assert!((ch[0].0 - 30_000_000_000).abs() <= 1_000_000_000, "{ch:?}");
+        assert!(ch[0].1 > 220_000_000 && ch[0].2 < 50_000_000);
+        // A 7 ms shift is below the 10 ms floor; the level itself (here negative, as a clock
+        // offset makes it) does not matter.
+        assert_eq!(
+            path_changes(&segs(&[(30, 200), (30, 207)])).unwrap(),
+            vec![]
+        );
+        assert_eq!(
+            path_changes(&segs(&[(30, -300), (30, -280)]))
+                .unwrap()
+                .len(),
+            1
+        );
+        // Two changes, each found once.
+        let ch = path_changes(&segs(&[(30, 40), (30, 230), (30, 40)])).unwrap();
+        assert_eq!(ch.len(), 2, "{ch:?}");
+    }
 
     #[test]
     fn qdisc_drops_segment_at_iface_change_and_reset() {

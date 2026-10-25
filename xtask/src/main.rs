@@ -4,6 +4,7 @@
 //! - `evidence run <EXP-NNNN>`: run an experiment on a clean tree and pin it to `HEAD`.
 //! - `audit [--release]`: verify the requirement → design → ADR → evidence chain.
 //! - `groundtruth [scenario]`: ground-truth recovery experiments in network namespaces.
+//! - `overlay-gt check <dir>`: check an overlay ground-truth run (tools/overlay-gt/run.sh).
 //!
 //! The rules enforced here are documented in `docs/README.md`, `docs/spec/README.md` and
 //! `docs/evidence/README.md`.
@@ -13,6 +14,7 @@ mod corpus;
 mod evidence;
 mod git;
 mod groundtruth;
+mod overlay_gt;
 
 use std::path::PathBuf;
 
@@ -41,6 +43,11 @@ enum Command {
         #[arg(long, default_value_t = 4)]
         jobs: usize,
     },
+    /// Overlay ground truth: a macOS initiator against a Linux responder (tools/overlay-gt/).
+    OverlayGt {
+        #[command(subcommand)]
+        command: OverlayGtCommand,
+    },
     /// Regenerate the PTF conformance corpus (conformance/v1.0, v1.1 and v1.2).
     Corpus,
     /// Check the requirement → design → ADR → evidence chain.
@@ -49,6 +56,12 @@ enum Command {
         #[arg(long)]
         release: bool,
     },
+}
+
+#[derive(Debug, Subcommand)]
+enum OverlayGtCommand {
+    /// Compare a run directory of tools/overlay-gt/run.sh with the applied impairments.
+    Check { dir: PathBuf },
 }
 
 #[derive(Debug, Subcommand)]
@@ -69,6 +82,14 @@ fn main() -> Result<()> {
         },
         Command::Groundtruth { which, jobs } => {
             if !groundtruth::main(&root, &which, jobs)? {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
+        Command::OverlayGt {
+            command: OverlayGtCommand::Check { dir },
+        } => {
+            if !overlay_gt::check(&dir)? {
                 std::process::exit(1);
             }
             Ok(())

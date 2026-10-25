@@ -320,6 +320,20 @@ pub fn scenarios() -> Vec<Scenario> {
                 "safety",
             )
         },
+        // `probe --data-cap` on a fast path (cli.md): standard's saturations shrink to fit
+        // 30 MB per sender instead of 200 MB, every saturation phase still runs.
+        Scenario {
+            probe_args: "--data-cap 30000000",
+            ..s(
+                "probe-data-cap",
+                "standard",
+                &netem("delay 10ms rate 100mbit limit 1000"),
+                &netem("delay 10ms rate 100mbit limit 1000"),
+                "",
+                "",
+                "safety budget",
+            )
+        },
         s(
             "rate-100m",
             "standard",
@@ -1424,6 +1438,61 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 ">= 2",
                 allow,
                 allow >= 2,
+            );
+        }
+        "probe-data-cap" => {
+            chk(&mut c, "session complete", true, complete, complete);
+            for ep in ["a", "b"] {
+                let sent = t
+                    .events
+                    .iter()
+                    .find(|e| {
+                        e.get("type").and_then(Value::as_str) == Some("session_end")
+                            && e.get("endpoint").and_then(Value::as_str) == Some(ep)
+                    })
+                    .and_then(|e| e.get("detail")?.get("bytes_sent")?.as_u64());
+                chk(
+                    &mut c,
+                    &format!("{ep} UDP bytes sent within --data-cap (30 MB)"),
+                    30_000_000,
+                    format!("{sent:?}"),
+                    sent.is_some_and(|b| b <= 30_000_000),
+                );
+                let cap = event_count(t, "budget_cap", ep);
+                chk(
+                    &mut c,
+                    &format!("hard data cap not reached by {ep} (allowances planned the budget)"),
+                    0,
+                    cap,
+                    cap == 0,
+                );
+            }
+            let phases: Vec<u64> = t
+                .events
+                .iter()
+                .filter(|e| {
+                    e.get("type").and_then(Value::as_str) == Some("phase_start")
+                        && e.get("endpoint").and_then(Value::as_str) == Some("a")
+                })
+                .filter_map(|e| e.get("detail")?.get("phase")?.as_u64())
+                .collect();
+            chk(
+                &mut c,
+                "saturations P4 and P5 ran",
+                "4 5",
+                format!("{phases:?}"),
+                phases.contains(&4) && phases.contains(&5),
+            );
+            let user = t
+                .meta
+                .pointer("/extra/a/data_cap_user")
+                .and_then(Value::as_u64);
+            chk(
+                &mut c,
+                "META records the requested cap",
+                30_000_000,
+                format!("{user:?}"),
+                user == Some(30_000_000),
             );
         }
         "rcvbuf" => {

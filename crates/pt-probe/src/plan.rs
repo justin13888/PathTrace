@@ -90,6 +90,15 @@ impl Profile {
 }
 
 impl Profile {
+    /// This profile with its data cap lowered to `cap` (`probe --data-cap`, cli.md). The cap
+    /// is never raised: a request above the profile's cap leaves it unchanged.
+    pub fn with_data_cap(mut self, cap: Option<u64>) -> Profile {
+        if let Some(c) = cap {
+            self.data_cap = self.data_cap.min(c);
+        }
+        self
+    }
+
     /// Tracking rounds (one short saturation per minute) for a tracking time of `track_s`.
     pub fn track_rounds(track_s: u64) -> u64 {
         track_s / 60
@@ -585,6 +594,19 @@ mod tests {
             assert!(Profile::by_name(p).is_some());
         }
         assert_eq!(Profile::by_name("light").unwrap().data_cap, 2_000_000);
+    }
+
+    #[test]
+    fn user_data_cap_only_lowers() {
+        let std = || Profile::by_name("standard").unwrap();
+        assert_eq!(std().with_data_cap(None).data_cap, 200_000_000);
+        assert_eq!(std().with_data_cap(Some(30_000_000)).data_cap, 30_000_000);
+        assert_eq!(std().with_data_cap(Some(500_000_000)).data_cap, 200_000_000);
+        // Only the cap changes: the time plan stays fixed.
+        let low = std().with_data_cap(Some(30_000_000));
+        assert_eq!(low.phase_plan(0), std().phase_plan(0));
+        // A lower cap shrinks the P8 reserve with it.
+        assert!(ref_tcp_bytes(low.data_cap) < ref_tcp_bytes(std().data_cap));
     }
 
     #[test]

@@ -9,7 +9,7 @@ use crate::section::{Body, Section, flags};
 
 pub const MAGIC: [u8; 8] = [0x89, b'P', b'T', b'F', 0x0d, 0x0a, 0x1a, 0x0a];
 pub const MAJOR: u16 = 1;
-pub const MINOR: u16 = 2;
+pub const MINOR: u16 = 3;
 pub const HEADER_LEN: usize = 16;
 const SECTION_HEADER_LEN: usize = 16;
 

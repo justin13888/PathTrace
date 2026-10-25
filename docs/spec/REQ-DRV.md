@@ -108,3 +108,11 @@ A trace derived from ground truth, exported to netem, re-imposed and re-probed y
 - spec: §6.6, §4
 
 A TCP-terminating proxy is flagged when TCP handshake RTT is far below the UDP minimum RTT, or when the SYN seen by the responder differs from the one sent.
+
+### REQ-DRV-016: Mid-session path changes
+- status: planned
+- spec: new
+- design: docs/design/derivation.md
+- adr: 0015
+
+Derivation reports, per direction, the times at which the unloaded base delay changed in a step (before and after values), so that a trace whose path changed mid-session (a relay switch, a route or interface change, a suspend) is identifiable from its raw observations alone, without vendor state.
