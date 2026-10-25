@@ -252,7 +252,7 @@ impl Offset {
             .with("skew_source", self.skew_source.as_str())
             .with("skew_exchange_ppb", self.skew_exchange.map(|k| k * 1e9))
             .with(
-                "skew_uncertainty_ppb",
+                "skew_exchange_uncertainty_ppb",
                 self.skew_exchange_uncertainty.map(|k| k * 1e9),
             )
             .with("skew_pairs_ppb", self.skew_pairs.map(|k| k * 1e9))
@@ -480,6 +480,63 @@ mod tests {
         assert_eq!(o.skew_source, SkewSource::Exchange);
         assert!((o.skew + 40e-6).abs() < 1e-6, "skew {}", o.skew);
         assert_eq!(o.confidence(), 0.7);
+    }
+
+    fn rows(cols: &[(&str, Vec<i64>)]) -> crate::raw::Rows {
+        crate::raw::Rows {
+            n: cols[0].1.len(),
+            cols: cols
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.iter().copied().map(Some).collect()))
+                .collect(),
+        }
+    }
+
+    /// Pairs at 1 Hz over 30 s for an endpoint whose MONO_RAW runs `ppm` fast
+    /// against REALTIME.
+    fn pairs(ppm: i64) -> crate::raw::Rows {
+        let real: Vec<i64> = (0..=30i64).map(|s| T0 + s * 1_000_000_000).collect();
+        let mono = real
+            .iter()
+            .map(|r| r + (r - T0) / 1_000_000 * ppm)
+            .collect();
+        rows(&[("real", real), ("mono", mono)])
+    }
+
+    #[test]
+    fn from_raw_takes_the_skew_from_both_endpoints_pairs() {
+        // 5 s of exchanges: too short for the envelope, so the skew comes from
+        // the pairs, b's MONO_RAW 16 ppm fast and a's 4 ppm fast against
+        // REALTIME: b.mono/a.mono − 1 = 1.000016 / 1.000004 − 1 ≈ +11.99996 ppm.
+        let ex = exchanges(20, 250_000_000, 12e-6, |_| (10e6, 10e6));
+        let col = |f: fn(&Exchange) -> i64| ex.iter().map(f).collect::<Vec<_>>();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "exchange[a]".into(),
+            rows(&[
+                ("t1", col(|e| e.t1)),
+                ("t2", col(|e| e.t2)),
+                ("t3", col(|e| e.t3)),
+                ("t4", col(|e| e.t4)),
+            ]),
+        );
+        raw.tables.insert("pairs[a]".into(), pairs(4));
+        raw.tables.insert("pairs[b]".into(), pairs(16));
+        let tb = TimeBase::from_raw(&raw);
+        let o = tb.off.as_ref().unwrap();
+        assert_eq!(o.skew_source, SkewSource::Pairs);
+        let want = 1.000_016 / 1.000_004 - 1.0;
+        assert!((o.skew - want).abs() < 1e-9, "skew {}", o.skew);
+        let v = o.to_value();
+        assert_eq!(v.get("skew_source").and_then(Value::as_str), Some("pairs"));
+        let ppb = v.get("skew_ppb").and_then(Value::as_f64).unwrap();
+        assert!((ppb - want * 1e9).abs() < 1.0, "skew_ppb {ppb}");
+
+        // Without b's pairs there is no rate to compose: no pairs skew.
+        raw.tables.remove("pairs[b]");
+        let tb = TimeBase::from_raw(&raw);
+        let o = tb.off.as_ref().unwrap();
+        assert_eq!((o.skew_pairs, o.skew_source), (None, SkewSource::None));
     }
 
     #[test]
