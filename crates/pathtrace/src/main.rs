@@ -134,7 +134,8 @@ enum ExportCmd {
     /// Write Mahimahi up/down traces (1504-byte opportunities, ms timestamps).
     Mahimahi {
         trace: PathBuf,
-        /// Output prefix: writes <prefix>.up (a->b) and <prefix>.down (b->a).
+        /// Output prefix: writes <prefix>.up (a->b) and <prefix>.down (b->a), each with a
+        /// <prefix>.<up|down>.json sidecar listing the gaps filled at the median saturated rate.
         #[arg(short, long)]
         out: PathBuf,
     },
@@ -378,17 +379,30 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
             ExportCmd::Mahimahi { trace, out } => {
                 let f = pt_probe::merge::read_trace(&trace).map_err(|e| e.to_string())?;
                 for (dir, ext) in [("a_to_b", "up"), ("b_to_a", "down")] {
-                    let (lines, notes) = pt_derive::export::mahimahi_lines(&f, dir);
-                    for n in notes {
+                    let e = pt_derive::export::mahimahi_lines(&f, dir);
+                    for n in &e.notes {
                         eprintln!("note: {n}");
                     }
-                    if lines.is_empty() {
+                    let Some(sidecar) = e.sidecar.filter(|_| !e.lines.is_empty()) else {
                         continue;
-                    }
+                    };
                     let p = out.with_extension(ext);
-                    let text: String = lines.iter().map(|l| format!("{l}\n")).collect();
-                    std::fs::write(&p, text).map_err(|e| e.to_string())?;
+                    // Stream the lines: a deep trace at 1 Gbit/s has ~10^8 of them.
+                    use std::io::Write as _;
+                    let mut w = std::io::BufWriter::new(
+                        std::fs::File::create(&p).map_err(|e| e.to_string())?,
+                    );
+                    for l in &e.lines {
+                        writeln!(w, "{l}").map_err(|e| e.to_string())?;
+                    }
+                    w.flush().map_err(|e| e.to_string())?;
                     println!("{}", p.display());
+                    let sp = out.with_extension(format!("{ext}.json"));
+                    let json =
+                        serde_json::to_string_pretty(&pt_format::jsonl::cbor_to_json(&sidecar))
+                            .map_err(|e| e.to_string())?;
+                    std::fs::write(&sp, json + "\n").map_err(|e| e.to_string())?;
+                    println!("{}", sp.display());
                 }
             }
         },
