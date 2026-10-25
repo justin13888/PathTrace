@@ -1,5 +1,6 @@
 //! Merge two observation logs into one canonical PTF trace (REQ-PRB-018,
-//! docs/design/probe.md §5). Lossless: every logged row ends up in the trace.
+//! docs/design/probe.md §5). Every logged row ends up in the trace; what the trace does not
+//! keep is listed in ptf-format.md ("What `merge` does not keep").
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -26,8 +27,79 @@ struct Col {
 
 #[derive(Debug, Clone, Default)]
 struct Tab {
+    /// Section kind the table was first logged in.
+    kind: [u8; 4],
     cols: Vec<Col>,
     rows: usize,
+}
+
+/// Log tables the join reads (`pairs` maps clocks for the stamp checks).
+const JOIN_TABLES: [&str; 4] = ["tx", "txts", "rx", "pairs"];
+/// Columns of the log tables the join knows (ptf-format.md, observation logs).
+const TX_COLS: [&str; 11] = [
+    "sock",
+    "flow",
+    "seq",
+    "size",
+    "phase",
+    "train",
+    "train_idx",
+    "tos_tx",
+    "id",
+    "tx_intended",
+    "tx_user_lag",
+];
+const TXTS_COLS: [&str; 4] = ["sock", "id", "kind", "real"];
+const RX_COLS: [&str; 10] = [
+    "sock",
+    "flow",
+    "seq",
+    "size",
+    "rx",
+    "rx_src",
+    "tos_rx",
+    "ttl_rx",
+    "src",
+    "rxq_drops",
+];
+
+/// Whether a log column's values can go through [`Tab`] (integers only).
+fn integer(c: &Column) -> Option<bool> {
+    match &c.data {
+        Data::Known {
+            values: Values::U64(_),
+            ..
+        } => Some(false),
+        Data::Known {
+            values: Values::I64(_),
+            ..
+        } => Some(true),
+        _ => None,
+    }
+}
+
+/// Names of `f`'s tables that [`Tab`] cannot hold without loss: a column that is not an
+/// integer, a column whose signedness or metadata differs between chunks, or a table directory
+/// key other than `attrs.endpoint` naming `role` (merge writes exactly that one).
+fn lossy_tables(f: &PtfFile, role: &str) -> HashSet<String> {
+    let own = Value::map().with("endpoint", role);
+    let mut first: HashMap<(&str, &str), (bool, &Map)> = HashMap::new();
+    let mut out = HashSet::new();
+    for t in f.sections[1..].iter().flat_map(Section::tables) {
+        let keys_ok = t.meta.iter().all(|(k, v)| k.0 == "attrs" && *v == own);
+        let cols_ok = t.columns.iter().all(|c| {
+            integer(c).is_some_and(|signed| {
+                let seen = *first
+                    .entry((t.name.as_str(), c.name.as_str()))
+                    .or_insert((signed, &c.meta));
+                seen == (signed, &c.meta)
+            })
+        });
+        if !(keys_ok && cols_ok) {
+            out.insert(t.name.clone());
+        }
+    }
+    out
 }
 
 impl Tab {
@@ -35,7 +107,10 @@ impl Tab {
         self.cols.iter().find(|c| c.name == name)
     }
 
-    fn append(&mut self, t: &Table) {
+    fn append(&mut self, kind: &[u8; 4], t: &Table) {
+        if self.kind == [0; 4] {
+            self.kind = *kind;
+        }
         for c in &t.columns {
             let (signed, rows): (bool, Vec<Option<i64>>) = match c.values() {
                 Some(Values::U64(_)) => (
@@ -150,6 +225,16 @@ fn col(
     }
 }
 
+/// Give `c` the metadata of the log column `src` it comes from; `c`'s own keys (`unit`,
+/// `clock`, `enum`) win.
+fn inherit(c: &mut Col, src: Option<&Col>) {
+    if let Some(s) = src {
+        let mut m = s.meta.clone();
+        m.extend(std::mem::take(&mut c.meta));
+        c.meta = m;
+    }
+}
+
 fn copy_col(src: &Col, rows: Vec<Option<i64>>) -> Col {
     Col {
         rows,
@@ -197,6 +282,30 @@ struct Log {
     flows: Vec<Value>,
     events: Vec<Value>,
     info: LogInfo,
+    /// Tables [`Tab`] cannot hold without loss: copied chunk by chunk, never from `tables`.
+    lossy: HashSet<String>,
+    /// Sections and table chunks copied into the trace unchanged.
+    copied: Vec<Section>,
+}
+
+impl Log {
+    /// A log with no rows, standing in for a missing one.
+    fn empty(role: &str) -> Log {
+        Log {
+            role: role.into(),
+            meta: Value::map(),
+            tables: BTreeMap::new(),
+            flows: Vec::new(),
+            events: Vec::new(),
+            info: LogInfo {
+                role: role.into(),
+                content_digest: String::new(),
+                stopped: None,
+            },
+            lossy: HashSet::new(),
+            copied: Vec::new(),
+        }
+    }
 }
 
 fn read_log(path: &Path) -> pt_format::Result<Log> {
@@ -214,9 +323,11 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
         .and_then(Value::as_str)
         .unwrap_or("a")
         .to_string();
+    let lossy = lossy_tables(&f, &role);
     let mut tables: BTreeMap<String, Tab> = BTreeMap::new();
     let mut flows = Vec::new();
     let mut events = Vec::new();
+    let mut copied = Vec::new();
     for s in &f.sections[1..] {
         match &s.kind {
             b"FLOW" => flows.extend(
@@ -233,11 +344,21 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
                     .iter()
                     .cloned(),
             ),
-            _ => {
+            // Generic table sections without a head: their tables are merged.
+            b"OBSV" | b"CLOK" | b"CTXS" if s.head().is_some_and(Map::is_empty) => {
                 for t in s.tables() {
-                    tables.entry(t.name.clone()).or_default().append(t);
+                    let lost = lossy.contains(&t.name);
+                    if lost {
+                        copied
+                            .push(Section::new(&s.kind, s.flags, Map::new()).with_table(t.clone()));
+                    }
+                    if !lost || JOIN_TABLES.contains(&t.name.as_str()) {
+                        tables.entry(t.name.clone()).or_default().append(&s.kind, t);
+                    }
                 }
             }
+            // A head, an opaque body or another kind: merge does not know what it means.
+            _ => copied.push(s.clone()),
         }
     }
     Ok(Log {
@@ -246,6 +367,8 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
         tables,
         flows,
         events,
+        lossy,
+        copied,
         info: LogInfo {
             role,
             content_digest: rep.content_digest,
@@ -659,10 +782,11 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
             continue;
         };
         let e = stamps.entry((sock, id)).or_default();
-        if kind == 0 {
-            e.0.get_or_insert(real);
-        } else {
-            e.1.get_or_insert(real);
+        match kind {
+            0 => _ = e.0.get_or_insert(real),
+            1 => _ = e.1.get_or_insert(real),
+            // A kind merge does not know stays in `txts_unmatched`.
+            _ => {}
         }
     }
     // (flow, seq) -> rx row indices
@@ -706,6 +830,9 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
     let mut out: Vec<Vec<Option<i64>>> = (0..20).map(|_| Vec::with_capacity(order.len())).collect();
     let mut used: HashMap<(i64, i64), usize> = HashMap::new();
     let mut dup: Vec<Vec<Option<i64>>> = vec![Vec::new(); 10];
+    // Per `pkt` row its first arrival, and the later arrivals in `dup` order.
+    let mut firsts: Vec<Option<usize>> = Vec::with_capacity(order.len());
+    let mut dup_js: Vec<usize> = Vec::new();
     for &i in &order {
         let key = (tx_flow[i].unwrap_or(-1), tx_seq[i].unwrap_or(-1));
         let st = t_sock[i]
@@ -715,8 +842,10 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
             .unwrap_or((None, None));
         let arr = arrivals.get(&key);
         let first = arr.and_then(|v| v.first()).copied();
+        firsts.push(first);
         if let Some(v) = arr {
             used.insert(key, v.len());
+            dup_js.extend(v.iter().skip(1));
             for &j in v.iter().skip(1) {
                 for (k, val) in [
                     rx_flow[j],
@@ -840,6 +969,68 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
             );
         }
     }
+    // Each column keeps its log column's metadata (ptf-format.md, what `merge` keeps).
+    let pkt_src = [
+        (tx, "flow"),
+        (tx, "seq"),
+        (tx, "size"),
+        (tx, "phase"),
+        (tx, "train"),
+        (tx, "train_idx"),
+        (tx, "tos_tx"),
+        (tx, "sock"),
+        (tx, "tx_intended"),
+        (tx, "tx_user_lag"),
+        (txts, "real"),
+        (&empty, ""),
+        (rx, "rx"),
+        (rx, "rx_src"),
+        (rx, "tos_rx"),
+        (rx, "ttl_rx"),
+        (rx, "src"),
+        (rx, "sock"),
+        (rx, "size"),
+        (rx, "rxq_drops"),
+    ];
+    for (c, (t, n)) in pkt.iter_mut().zip(pkt_src) {
+        inherit(c, t.col(n));
+    }
+    for c in &mut dup_cols {
+        let n = match c.name.as_str() {
+            "rx_sock" => "sock",
+            n => n,
+        };
+        inherit(c, rx.col(n));
+    }
+    // Columns merge does not know are carried as `tx.<name>` and `rx.<name>`.
+    for c in tx
+        .cols
+        .iter()
+        .filter(|c| !TX_COLS.contains(&c.name.as_str()))
+    {
+        pkt.push(Col {
+            name: format!("tx.{}", c.name),
+            ..copy_col(c, order.iter().map(|&i| c.rows[i]).collect())
+        });
+    }
+    for c in rx
+        .cols
+        .iter()
+        .filter(|c| !RX_COLS.contains(&c.name.as_str()))
+    {
+        let name = format!("rx.{}", c.name);
+        pkt.push(Col {
+            name: name.clone(),
+            ..copy_col(
+                c,
+                firsts.iter().map(|f| f.and_then(|j| c.rows[j])).collect(),
+            )
+        });
+        dup_cols.push(Col {
+            name,
+            ..copy_col(c, dup_js.iter().map(|&j| c.rows[j]).collect())
+        });
+    }
     // Arrivals with no matching transmission (sender log lost or truncated).
     let mut un: Vec<usize> = (0..rx.rows)
         .filter(|&j| {
@@ -856,10 +1047,11 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
     (pkt, dup_cols, unmatched, check)
 }
 
-/// Kernel TX stamps of `log` that the join does not use: stamps whose (sock, id) matches no
-/// `tx` row (echoes, failed sends, mispredicted ids), and every stamp after the first of its
-/// (sock, id, kind), which the join skips (probe.md §4.1). Kept as `txts_unmatched` so
-/// nothing is dropped (P1).
+/// Kernel TX stamps of `log` that `pkt` does not hold: stamps whose (sock, id) matches no
+/// `tx` row (echoes, failed sends, mispredicted ids), every stamp after the first of its
+/// (sock, id, kind), which the join skips (probe.md §4.1), SND stamps of transmissions with no
+/// SCHED stamp, stamps with a null key or a kind merge does not know, and stamps with a value in
+/// a column merge does not know. Kept as `txts_unmatched` so no stamp is dropped (P1).
 fn unmatched_stamps(log: &Log, ids: &TxIds) -> Vec<Col> {
     let empty = Tab::default();
     let tx = log.tables.get("tx").unwrap_or(&empty);
@@ -875,11 +1067,31 @@ fn unmatched_stamps(log: &Log, ids: &TxIds) -> Vec<Col> {
         rows_of(txts, "id"),
         rows_of(txts, "kind"),
     );
-    let mut seen: HashSet<(i64, i64, Option<i64>)> = HashSet::new();
+    let real = rows_of(txts, "real");
+    // The stamps the join reads: per (sock, id, kind) the first with all four values.
+    let full = |j: usize| sock[j].zip(id[j]).zip(kind[j].zip(real[j])).is_some();
+    let sched: HashSet<(i64, i64)> = (0..txts.rows)
+        .filter(|&j| full(j) && kind[j] == Some(0))
+        .filter_map(|j| sock[j].zip(id[j]))
+        .collect();
+    let other: Vec<&Col> = txts
+        .cols
+        .iter()
+        .filter(|c| !TXTS_COLS.contains(&c.name.as_str()))
+        .collect();
+    let mut seen: HashSet<(i64, i64, i64)> = HashSet::new();
     let keep: Vec<usize> = (0..txts.rows)
-        .filter(|&j| match sock[j].zip(id[j]) {
-            None => true,
-            Some(k) => !sent.contains(&k) || !seen.insert((k.0, k.1, kind[j])),
+        .filter(|&j| {
+            let (Some(s), Some(i), Some(k)) = (sock[j], id[j], kind[j]) else {
+                return true;
+            };
+            // `pkt` holds a stamp only if a transmission joined it, as its first of the kind,
+            // and an SND stamp only next to a SCHED one (`tx_snd_lag`).
+            let held = full(j)
+                && sent.contains(&(s, i))
+                && (k == 0 || (k == 1 && sched.contains(&(s, i))))
+                && seen.insert((s, i, k));
+            !held || other.iter().any(|c| c.rows[j].is_some())
         })
         .collect();
     txts.cols
@@ -1089,22 +1301,27 @@ pub fn merge_file(
     let ids_b = b.as_ref().map(tx_ids).unwrap_or_default();
     let ids_of = |l: &Log| if l.role == "a" { &ids_a } else { &ids_b };
     let mut obsv_tables = Vec::new();
+    // Without the responder's log, its arrivals at the initiator are still kept as `unmatched`.
+    let absent = Log::empty("b");
     for (sender, receiver) in [(Some(&a), b.as_ref()), (b.as_ref(), Some(&a))] {
-        let Some(sender) = sender else { continue };
+        let known = sender.is_some();
+        let sender = sender.unwrap_or(&absent);
         let dir = if sender.role == "a" {
             "a_to_b"
         } else {
             "b_to_a"
         };
         let (pkt, dup, unmatched, check) = join_direction(sender, receiver, ids_of(sender));
-        report.stamps.insert(dir.into(), check);
+        if known {
+            report.stamps.insert(dir.into(), check);
+            report
+                .pkt_rows
+                .insert(dir.into(), pkt.first().map_or(0, |c| c.rows.len()));
+        }
         let attrs = Value::map()
             .with("dir", dir)
             .with("sender", sender.role.as_str())
             .with("receiver", if sender.role == "a" { "b" } else { "a" });
-        report
-            .pkt_rows
-            .insert(dir.into(), pkt.first().map_or(0, |c| c.rows.len()));
         report
             .unmatched
             .insert(dir.into(), unmatched.first().map_or(0, |c| c.rows.len()));
@@ -1135,17 +1352,27 @@ pub fn merge_file(
             &Value::map().with("endpoint", l.role.as_str()),
         ));
     }
-    // Per-endpoint raw tables copied as-is; tables merge does not know go to OBSV unchanged.
+    // Per-endpoint raw tables copied with every column; tables merge does not know go to the
+    // section kind they were logged in, and tables it cannot re-chunk are copied unchanged.
     let mut clok = Vec::new();
     let mut ctxs = Vec::new();
+    let mut copied = Vec::new();
     for l in std::iter::once(&a).chain(b.iter()) {
         let attrs = Value::map().with("endpoint", l.role.as_str());
+        copied.extend(l.copied.iter().cloned());
         for (name, t) in &l.tables {
+            if l.lossy.contains(name) {
+                continue;
+            }
             let target = match name.as_str() {
                 "tx" | "txts" | "rx" => continue,
                 "pairs" | "exchange" => &mut clok,
                 "ifstats" | "ifstats_underlay" | "wifi" | "netstack" | "qdisc" => &mut ctxs,
-                _ => &mut obsv_tables,
+                _ => match &t.kind {
+                    b"CLOK" => &mut clok,
+                    b"CTXS" => &mut ctxs,
+                    _ => &mut obsv_tables,
+                },
             };
             target.extend(chunks(name, &t.cols, &attrs));
         }
@@ -1167,6 +1394,7 @@ pub fn merge_file(
     for t in ctxs {
         sections.push(Section::new(b"CTXS", 0, Map::new()).with_table(t));
     }
+    sections.extend(copied);
     // EVNT: all events, pii pointers regenerated from wrapped values.
     let events: Vec<Value> = a
         .events
@@ -1268,6 +1496,7 @@ mod tests {
 
     fn tab(cols: &[(&str, Vec<Option<i64>>)]) -> Tab {
         Tab {
+            kind: *b"OBSV",
             rows: cols.first().map_or(0, |c| c.1.len()),
             cols: cols
                 .iter()
@@ -1297,16 +1526,9 @@ mod tests {
             ("real", pick(3)),
         ]);
         Log {
-            role: "a".into(),
-            meta: Value::map(),
             tables: BTreeMap::from([("tx".to_string(), tx), ("txts".to_string(), txts)]),
-            flows: Vec::new(),
             events,
-            info: LogInfo {
-                role: "a".into(),
-                content_digest: String::new(),
-                stopped: None,
-            },
+            ..Log::empty("a")
         }
     }
 
