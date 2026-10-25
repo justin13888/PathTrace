@@ -1091,5 +1091,33 @@ mod tests {
         let m = T0 + 20_000_000_000;
         let bm = bmono(c(m as f64)).unwrap().round() as i64;
         assert!((o2.b_to_a(bm) - m).abs() > 10_000_000_000);
+
+        // A b time after the wake and before b's later pair: placed at the pair, it counts as
+        // before the suspend and maps a whole suspend early.
+        let m = T0 + 330_800_000_000;
+        let bm = bmono(c(m as f64)).unwrap().round() as i64;
+        assert!(bm > sb && bm < at);
+        assert!((m - o.b_to_a(bm)) > susp / 2);
+        // With b's suspend event 5 ms after its wake, the suspend is placed there and that
+        // time maps to its a.mono.
+        let woke = sb + 5_000_000;
+        raw.events = vec![stall("b", woke, "suspend"), stall("a", sb, "suspend")];
+        let tb = TimeBase::from_raw(&raw);
+        assert!(tb.a.suspends.list.is_empty());
+        assert_eq!(
+            (tb.b.suspends.list[0].at, tb.b.suspends.list[0].pair),
+            (woke, at)
+        );
+        let o = tb.off.as_ref().unwrap();
+        assert!((o.skew - 20e-6).abs() < 1e-8, "skew {}", o.skew);
+        for m in [
+            T0 + 20_000_000_000,
+            T0 + 330_800_000_000,
+            T0 + 390_000_000_000,
+        ] {
+            let bm = bmono(c(m as f64)).unwrap().round() as i64;
+            let got = o.b_to_a(bm);
+            assert!((got - m).abs() < 1_000, "a.mono {m}: {got}");
+        }
     }
 }
