@@ -266,7 +266,8 @@ fn col_meta<'a>(t: &'a Table, col: &str, key: &str) -> Option<&'a str> {
 
 /// Stamps with a null key field or a value in a `txts` column merge does not know stay in
 /// `txts_unmatched`; `dup` columns keep their `rx` column's metadata; the trace's
-/// `redaction` follows the logs'.
+/// `redaction` follows the logs' (common level, `full` when they differ or one records none,
+/// the initiator's own level when merged alone).
 #[test]
 fn merge_keeps_null_and_unknown_stamps_and_dup_metadata() {
     let dir = scratch("merge_keeps_null_and_unknown_stamps_and_dup_metadata");
@@ -360,6 +361,13 @@ fn merge_keeps_null_and_unknown_stamps_and_dup_metadata() {
     let b_full = write(&dir, "b_full.ptflog", vec![meta_redacted("b", "full")]);
     let (f, _) = merge_file(&a, Some(&b_full), &tool()).unwrap();
     assert_eq!(level(&f).as_deref(), Some("full"));
+    // A responder log that records no level gives `full`.
+    let b_none = write(&dir, "b_none.ptflog", vec![meta("b")]);
+    let (f, _) = merge_file(&a, Some(&b_none), &tool()).unwrap();
+    assert_eq!(level(&f).as_deref(), Some("full"));
+    // The initiator's log alone gives its own level.
+    let (f, _) = merge_file(&a, None, &tool()).unwrap();
+    assert_eq!(level(&f).as_deref(), Some("shareable"));
 }
 
 #[test]
