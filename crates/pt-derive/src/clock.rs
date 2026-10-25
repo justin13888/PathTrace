@@ -5,19 +5,44 @@ use pt_format::Value;
 use crate::raw::Raw;
 
 /// Method name of the REALTIME → MONO_RAW map.
-pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/2";
+pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/3";
 
 /// Growth of boot − mono between consecutive clock pairs above which the endpoint was
 /// suspended (the prober's `STALL_NS`, probe.md §4.3).
 const SUSPEND_NS: i64 = 2_000_000;
 
+/// How far a suspend event's `suspended_ns` may differ from the pairs' growth `grew` of the same
+/// suspend: the two measure it between different reads, with BOOTTIME slewed against MONO_RAW
+/// in between (derivation.md "Suspends").
+fn len_tol(grew: i64) -> i64 {
+    SUSPEND_NS.max(grew / 10)
+}
+
+/// Whether an event's `suspended_ns` is the length `grew` the pairs found for a suspend.
+fn matches_len(ns: i64, grew: i64) -> bool {
+    (ns - grew).abs() <= len_tol(grew)
+}
+
 /// One suspend of an endpoint: MONO_RAW stood still for `ns` while the clocks that count
-/// suspend ran, somewhere between the clock pairs at mono `since` and `at`. It is placed at `at`.
+/// suspend ran, somewhere between the clock pairs at mono `since` and `pair`. It is placed at
+/// `at`: the endpoint's first `stall {cause: "suspend"}` event in that interval that is not
+/// another suspend's, else `pair` (derivation.md "Suspends").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Suspend {
     pub at: i64,
+    pub pair: i64,
     pub since: i64,
     pub ns: i64,
+}
+
+impl Suspend {
+    fn placed_by(&self) -> &'static str {
+        if self.at < self.pair {
+            "stall_event"
+        } else {
+            "pair"
+        }
+    }
 }
 
 /// Suspends of one endpoint's MONO_RAW (derivation.md "Suspends"), sorted by `at`.
@@ -53,8 +78,8 @@ impl Suspends {
         cont - acc
     }
 
-    /// Whether `mono` lies strictly between the two pairs of a suspend, where it is unknown
-    /// whether it was before or after the suspend.
+    /// Whether `mono` lies strictly between the earlier pair and the placement of a suspend,
+    /// where it is unknown whether it was before or after the suspend.
     pub fn ambiguous(&self, mono: i64) -> bool {
         self.list.iter().any(|s| mono > s.since && mono < s.at)
     }
@@ -81,8 +106,32 @@ impl RealToMono {
         }
         pts.sort();
         pts.dedup_by_key(|p| p.0);
+        // The pacer's suspend events (probe.md §4.3), each recorded after a wake: (t,
+        // suspended_ns).
+        let mut woke: Vec<(i64, Option<i64>)> = raw
+            .events_of("stall")
+            .filter(|e| e.get("endpoint").and_then(Value::as_str) == Some(ep))
+            .filter(|e| {
+                e.get("detail")
+                    .and_then(|d| d.get("cause"))
+                    .and_then(Value::as_str)
+                    == Some("suspend")
+            })
+            .filter_map(|e| {
+                let ns = e
+                    .get("detail")
+                    .and_then(|d| d.get("suspended_ns"))
+                    .and_then(Value::as_u64)
+                    .map(|n| n as i64);
+                Some((e.get("t")?.as_u64()? as i64, ns))
+            })
+            .collect();
+        woke.sort_unstable();
         let mut steps = Vec::new();
         let mut suspends = Suspends::default();
+        // The previous interval's suspend, while no event has placed it: its event may be
+        // recorded after its later pair, that is in this interval.
+        let mut unplaced: Option<i64> = None;
         for w in pts.windows(2) {
             let (d0, d1) = (w[0].0 - w[0].1, w[1].0 - w[1].1);
             if (d1 - d0).abs() > 1_000_000 {
@@ -90,13 +139,38 @@ impl RealToMono {
             }
             if let (Some(b0), Some(b1)) = (w[0].2, w[1].2) {
                 let grew = (b1 - w[1].1) - (b0 - w[0].1);
+                let (since, pair) = (w[0].1, w[1].1);
+                let mut events = woke[woke.partition_point(|e| e.0 <= since)..]
+                    .iter()
+                    .take_while(|e| e.0 <= pair)
+                    .peekable();
+                // The first event after an unplaced suspend's later pair is taken as that
+                // suspend's when its length matches (or is not recorded), never as this one's.
+                if let Some(prev) = unplaced.take()
+                    && events
+                        .peek()
+                        .is_some_and(|e| e.1.is_none_or(|ns| matches_len(ns, prev)))
+                {
+                    events.next();
+                }
                 if grew > SUSPEND_NS {
+                    // Placed at the earliest time known to follow this interval's wake: an event
+                    // longer than this interval's growth belongs to another suspend.
+                    let at = events
+                        .find(|e| e.1.is_none_or(|ns| ns <= grew + len_tol(grew)))
+                        .map_or(pair, |e| e.0);
                     suspends.list.push(Suspend {
-                        at: w[1].1,
-                        since: w[0].1,
+                        at,
+                        pair,
+                        since,
                         ns: grew,
                     });
+                    if at == pair {
+                        unplaced = Some(grew);
+                    }
                 }
+            } else {
+                unplaced = None;
             }
         }
         suspends.list.sort();
@@ -112,7 +186,8 @@ impl RealToMono {
     }
 
     /// Map a REALTIME value to MONO_RAW. Between the two pairs of a suspend the map is a step:
-    /// the earlier pair's offset up to the later pair's mono, then that mono.
+    /// the earlier pair's offset below the placement, then the later pair's offset, never below
+    /// the placement.
     pub fn map(&self, real: i64) -> Option<i64> {
         let p = &self.pts;
         match p.len() {
@@ -123,13 +198,13 @@ impl RealToMono {
                 let (a, b) = (p[i - 1], p[i]);
                 if real > a.0
                     && real < b.0
-                    && self
-                        .suspends
-                        .list
-                        .binary_search_by_key(&b.1, |s| s.at)
-                        .is_ok()
+                    && let Some(s) = self.suspends.list.iter().find(|s| s.pair == b.1)
                 {
-                    return Some((a.1 + (real - a.0)).min(b.1));
+                    let before = a.1 + (real - a.0);
+                    if before < s.at {
+                        return Some(before);
+                    }
+                    return Some((b.1 - (b.0 - real)).max(s.at));
                 }
                 let slope = (b.1 - a.1) as f64 / (b.0 - a.0).max(1) as f64;
                 Some(a.1 + ((real - a.0) as f64 * slope).round() as i64)
@@ -173,9 +248,11 @@ impl RealToMono {
                         .iter()
                         .map(|s| {
                             Value::map()
-                                .with("mono", s.at)
+                                .with("mono", s.pair)
                                 .with("since_mono", s.since)
                                 .with("suspended_ns", s.ns)
+                                .with("placed_mono", s.at)
+                                .with("placed_by", s.placed_by())
                         })
                         .collect(),
                 ),
@@ -251,8 +328,9 @@ impl Offset {
     pub fn from_raw(raw: &Raw, a: &RealToMono, b: &RealToMono) -> Option<Offset> {
         let t = raw.table("exchange[a]")?;
         let (sa, sb) = (&a.suspends, &b.suspends);
-        // An exchange with a time between the two pairs of a suspend is left out: on which
-        // side of the suspend that time lies is unknown, so its θ could be off by all of it.
+        // An exchange with a time between the earlier pair and the placement of a suspend is
+        // left out: on which side of the suspend that time lies is unknown, so its θ could be
+        // off by all of it.
         let ex: Vec<Exchange> = (0..t.n)
             .filter_map(|i| {
                 let (t1, t2, t3, t4) = (
@@ -286,7 +364,7 @@ impl Offset {
     }
 
     /// Fit the offset to `ex`, with `pairs` the pairs-derived skew if any
-    /// (derivation.md "Time base", `clock.exchange-minfilter/3`).
+    /// (derivation.md "Time base", `clock.exchange-minfilter/4`).
     pub fn fit(ex: &[Exchange], pairs: Option<f64>) -> Option<Offset> {
         let s: Vec<&Exchange> = ex
             .iter()
@@ -400,7 +478,7 @@ impl Offset {
 }
 
 /// Method name of the b.mono → a.mono offset.
-pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/3";
+pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/4";
 
 /// Slope of the line under every point that minimises the summed vertical
 /// distance to them: the lower convex hull's edge spanning the points' mean x.
@@ -700,17 +778,21 @@ mod tests {
             list: vec![
                 Suspend {
                     at: 1_000,
+                    pair: 1_000,
                     since: 900,
                     ns: 500,
                 },
                 Suspend {
                     at: 2_000,
+                    pair: 2_050,
                     since: 1_900,
                     ns: 100,
                 },
             ],
         };
         assert!(s.ambiguous(950) && !s.ambiguous(900) && !s.ambiguous(1_000));
+        // A time at or after a placement that an event narrowed follows the wake.
+        assert!(s.ambiguous(1_999) && !s.ambiguous(2_000) && !s.ambiguous(2_025));
         assert_eq!(s.to_cont(999), 999);
         assert_eq!(s.to_cont(1_000), 1_500);
         assert_eq!(s.to_cont(2_500), 3_100);
@@ -746,12 +828,16 @@ mod tests {
             m.suspends.list,
             vec![Suspend {
                 at,
+                pair: at,
                 since: at - 1_000_000_000,
                 ns: 900_000_000_000
             }]
         );
         let v = m.to_value(PAIRS_METHOD);
         let s = v.get("suspends").and_then(Value::as_array).unwrap();
+        assert_eq!(s[0].get("mono").and_then(Value::as_i64), Some(at));
+        assert_eq!(s[0].get("placed_mono").and_then(Value::as_i64), Some(at));
+        assert_eq!(s[0].get("placed_by").and_then(Value::as_str), Some("pair"));
         assert_eq!(
             s[0].get("suspended_ns").and_then(Value::as_i64),
             Some(900e9 as i64)
@@ -778,6 +864,133 @@ mod tests {
         let m = RealToMono::from_raw(&raw, "a");
         assert!(m.suspends.list.is_empty());
         assert!(m.map(r0 + 500_000_000_000).unwrap() > T0 + 10_400_000_000);
+    }
+
+    /// An EVNT `stall` event of `ep` at mono `t`.
+    fn stall(ep: &str, t: i64, cause: &str) -> Value {
+        Value::map()
+            .with("t", t as u64)
+            .with("clock", format!("{ep}.mono"))
+            .with("endpoint", ep)
+            .with("type", "stall")
+            .with("detail", Value::map().with("cause", cause))
+    }
+
+    #[test]
+    fn a_suspend_event_in_the_pair_interval_narrows_the_placement() {
+        let susp = 900e9 as i64;
+        let mut raw = Raw::default();
+        raw.tables
+            .insert("pairs[a]".into(), suspended_pairs(30, 10_000_000_000, susp));
+        let (since, pair) = (T0 + 10_000_000_000, T0 + 11_000_000_000);
+        let woke = T0 + 10_600_000_000;
+        raw.events = vec![
+            // Not in the interval, of the other endpoint, or not a suspend: not used.
+            stall("a", since, "suspend"),
+            stall("b", since + 100_000_000, "suspend"),
+            stall("a", since + 200_000_000, "late"),
+            stall("a", pair + 1, "suspend"),
+            // The pacer's first loop after the wake, and a later one: the earliest is used.
+            stall("a", woke + 300_000_000, "suspend"),
+            stall("a", woke, "suspend"),
+        ];
+        let m = RealToMono::from_raw(&raw, "a");
+        assert_eq!(
+            m.suspends.list,
+            vec![Suspend {
+                at: woke,
+                pair,
+                since,
+                ns: susp
+            }]
+        );
+        let v = m.to_value(PAIRS_METHOD);
+        let s = v.get("suspends").and_then(Value::as_array).unwrap();
+        assert_eq!(s[0].get("mono").and_then(Value::as_i64), Some(pair));
+        assert_eq!(s[0].get("since_mono").and_then(Value::as_i64), Some(since));
+        assert_eq!(s[0].get("placed_mono").and_then(Value::as_i64), Some(woke));
+        assert_eq!(
+            s[0].get("placed_by").and_then(Value::as_str),
+            Some("stall_event")
+        );
+        // real = mono + 7 s before the suspend, and + 907 s after it.
+        let before = |mono: i64| mono + 7_000_000_000;
+        let after = |mono: i64| mono + 7_000_000_000 + susp;
+        assert_eq!(
+            m.map(before(T0 + 10_400_000_000)),
+            Some(T0 + 10_400_000_000)
+        );
+        // Inside the suspend: its placement.
+        assert_eq!(m.map(before(woke) + susp / 2), Some(woke));
+        // After the wake and before the later pair: the later pair's offset, not its mono.
+        assert_eq!(m.map(after(T0 + 10_800_000_000)), Some(T0 + 10_800_000_000));
+        let mut last = i64::MIN;
+        for k in 0..2_000 {
+            let mono = m
+                .map(before(since) - 1_000_000_000 + k * 500_000_000)
+                .unwrap();
+            assert!(mono >= last, "step {k}");
+            last = mono;
+        }
+        // Without boot the events find no suspend of their own.
+        raw.tables.get_mut("pairs[a]").unwrap().cols.remove("boot");
+        assert!(RealToMono::from_raw(&raw, "a").suspends.list.is_empty());
+    }
+
+    /// A `stall {cause: "suspend", suspended_ns}` event of `ep` at mono `t`.
+    fn stall_ns(ep: &str, t: i64, ns: i64) -> Value {
+        Value::map()
+            .with("t", t as u64)
+            .with("clock", format!("{ep}.mono"))
+            .with("endpoint", ep)
+            .with("type", "stall")
+            .with(
+                "detail",
+                Value::map()
+                    .with("cause", "suspend")
+                    .with("suspended_ns", ns as u64),
+            )
+    }
+
+    #[test]
+    fn a_late_event_of_the_previous_suspend_does_not_place_the_next() {
+        // Pairs at 1 Hz; a sleeps 900 s between the pairs at 10 s and 11 s, waking just before
+        // the one at 11 s, and 5 s between the pairs at 11 s and 12 s.
+        let (s1, s2) = (900e9 as i64, 5e9 as i64);
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * 1_000_000_000).collect();
+        let gap = |m: &i64| {
+            (if *m > T0 + 10_000_000_000 { s1 } else { 0 })
+                + (if *m > T0 + 11_000_000_000 { s2 } else { 0 })
+        };
+        let real = mono.iter().map(|m| m + 7_000_000_000 + gap(m)).collect();
+        let boot = mono.iter().map(|m| m + 3_000_000_000 + gap(m)).collect();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            rows(&[("real", real), ("mono", mono), ("boot", boot)]),
+        );
+        let (p1, p2) = (T0 + 11_000_000_000, T0 + 12_000_000_000);
+        let first = |raw: &Raw| RealToMono::from_raw(raw, "a").suspends.list;
+        // The first suspend's event, recorded after its later pair, and the second's own.
+        let woke2 = T0 + 11_600_000_000;
+        raw.events = vec![stall_ns("a", p1 + 30_000_000, s1), stall_ns("a", woke2, s2)];
+        let l = first(&raw);
+        assert_eq!((l[0].at, l[0].pair, l[0].ns), (p1, p1, s1));
+        assert_eq!((l[1].at, l[1].pair, l[1].ns), (woke2, p2, s2));
+        // Without the second's event, the first's does not place it: the later pair does.
+        raw.events = vec![stall_ns("a", p1 + 30_000_000, s1)];
+        assert_eq!(first(&raw)[1].at, p2);
+        // Nor without a recorded length.
+        raw.events = vec![stall("a", p1 + 30_000_000, "suspend")];
+        assert_eq!(first(&raw)[1].at, p2);
+        // An event longer than the interval's growth is another suspend's, wherever it is.
+        raw.events = vec![stall_ns("a", woke2, s1)];
+        assert_eq!(first(&raw)[1].at, p2);
+        // When an event placed the first suspend, the next interval's first event is the second's.
+        let woke1 = T0 + 10_600_000_000;
+        raw.events = vec![stall_ns("a", woke1, s1), stall_ns("a", p1 + 30_000_000, s2)];
+        let l = first(&raw);
+        assert_eq!((l[0].at, l[1].at), (woke1, p1 + 30_000_000));
     }
 
     #[test]
@@ -854,6 +1067,35 @@ mod tests {
         let o2 = Offset::fit(&ex, None).unwrap();
         let m = T0 + 20_000_000_000;
         assert!((o2.b_to_a(b(m as f64).round() as i64) - m).abs() > 100_000_000_000);
+
+        // With the pacer's suspend event 5 ms after the wake, the suspend is placed there.
+        let woke = s0 + 5_000_000;
+        raw.events = vec![stall("a", woke, "suspend")];
+        let tb = TimeBase::from_raw(&raw);
+        assert_eq!(
+            (tb.a.suspends.list[0].at, tb.a.suspends.list[0].pair),
+            (woke, at)
+        );
+        let o = tb.off.as_ref().unwrap();
+        // Only the exchanges with a time between the earlier pair and the event are left out
+        // (t1 30.0 s … 30.6 s; the one at 30.0 s ends at 30.021 s).
+        assert_eq!(o.samples, 1_200 - 7);
+        assert!((o.skew - 20e-6).abs() < 1e-8, "skew {}", o.skew);
+        // A b time after the event maps to its a.mono, where the pair placement collapsed it
+        // onto the later pair.
+        for m in [
+            T0 + 30_700_000_000,
+            T0 + 30_900_000_000,
+            T0 + 90_000_000_000,
+        ] {
+            let got = o.b_to_a(b(tau(m as f64)).round() as i64);
+            assert!((got - m).abs() < 1_000, "a.mono {m}: {got}");
+        }
+        // A b time inside the suspend, or in the 5 ms from the wake to the event, collapses onto
+        // the event.
+        for t in [s0 + susp / 2, s0 + susp + 2_000_000] {
+            assert_eq!(o.b_to_a(b(t as f64).round() as i64), woke);
+        }
     }
 
     #[test]
@@ -948,5 +1190,33 @@ mod tests {
         let m = T0 + 20_000_000_000;
         let bm = bmono(c(m as f64)).unwrap().round() as i64;
         assert!((o2.b_to_a(bm) - m).abs() > 10_000_000_000);
+
+        // A b time after the wake and before b's later pair: placed at the pair, it counts as
+        // before the suspend and maps a whole suspend early.
+        let m = T0 + 330_800_000_000;
+        let bm = bmono(c(m as f64)).unwrap().round() as i64;
+        assert!(bm > sb && bm < at);
+        assert!((m - o.b_to_a(bm)) > susp / 2);
+        // With b's suspend event 5 ms after its wake, the suspend is placed there and that
+        // time maps to its a.mono.
+        let woke = sb + 5_000_000;
+        raw.events = vec![stall("b", woke, "suspend"), stall("a", sb, "suspend")];
+        let tb = TimeBase::from_raw(&raw);
+        assert!(tb.a.suspends.list.is_empty());
+        assert_eq!(
+            (tb.b.suspends.list[0].at, tb.b.suspends.list[0].pair),
+            (woke, at)
+        );
+        let o = tb.off.as_ref().unwrap();
+        assert!((o.skew - 20e-6).abs() < 1e-8, "skew {}", o.skew);
+        for m in [
+            T0 + 20_000_000_000,
+            T0 + 330_800_000_000,
+            T0 + 390_000_000_000,
+        ] {
+            let bm = bmono(c(m as f64)).unwrap().round() as i64;
+            let got = o.b_to_a(bm);
+            assert!((got - m).abs() < 1_000, "a.mono {m}: {got}");
+        }
     }
 }
