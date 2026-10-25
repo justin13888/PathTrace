@@ -1021,7 +1021,7 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 .lines()
                 .find(|l| l.ends_with("outage_start"))
                 .and_then(|l| l.split_whitespace().next()?.parse::<i64>().ok())
-                .and_then(|r| tb.real("a", r));
+                .and_then(|r| tb.real("a", r, None));
             let (pk, _) = pt_derive::dir::packets(&raw, &tb, "b_to_a");
             let heavy_after: Option<usize> = start.map(|s0| {
                 pk.iter()
@@ -1634,7 +1634,7 @@ fn rate_step_nrmse(t: &Trace, log: &str) -> (Option<f64>, usize) {
             let mut it = l.split_whitespace();
             let real: i64 = it.next()?.parse().ok()?;
             let r: f64 = it.next()?.parse().ok()?;
-            Some((tb.real("a", real)?, ip_rate(r)))
+            Some((tb.real("a", real, None)?, ip_rate(r)))
         })
         .collect();
     sched.sort_by_key(|s| s.0);

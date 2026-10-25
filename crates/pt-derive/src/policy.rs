@@ -55,7 +55,9 @@ fn echo_rtts(raw: &Raw, tb: &TimeBase) -> BTreeMap<i64, (usize, Vec<f64>)> {
         };
         let e = out.entry(f).or_default();
         e.0 += 1;
-        if let (Some(t), Some(r)) = (tx.get(&(f, s)), tb.real("a", r)) {
+        if let Some(t) = tx.get(&(f, s))
+            && let Some(r) = tb.real("a", r, Some(*t))
+        {
             e.1.push((r - t) as f64);
         }
     }

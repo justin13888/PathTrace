@@ -109,22 +109,26 @@ fn packets_marked(
         let flow = t.get("flow", i).unwrap_or(-1);
         let sched = t.get("tx_sched", i);
         let snd_lag = t.get("tx_snd_lag", i);
+        // The user-space send time: the transmit time without kernel stamps, and the hint
+        // that places a kernel stamp on its side of a clock step (Time base, "Clock steps").
+        let user = t
+            .get("tx_intended", i)
+            .and_then(|m| tb.mono(snd, m + t.get("tx_user_lag", i).unwrap_or(0)));
         let tx = match (sched, snd_lag) {
             (Some(s), Some(l)) => {
                 *ts_src.entry("snd".into()).or_default() += 1;
-                tb.real(snd, s + l)
+                tb.real(snd, s + l, user)
             }
             (Some(s), None) => {
                 *ts_src.entry("sched".into()).or_default() += 1;
-                tb.real(snd, s)
+                tb.real(snd, s, user)
             }
             _ => {
                 *ts_src.entry("user".into()).or_default() += 1;
-                t.get("tx_intended", i)
-                    .and_then(|m| tb.mono(snd, m + t.get("tx_user_lag", i).unwrap_or(0)))
+                user
             }
         };
-        let rx = t.get("rx", i).and_then(|r| tb.real(rcv, r));
+        let rx = t.get("rx", i).and_then(|r| tb.real(rcv, r, tx.or(user)));
         out.push(Pkt {
             flow,
             seq: t.get("seq", i).unwrap_or(0),
