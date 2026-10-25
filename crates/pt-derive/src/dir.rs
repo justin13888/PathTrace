@@ -2289,6 +2289,79 @@ mod tests {
     }
 
     #[test]
+    fn a_receive_stamp_no_clock_maps_is_received_untimed_not_lost() {
+        // A receive stamp /4 also left unmapped (b without an offset, or a receiver without
+        // clock pairs) is received with an unknown time; a packet without one stays lost.
+        const T0: i64 = 1_000_000_000_000;
+        const S: i64 = 1_000_000_000;
+        let pairs = || {
+            let mono: Vec<i64> = (0..=10).map(|s| T0 + s * S).collect();
+            rows(&[
+                ("real", mono.iter().map(|m| m + 7 * S).collect()),
+                ("mono", mono),
+            ])
+        };
+        let pkt = || {
+            let tx: Vec<i64> = (0..10).map(|k| T0 + S + k * 100_000_000).collect();
+            let rx = tx
+                .iter()
+                .enumerate()
+                .map(|(k, t)| (k % 5 != 4).then_some(t + 20_000_000 + 7 * S))
+                .collect();
+            let mut r = rows(&[
+                ("flow", vec![1; tx.len()]),
+                ("seq", (0..tx.len() as i64).collect()),
+                ("tx_intended", tx),
+            ]);
+            r.cols.insert("rx".into(), rx);
+            r
+        };
+        let check = |raw: &Raw, tb: &TimeBase, dir: &str| {
+            let (pkts, _) = packets(raw, tb, dir);
+            assert_eq!(pkts.len(), 10);
+            for (k, p) in pkts.iter().enumerate() {
+                assert_eq!(p.rx, None, "{dir} packet {k}");
+                if k % 5 == 4 {
+                    assert!(p.lost() && !p.rx_untimed, "{dir} packet {k}");
+                } else {
+                    assert!(p.received() && p.rx_untimed, "{dir} packet {k}");
+                }
+            }
+            let out = derive_dir(raw, tb, dir, &[]);
+            assert_eq!(
+                out.fields
+                    .pointer("/timestamps/rx_time_unknown")
+                    .and_then(Value::as_u64),
+                Some(8),
+                "{dir}"
+            );
+        };
+        // b without an offset: no receive stamp at b maps.
+        let mut raw = Raw::default();
+        raw.tables.insert("pairs[a]".into(), pairs());
+        raw.tables.insert("pairs[b]".into(), pairs());
+        raw.tables.insert("pkt[a_to_b]".into(), pkt());
+        let tb = TimeBase {
+            a: crate::clock::RealToMono::from_raw(&raw, "a"),
+            b: crate::clock::RealToMono::from_raw(&raw, "b"),
+            off: None,
+            t0: T0,
+        };
+        check(&raw, &tb, "a_to_b");
+        // A receiver without clock pairs: no receive stamp at a maps.
+        let mut raw = Raw::default();
+        raw.tables.insert("pairs[b]".into(), pairs());
+        raw.tables.insert("pkt[b_to_a]".into(), pkt());
+        let tb = TimeBase {
+            a: crate::clock::RealToMono::from_raw(&raw, "a"),
+            b: crate::clock::RealToMono::from_raw(&raw, "b"),
+            off: Some(crate::clock::Offset::default()),
+            t0: T0,
+        };
+        check(&raw, &tb, "b_to_a");
+    }
+
+    #[test]
     fn losses_inside_a_socket_drop_gap_are_host_drops() {
         // Arrivals at tx 0, 10, 40, 50 with drop counts 0, 0, 2, 2: the socket dropped two
         // datagrams between tx 10 and 40. Packets lost at tx 20 and 30 are host drops; the
