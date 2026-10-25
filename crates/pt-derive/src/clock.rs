@@ -142,8 +142,9 @@ impl RealToMono {
         let mut steps = Vec::new();
         let mut cuts = Vec::new();
         let mut suspends = Suspends::default();
-        // The previous interval's suspend, while no event has placed it: its event may be
-        // recorded after its later pair, that is in this interval.
+        // The length of the previous interval's suspend whose event may be recorded after its
+        // later pair, that is in this interval: the whole suspend while no event has placed it,
+        // else what the events in its interval leave of a merged suspend.
         let mut unplaced: Option<i64> = None;
         for (i, w) in pts.windows(2).enumerate() {
             let (d0, d1) = (w[0].0 - w[0].1, w[1].0 - w[1].1);
@@ -170,9 +171,10 @@ impl RealToMono {
                 if grew > SUSPEND_NS {
                     // Placed at the earliest time known to follow this interval's wake: an event
                     // longer than this interval's growth belongs to another suspend.
-                    let at = events
-                        .find(|e| e.1.is_none_or(|ns| ns <= grew + len_tol(grew)))
-                        .map_or(pair, |e| e.0);
+                    let mut own =
+                        events.filter(|e| e.1.is_none_or(|ns| ns <= grew + len_tol(grew)));
+                    let first = own.next();
+                    let at = first.map_or(pair, |e| e.0);
                     suspends.list.push(Suspend {
                         at,
                         pair,
@@ -182,9 +184,20 @@ impl RealToMono {
                     if cuts.last() != Some(&(i + 1)) {
                         cuts.push(i + 1);
                     }
-                    if at == pair {
-                        unplaced = Some(grew);
-                    }
+                    unplaced = if at == pair {
+                        Some(grew)
+                    } else {
+                        // Merged suspends whose events leave more than a stall of the growth
+                        // unaccounted for: the last one woke before the later pair, and its
+                        // event may follow it. An event without a length leaves it unknown.
+                        first
+                            .into_iter()
+                            .chain(own)
+                            .map(|e| e.1)
+                            .sum::<Option<i64>>()
+                            .map(|ns| grew - ns)
+                            .filter(|&rest| rest > SUSPEND_NS)
+                    };
                 }
             } else {
                 unplaced = None;
@@ -1182,6 +1195,93 @@ mod tests {
         raw.events = vec![stall_ns("a", woke1, s1), stall_ns("a", p1 + 30_000_000, s2)];
         let l = first(&raw);
         assert_eq!((l[0].at, l[1].at), (woke1, p1 + 30_000_000));
+    }
+
+    #[test]
+    fn a_merged_suspends_late_event_does_not_place_the_next() {
+        // Pairs at 1 Hz; a sleeps 900 s between the pairs at 10 s and 11 s, waking at 10.3 s,
+        // then 5 s, waking just before the pair at 11 s, then 6 s between the pairs at 11 s
+        // and 12 s, waking at 11.6 s.
+        let (s1, s2, s3) = (900e9 as i64, 5e9 as i64, 6e9 as i64);
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * 1_000_000_000).collect();
+        let gap = |m: &i64| {
+            (if *m > T0 + 10_000_000_000 { s1 + s2 } else { 0 })
+                + (if *m > T0 + 11_000_000_000 { s3 } else { 0 })
+        };
+        let real = mono.iter().map(|m| m + 7_000_000_000 + gap(m)).collect();
+        let boot = mono.iter().map(|m| m + 3_000_000_000 + gap(m)).collect();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            rows(&[("real", real), ("mono", mono), ("boot", boot)]),
+        );
+        let (p1, p2) = (T0 + 11_000_000_000, T0 + 12_000_000_000);
+        let first = |raw: &Raw| RealToMono::from_raw(raw, "a").suspends.list;
+        let (woke1, late2, woke3) = (T0 + 10_300_000_000, p1 + 30_000_000, T0 + 11_600_000_000);
+        // The second suspend's event, recorded after the pair, is shorter than the third's
+        // growth, but the events of the first interval leave its length unaccounted for.
+        raw.events = vec![
+            stall_ns("a", woke1, s1),
+            stall_ns("a", late2, s2),
+            stall_ns("a", woke3, s3),
+        ];
+        let l = first(&raw);
+        assert_eq!((l[0].at, l[0].pair, l[0].ns), (woke1, p1, s1 + s2));
+        assert_eq!((l[1].at, l[1].pair, l[1].ns), (woke3, p2, s3));
+        // Without the third's event, the second's does not place it: the later pair does.
+        raw.events = vec![stall_ns("a", woke1, s1), stall_ns("a", late2, s2)];
+        assert_eq!(first(&raw)[1].at, p2);
+        // When both events of the first interval precede its later pair, they account for it,
+        // and the next interval's first event is the third's.
+        raw.events = vec![
+            stall_ns("a", woke1, s1),
+            stall_ns("a", p1 - 30_000_000, s2),
+            stall_ns("a", woke3, s3),
+        ];
+        assert_eq!(first(&raw)[1].at, woke3);
+        raw.events = vec![
+            stall_ns("a", woke1, s1),
+            stall_ns("a", p1 - 30_000_000, s2),
+            stall_ns("a", late2, s3),
+        ];
+        assert_eq!(first(&raw)[1].at, late2);
+    }
+
+    #[test]
+    fn a_short_event_of_one_suspend_passes_over_a_matching_next_event() {
+        // Pairs at 1 Hz; a sleeps 60 s between the pairs at 10 s and 11 s, waking at 10.3 s,
+        // then 5 ms between the pairs at 11 s and 12 s, waking at 11.6 s. The first event's
+        // `suspended_ns` is 5 ms below the growth (BOOTTIME slew, within the length tolerance),
+        // which reads as a merged suspend whose last event may follow its later pair
+        // (derivation.md "Suspends", #132): the next interval's first event, whose length
+        // matches that 5 ms remainder, is passed over, and the later pair places the second.
+        let (s1, s2, slew) = (60e9 as i64, 5_000_000, 5_000_000);
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * 1_000_000_000).collect();
+        let gap = |m: &i64| {
+            (if *m > T0 + 10_000_000_000 { s1 } else { 0 })
+                + (if *m > T0 + 11_000_000_000 { s2 } else { 0 })
+        };
+        let real = mono.iter().map(|m| m + 7_000_000_000 + gap(m)).collect();
+        let boot = mono.iter().map(|m| m + 3_000_000_000 + gap(m)).collect();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            rows(&[("real", real), ("mono", mono), ("boot", boot)]),
+        );
+        let (p1, p2) = (T0 + 11_000_000_000, T0 + 12_000_000_000);
+        let first = |raw: &Raw| RealToMono::from_raw(raw, "a").suspends.list;
+        let (woke1, woke2) = (T0 + 10_300_000_000, T0 + 11_600_000_000);
+        raw.events = vec![stall_ns("a", woke1, s1 - slew), stall_ns("a", woke2, s2)];
+        let l = first(&raw);
+        assert_eq!((l[0].at, l[0].pair, l[0].ns), (woke1, p1, s1));
+        assert_eq!((l[1].at, l[1].pair, l[1].ns), (p2, p2, s2));
+        // Within 2 ms of the growth, the first event accounts for it, and the second suspend
+        // is placed at its own event.
+        raw.events = vec![
+            stall_ns("a", woke1, s1 - 1_000_000),
+            stall_ns("a", woke2, s2),
+        ];
+        assert_eq!(first(&raw)[1].at, woke2);
     }
 
     #[test]
