@@ -135,12 +135,7 @@ pub fn audit(root: &Path) -> Result<Report> {
 
     let exp_by_id: BTreeMap<&str, &Entry> =
         exps.iter().map(|e| (e.experiment.id.as_str(), e)).collect();
-    // An experiment is superseded once a superseding experiment has actually run.
-    let superseded: BTreeSet<&str> = exps
-        .iter()
-        .filter(|e| e.manifest.is_some())
-        .flat_map(|e| e.experiment.supersedes.iter().map(String::as_str))
-        .collect();
+    let superseded = superseded_ids(&exps);
     let adrs = adr_numbers(root)?;
 
     let mut seen = BTreeSet::new();
@@ -229,10 +224,7 @@ pub fn audit(root: &Path) -> Result<Report> {
             }
         }
         let Some(m) = &e.manifest else {
-            r.pending.push(format!(
-                "{id}: defined but not yet run ({})",
-                e.experiment.title
-            ));
+            r.pending.extend(pending(e, &superseded));
             continue;
         };
         if m.id != id {
@@ -288,6 +280,23 @@ pub fn audit(root: &Path) -> Result<Report> {
     Ok(r)
 }
 
+/// Experiments superseded by an experiment that has actually run (has a manifest).
+fn superseded_ids(exps: &[Entry]) -> BTreeSet<&str> {
+    exps.iter()
+        .filter(|e| e.manifest.is_some())
+        .flat_map(|e| e.experiment.supersedes.iter().map(String::as_str))
+        .collect()
+}
+
+/// The pending entry for an experiment that has not run, if it is still pending.
+/// An unrun experiment that a run experiment supersedes was withdrawn: it is
+/// historical, like a superseded run, and never pending.
+fn pending(e: &Entry, superseded: &BTreeSet<&str>) -> Option<String> {
+    let id = e.experiment.id.as_str();
+    (e.manifest.is_none() && !superseded.contains(id))
+        .then(|| format!("{id}: defined but not yet run ({})", e.experiment.title))
+}
+
 fn adr_numbers(root: &Path) -> Result<BTreeSet<String>> {
     let dir = root.join("docs/adr");
     let mut out = BTreeSet::new();
@@ -316,5 +325,68 @@ mod tests {
         assert!(!valid_req_id("REQ-fmt-001"));
         assert!(!valid_req_id("REQ-FMT-1"));
         assert!(!valid_req_id("FMT-001"));
+    }
+
+    fn entry(id: &str, supersedes: &[&str], run: bool) -> Entry {
+        Entry {
+            dir: std::path::PathBuf::from(format!("docs/evidence/{id}-x")),
+            experiment: evidence::Experiment {
+                id: id.to_string(),
+                title: format!("title {id}"),
+                hypothesis: String::new(),
+                command: String::new(),
+                covers: Vec::new(),
+                requirements: Vec::new(),
+                supersedes: supersedes.iter().map(|s| s.to_string()).collect(),
+            },
+            manifest: run.then(|| evidence::Manifest {
+                id: id.to_string(),
+                verdict: "pass".to_string(),
+                pinned_commit: String::new(),
+                tree_clean: true,
+                command: String::new(),
+                exit_code: 0,
+                started_utc: String::new(),
+                duration_s: 0.0,
+                host: evidence::Host {
+                    os: String::new(),
+                    kernel: String::new(),
+                    cpu: String::new(),
+                    cpus: 1,
+                    rustc: String::new(),
+                },
+                artifacts: BTreeMap::new(),
+            }),
+        }
+    }
+
+    fn pending_ids(exps: &[Entry]) -> Vec<String> {
+        let superseded = superseded_ids(exps);
+        exps.iter()
+            .filter_map(|e| pending(e, &superseded))
+            .map(|p| p.split(':').next().unwrap_or_default().to_string())
+            .collect()
+    }
+
+    #[test]
+    fn unrun_experiment_superseded_by_a_run_is_not_pending() {
+        // r1 ran; r2 was defined and withdrawn; r3 supersedes both and ran.
+        let exps = [
+            entry("EXP-0001", &[], true),
+            entry("EXP-0001-r2", &["EXP-0001"], false),
+            entry("EXP-0001-r3", &["EXP-0001", "EXP-0001-r2"], true),
+        ];
+        assert!(pending_ids(&exps).is_empty());
+    }
+
+    #[test]
+    fn unrun_superseder_keeps_unrun_predecessor_pending() {
+        // r3 has not run yet, so it supersedes nothing: both unrun ones are pending.
+        let exps = [
+            entry("EXP-0001", &[], true),
+            entry("EXP-0001-r2", &["EXP-0001"], false),
+            entry("EXP-0001-r3", &["EXP-0001", "EXP-0001-r2"], false),
+        ];
+        assert_eq!(pending_ids(&exps), ["EXP-0001-r2", "EXP-0001-r3"]);
     }
 }

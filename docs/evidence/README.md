@@ -22,6 +22,7 @@ Each experiment is a directory `EXP-NNNN-kebab-slug/`, numbered sequentially. Co
 
 - Never delete or edit a completed experiment's artifacts or manifest. A rerun is a new experiment (or `EXP-NNNN-r2`) whose `experiment.toml` lists `supersedes = ["EXP-NNNN"]`; `cargo xtask audit` treats the superseded one as historical.
 - A run supersedes its predecessor as soon as its manifest exists, whatever its verdict. Right after committing a superseding run, move the requirement citations to it, before running anything that audits (EXP-0007-r4 failed this way). An experiment that audits the chain cannot vouch for itself: requirements whose only evidence is that experiment's own lineage are exempt from its audit check (EXP-0007-r5).
+- A definition that will never run (withdrawn before its run) is not deleted: the next experiment lists it in `supersedes` alongside the last run, and once that experiment's manifest exists `cargo xtask audit` treats the withdrawn one as historical and stops reporting it as pending (EXP-0007-r9, superseded by EXP-0007-r10). Until then it stays pending. Its requirement citations move to the superseding experiment with the others.
 - Failed experiments stay; they are evidence too.
 - `covers` lists the source paths whose behaviour the experiment measures. If any of them change after `pinned_commit`, `cargo xtask audit` reports the experiment as **stale** (warning on branches, error with `--release`).
 - Pinned commits stay reachable because `main` only takes merge commits (see `AGENTS.md`).
