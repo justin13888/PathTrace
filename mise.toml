@@ -47,7 +47,7 @@ for t in ptf_read cbor_decode jsonl_load wire; do
   if [ "$t" = ptf_read ]; then
     cp ../conformance/v1.0/*.ptf corpus/ptf_read/
     # Corpus file names repeat across versions (valid-minimal.ptf): prefix the later ones.
-    for v in v1.1 v1.2 v1.3; do for f in ../conformance/$v/*.ptf; do cp "$f" "corpus/ptf_read/$v-${f##*/}"; done; done
+    for v in v1.1 v1.2 v1.3 v1.4; do for f in ../conformance/$v/*.ptf; do cp "$f" "corpus/ptf_read/$v-${f##*/}"; done; done
   fi
   cargo +nightly fuzz run --target "$(rustc +nightly -vV | sed -n 's/host: //p')" $t corpus/$t -- -max_total_time=${FUZZ_SECONDS:-60} -rss_limit_mb=2048
 done

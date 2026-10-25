@@ -1,4 +1,4 @@
-//! PTF (Path Trace Format) 1.x (currently 1.2): reader, writer and validator.
+//! PTF (Path Trace Format) 1.x (currently 1.4): reader, writer and validator.
 //!
 //! The normative specification is `docs/design/ptf-format.md`. Module map:
 //! - [`cbor`]: deterministic CBOR profile for section heads.

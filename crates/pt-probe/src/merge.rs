@@ -1,6 +1,6 @@
 //! Merge two observation logs into one canonical PTF trace (REQ-PRB-018,
-//! docs/design/probe.md §5). Every logged row ends up in the trace; what the trace does not
-//! keep is listed in ptf-format.md ("What `merge` does not keep").
+//! docs/design/probe.md §5). Every logged row and value ends up in the trace (PTF 1.4); what
+//! the trace does not keep is listed in ptf-format.md ("What `merge` does not keep").
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
@@ -275,12 +275,63 @@ pub struct MergeReport {
     pub reanchor: BTreeMap<String, Reanchor>,
 }
 
+/// What a log's FLOW or EVNT sections hold besides their `flows` or `events` (PTF 1.4).
+#[derive(Debug, Clone, Default)]
+struct HeadExtra {
+    /// Per section with other keys, in log order: its head without the list and `pii`.
+    heads: Vec<Map>,
+    /// `pii` pointers into the list: (index in the log's concatenated list, rest, class).
+    list_pii: Vec<(usize, String, Value)>,
+    /// Other `pii` pointers: (index in `heads`, pointer, class).
+    head_pii: Vec<(usize, String, Value)>,
+}
+
+impl HeadExtra {
+    /// Record section head `head`, whose list `list` starts at `base` in the log's list.
+    fn add(&mut self, head: &Map, list: &str, base: usize) {
+        let mut other = head.clone();
+        let len = other
+            .remove(&Key::from(list))
+            .and_then(|v| v.as_array().map(<[Value]>::len))
+            .unwrap_or(0);
+        let pii = other.remove(&Key::from("pii"));
+        let h = (!other.is_empty()).then(|| {
+            self.heads.push(other);
+            self.heads.len() - 1
+        });
+        let Some(Value::Map(pii)) = pii else {
+            return;
+        };
+        let prefix = format!("/{list}/");
+        for (k, class) in pii {
+            if let Some(rest) = k.0.strip_prefix(&prefix) {
+                let (j, rest) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
+                // A pointer past the section's own list points at nothing.
+                if let Some(j) = j.parse::<usize>().ok().filter(|&j| j < len) {
+                    self.list_pii.push((base + j, rest.to_owned(), class));
+                }
+            } else if let Some(h) = h {
+                self.head_pii.push((h, k.0, class));
+            }
+        }
+    }
+
+    /// `pii` pointers of the heads, at their copy under the trace's `merged_from[i]`.
+    fn head_pointers(&self, i: usize, into: &mut Map) {
+        for (h, p, class) in &self.head_pii {
+            into.insert(Key(format!("/merged_from/{i}/heads/{h}{p}")), class.clone());
+        }
+    }
+}
+
 struct Log {
     role: String,
     meta: Value,
     tables: BTreeMap<String, Tab>,
     flows: Vec<Value>,
     events: Vec<Value>,
+    flow_x: HeadExtra,
+    event_x: HeadExtra,
     info: LogInfo,
     /// Tables [`Tab`] cannot hold without loss: copied chunk by chunk, never from `tables`.
     lossy: HashSet<String>,
@@ -297,6 +348,8 @@ impl Log {
             tables: BTreeMap::new(),
             flows: Vec::new(),
             events: Vec::new(),
+            flow_x: HeadExtra::default(),
+            event_x: HeadExtra::default(),
             info: LogInfo {
                 role: role.into(),
                 content_digest: String::new(),
@@ -327,23 +380,35 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
     let mut tables: BTreeMap<String, Tab> = BTreeMap::new();
     let mut flows = Vec::new();
     let mut events = Vec::new();
+    let mut flow_x = HeadExtra::default();
+    let mut event_x = HeadExtra::default();
     let mut copied = Vec::new();
     for s in &f.sections[1..] {
         match &s.kind {
-            b"FLOW" => flows.extend(
-                s.get("flows")
-                    .and_then(Value::as_array)
-                    .unwrap_or(&[])
-                    .iter()
-                    .cloned(),
-            ),
-            b"EVNT" => events.extend(
-                s.get("events")
-                    .and_then(Value::as_array)
-                    .unwrap_or(&[])
-                    .iter()
-                    .cloned(),
-            ),
+            b"FLOW" => {
+                if let Some(h) = s.head() {
+                    flow_x.add(h, "flows", flows.len());
+                }
+                flows.extend(
+                    s.get("flows")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                        .iter()
+                        .cloned(),
+                );
+            }
+            b"EVNT" => {
+                if let Some(h) = s.head() {
+                    event_x.add(h, "events", events.len());
+                }
+                events.extend(
+                    s.get("events")
+                        .and_then(Value::as_array)
+                        .unwrap_or(&[])
+                        .iter()
+                        .cloned(),
+                );
+            }
             // Generic table sections without a head: their tables are merged.
             b"OBSV" | b"CLOK" | b"CTXS" if s.head().is_some_and(Map::is_empty) => {
                 for t in s.tables() {
@@ -367,6 +432,8 @@ fn read_log(path: &Path) -> pt_format::Result<Log> {
         tables,
         flows,
         events,
+        flow_x,
+        event_x,
         lossy,
         copied,
         info: LogInfo {
@@ -827,7 +894,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
 
     let to_real = MonoToReal::new(sender);
     let mut check = StampCheck::default();
-    let mut out: Vec<Vec<Option<i64>>> = (0..20).map(|_| Vec::with_capacity(order.len())).collect();
+    let mut out: Vec<Vec<Option<i64>>> = (0..22).map(|_| Vec::with_capacity(order.len())).collect();
     let mut used: HashMap<(i64, i64), usize> = HashMap::new();
     let mut dup: Vec<Vec<Option<i64>>> = vec![Vec::new(); 10];
     // Per `pkt` row its first arrival, and the later arrivals in `dup` order.
@@ -897,6 +964,10 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
             at(&r_sock),
             at(&r_size),
             at(&r_drops),
+            t_id[i],
+            t_sock[i]
+                .zip(t_id[i])
+                .map(|(s, id)| ids.id(s, id).wrapping_sub(id)),
         ];
         for (k, v) in vals.into_iter().enumerate() {
             out[k].push(v);
@@ -905,7 +976,7 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
     let sm = Some(format!("{s}.mono"));
     let sr = Some(format!("{s}.real"));
     let rr = Some(format!("{r}.real"));
-    let names: [(&str, bool, Enc, &str, Option<String>); 20] = [
+    let names: [(&str, bool, Enc, &str, Option<String>); 22] = [
         ("flow", false, Enc::Rle, "id", None),
         ("seq", false, Enc::Delta, "count", None),
         ("size", false, Enc::Rle, "B", None),
@@ -926,6 +997,9 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
         ("rx_sock", false, Enc::Rle, "id", None),
         ("rx_size", false, Enc::Rle, "B", None),
         ("rxq_drops", false, Enc::Rle, "count", None),
+        // 1.4: the logged OPT_ID and the re-anchoring offset the join applied to it.
+        ("tx_id", false, Enc::Delta, "id", None),
+        ("tx_id_offset", true, Enc::Rle, "count", None),
     ];
     let mut pkt: Vec<Col> = names
         .iter()
@@ -991,6 +1065,8 @@ fn join_direction(sender: &Log, receiver: Option<&Log>, ids: &TxIds) -> Joined {
         (rx, "sock"),
         (rx, "size"),
         (rx, "rxq_drops"),
+        (tx, "id"),
+        (&empty, ""),
     ];
     for (c, (t, n)) in pkt.iter_mut().zip(pkt_src) {
         inherit(c, t.col(n));
@@ -1080,10 +1156,11 @@ fn unmatched_stamps(log: &Log, ids: &TxIds) -> Vec<Col> {
         .filter(|c| !TXTS_COLS.contains(&c.name.as_str()))
         .collect();
     let mut seen: HashSet<(i64, i64, i64)> = HashSet::new();
-    let keep: Vec<usize> = (0..txts.rows)
-        .filter(|&j| {
+    // Kept rows, and whether `pkt` also holds each one.
+    let keep: Vec<(usize, bool)> = (0..txts.rows)
+        .filter_map(|j| {
             let (Some(s), Some(i), Some(k)) = (sock[j], id[j], kind[j]) else {
-                return true;
+                return Some((j, false));
             };
             // `pkt` holds a stamp only if a transmission joined it, as its first of the kind,
             // and an SND stamp only next to a SCHED one (`tx_snd_lag`).
@@ -1091,13 +1168,27 @@ fn unmatched_stamps(log: &Log, ids: &TxIds) -> Vec<Col> {
                 && sent.contains(&(s, i))
                 && (k == 0 || (k == 1 && sched.contains(&(s, i))))
                 && seen.insert((s, i, k));
-            !held || other.iter().any(|c| c.rows[j].is_some())
+            (!held || other.iter().any(|c| c.rows[j].is_some())).then_some((j, held))
         })
         .collect();
-    txts.cols
+    let mut out: Vec<Col> = txts
+        .cols
         .iter()
-        .map(|c| copy_col(c, keep.iter().map(|&j| c.rows[j]).collect()))
-        .collect()
+        .map(|c| copy_col(c, keep.iter().map(|&(j, _)| c.rows[j]).collect()))
+        .collect();
+    // 1.4: a stamp the join used is kept here only for its values in columns merge does not
+    // know; `joined` tells it apart, so the trace gives back each logged stamp once.
+    if keep.iter().any(|&(_, held)| held) {
+        out.push(col(
+            "joined",
+            false,
+            Enc::Rle,
+            "count",
+            None,
+            keep.iter().map(|&(_, h)| Some(i64::from(h))).collect(),
+        ));
+    }
+    out
 }
 
 /// Id-level check of the `tx`–`txts` join for one endpoint (probe.md §4.1). The time window
@@ -1180,6 +1271,67 @@ fn remap_pii(meta: &Value, role: &str, into: &mut Map) {
     }
 }
 
+/// The keys of log `i`'s META head the trace does not hold as logged (`merged_from[i].meta`,
+/// PTF 1.4): every key but those held per endpoint and, for the initiator's log (`i` = 0), its
+/// `trace_id`, `created_utc` and `network`. Each `pii` pointer into a kept key also points at
+/// its copy in `into`.
+fn own_meta(meta: &Value, i: usize, into: &mut Map) -> Map {
+    let held: &[&str] = if i == 0 {
+        &[
+            "role",
+            "endpoint",
+            "extra",
+            "tool",
+            "session",
+            "trace_id",
+            "created_utc",
+            "network",
+        ]
+    } else {
+        &["role", "endpoint", "extra", "tool", "session"]
+    };
+    let own: Map = meta
+        .as_map()
+        .into_iter()
+        .flatten()
+        .filter(|(k, _)| !held.contains(&k.0.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    if let Some(Value::Map(p)) = meta.get("pii") {
+        for (k, class) in p {
+            let Some(rest) = k.0.strip_prefix('/') else {
+                continue;
+            };
+            let tok = &rest[..rest.find('/').unwrap_or(rest.len())];
+            let key = tok.replace("~1", "/").replace("~0", "~");
+            if own.contains_key(&Key(key)) {
+                into.insert(Key(format!("/merged_from/{i}/meta/{rest}")), class.clone());
+            }
+        }
+    }
+    own
+}
+
+/// `m` with the log's FLOW or EVNT `heads`, when it has any.
+fn heads_of(m: Value, x: &HeadExtra) -> Value {
+    if x.heads.is_empty() {
+        m
+    } else {
+        m.with(
+            "heads",
+            Value::Array(x.heads.iter().cloned().map(Value::Map).collect()),
+        )
+    }
+}
+
+/// A FLOW or EVNT `merged_from` array, when some log contributes to it.
+fn merged_extras(per_log: Vec<Value>) -> Option<Value> {
+    per_log
+        .iter()
+        .any(|v| v.as_map().is_some_and(|m| !m.is_empty()))
+        .then_some(Value::Array(per_log))
+}
+
 /// Merge `log_a` (initiator) and optionally `log_b` (responder) into a canonical trace.
 pub fn merge_file(
     log_a: &Path,
@@ -1230,6 +1382,11 @@ pub fn merge_file(
     let logs: Vec<LogInfo> = std::iter::once(a.info.clone())
         .chain(b.as_ref().map(|b| b.info.clone()))
         .collect();
+    let own: Vec<Map> = std::iter::once(&a)
+        .chain(b.iter())
+        .enumerate()
+        .map(|(i, l)| own_meta(&l.meta, i, &mut pii))
+        .collect();
     let mut meta = Value::map()
         .with("kind", "trace")
         .with(
@@ -1263,11 +1420,17 @@ pub fn merge_file(
             "merged_from",
             Value::Array(
                 logs.iter()
-                    .map(|l| {
-                        Value::map()
+                    .zip(&own)
+                    .map(|(l, own)| {
+                        let m = Value::map()
                             .with("role", l.role.as_str())
                             .with("content_digest", l.content_digest.as_str())
-                            .with("stopped", l.stopped.clone())
+                            .with("stopped", l.stopped.clone());
+                        if own.is_empty() {
+                            m
+                        } else {
+                            m.with("meta", Value::Map(own.clone()))
+                        }
                     })
                     .collect(),
             ),
@@ -1285,18 +1448,62 @@ pub fn merge_file(
         flags::CRITICAL,
         meta.as_map().cloned().unwrap_or_default(),
     )];
-    // FLOW: union by id, initiator's definition first.
+    let all: Vec<&Log> = std::iter::once(&a).chain(b.iter()).collect();
+    // FLOW: union by id, initiator's definition first; the definitions the union does not hold
+    // stay in `merged_from[i].flows` (PTF 1.4).
     let mut flows: BTreeMap<u64, Value> = BTreeMap::new();
-    for f in a.flows.iter().chain(b.iter().flat_map(|b| b.flows.iter())) {
-        if let Some(id) = f.get("id").and_then(Value::as_u64) {
-            flows.entry(id).or_insert_with(|| f.clone());
+    // Per log definition: its flow id in the union, or its index in `merged_from[i].flows`.
+    let mut placed: Vec<Vec<Result<u64, usize>>> = vec![Vec::new(); all.len()];
+    let mut unheld: Vec<Vec<Value>> = vec![Vec::new(); all.len()];
+    for (i, l) in all.iter().enumerate() {
+        for f in &l.flows {
+            match f.get("id").and_then(Value::as_u64) {
+                Some(id) if !flows.contains_key(&id) => {
+                    flows.insert(id, f.clone());
+                    placed[i].push(Ok(id));
+                }
+                _ => {
+                    placed[i].push(Err(unheld[i].len()));
+                    unheld[i].push(f.clone());
+                }
+            }
         }
+    }
+    let index: HashMap<u64, usize> = flows.keys().enumerate().map(|(n, id)| (*id, n)).collect();
+    let mut fpii = Map::new();
+    for (i, l) in all.iter().enumerate() {
+        for (j, rest, class) in &l.flow_x.list_pii {
+            let at = match placed[i].get(*j) {
+                Some(Ok(id)) => format!("/flows/{}{rest}", index[id]),
+                Some(Err(k)) => format!("/merged_from/{i}/flows/{k}{rest}"),
+                None => continue,
+            };
+            fpii.insert(Key(at), class.clone());
+        }
+        l.flow_x.head_pointers(i, &mut fpii);
     }
     let mut fh = Map::new();
     fh.insert(
         Key::from("flows"),
         Value::Array(flows.into_values().collect()),
     );
+    let fx: Vec<Value> = all
+        .iter()
+        .zip(unheld)
+        .map(|(l, u)| {
+            let mut m = Value::map();
+            if !u.is_empty() {
+                m = m.with("flows", Value::Array(u));
+            }
+            heads_of(m, &l.flow_x)
+        })
+        .collect();
+    if let Some(x) = merged_extras(fx) {
+        fh.insert(Key::from("merged_from"), x);
+    }
+    if !fpii.is_empty() {
+        fh.insert(Key::from("pii"), Value::Map(fpii));
+    }
     sections.push(Section::new(b"FLOW", 0, fh));
 
     let mut report = MergeReport {
@@ -1427,8 +1634,26 @@ pub fn merge_file(
             }
         }
     }
+    // The logs' own pointers, at the events' places in the trace and at the heads' copies.
+    let mut off = 0;
+    for (i, l) in all.iter().enumerate() {
+        for (j, rest, class) in &l.event_x.list_pii {
+            if *j < l.events.len() {
+                epii.insert(Key(format!("/events/{}{rest}", off + j)), class.clone());
+            }
+        }
+        l.event_x.head_pointers(i, &mut epii);
+        off += l.events.len();
+    }
     let mut eh = Map::new();
     eh.insert(Key::from("events"), Value::Array(events));
+    let ex: Vec<Value> = all
+        .iter()
+        .map(|l| heads_of(Value::map(), &l.event_x))
+        .collect();
+    if let Some(x) = merged_extras(ex) {
+        eh.insert(Key::from("merged_from"), x);
+    }
     if !epii.is_empty() {
         eh.insert(Key::from("pii"), Value::Map(epii));
     }
