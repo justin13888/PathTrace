@@ -188,26 +188,25 @@ fn chunk_table(t: pt_format::Table) -> Vec<pt_format::Table> {
         c.meta = t.meta.clone();
         for col in &t.columns {
             let mut nc = col.clone();
+            // `values` holds the present rows only, so a nullable column's chunk is the
+            // present values whose rows fall in start..end, not values[start..end].
+            let (lo, hi) = match &col.validity {
+                Some(vv) => {
+                    let lo = vv[..start].iter().filter(|b| **b).count();
+                    (lo, lo + vv[start..end].iter().filter(|b| **b).count())
+                }
+                None => (start, end),
+            };
             if let pt_format::Data::Known { values, .. } = &mut nc.data {
-                // Derived series are never nullable except train offsets, which stay small.
                 *values = match values {
-                    pt_format::Values::U64(v) => pt_format::Values::U64(v[start..end].to_vec()),
-                    pt_format::Values::I64(v) => pt_format::Values::I64(v[start..end].to_vec()),
-                    pt_format::Values::F64(v) => pt_format::Values::F64(v[start..end].to_vec()),
-                    pt_format::Values::Bool(v) => pt_format::Values::Bool(v[start..end].to_vec()),
+                    pt_format::Values::U64(v) => pt_format::Values::U64(v[lo..hi].to_vec()),
+                    pt_format::Values::I64(v) => pt_format::Values::I64(v[lo..hi].to_vec()),
+                    pt_format::Values::F64(v) => pt_format::Values::F64(v[lo..hi].to_vec()),
+                    pt_format::Values::Bool(v) => pt_format::Values::Bool(v[lo..hi].to_vec()),
                 };
             }
-            if let Some(vv) = &nc.validity {
+            if let Some(vv) = &col.validity {
                 nc.validity = Some(vv[start..end].to_vec());
-                // Re-slice present values for nullable columns.
-                if let pt_format::Data::Known {
-                    values: pt_format::Values::U64(v),
-                    ..
-                } = &mut nc.data
-                {
-                    let rows = col.u64_rows().unwrap_or_default();
-                    *v = rows[start..end].iter().flatten().copied().collect();
-                }
             }
             c.columns.push(nc);
         }
@@ -248,4 +247,67 @@ pub fn head_of<'a>(f: &'a PtfFile, kind: &[u8; 4]) -> Option<&'a Map> {
 
 pub fn key(s: &str) -> Key {
     Key(s.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::chunk_table;
+    use pt_format::{Column, Data, Enc, Table, Values};
+
+    /// Nullable columns of every type keep each row's value across chunk boundaries,
+    /// including when nulls precede the chunk (issue #110).
+    #[test]
+    fn chunk_table_slices_nullable_columns_by_present_rows() {
+        let rows = 65_536 * 2 + 10;
+        let present = |i: usize| !i.is_multiple_of(3);
+        let mut t = Table::new("x", rows);
+        let validity: Vec<bool> = (0..rows).map(present).collect();
+        let idx: Vec<usize> = (0..rows).filter(|i| present(*i)).collect();
+        let col = |name: &str, values: Values| Column {
+            name: name.to_string(),
+            data: Data::Known {
+                enc: Enc::Plain,
+                values,
+            },
+            validity: Some(validity.clone()),
+            meta: pt_format::Map::new(),
+        };
+        t.columns.push(col(
+            "u",
+            Values::U64(idx.iter().map(|i| *i as u64).collect()),
+        ));
+        t.columns.push(col(
+            "i",
+            Values::I64(idx.iter().map(|i| -(*i as i64)).collect()),
+        ));
+        t.columns.push(col(
+            "f",
+            Values::F64(idx.iter().map(|i| *i as f64).collect()),
+        ));
+        t.columns.push(Column::new(
+            "plain",
+            Enc::Plain,
+            Values::U64((0..rows as u64).collect()),
+        ));
+        let chunks = chunk_table(t);
+        assert_eq!(chunks.len(), 3);
+        let mut row = 0usize;
+        for c in &chunks {
+            let u = c.columns[0].u64_rows().unwrap();
+            let i = c.columns[1].i64_rows().unwrap();
+            let f = c.columns[2].f64_rows().unwrap();
+            let p = c.columns[3].u64_rows().unwrap();
+            assert_eq!(u.len(), c.rows);
+            for k in 0..c.rows {
+                let r = row + k;
+                let want = present(r).then_some(r);
+                assert_eq!(u[k], want.map(|r| r as u64));
+                assert_eq!(i[k], want.map(|r| -(r as i64)));
+                assert_eq!(f[k], want.map(|r| r as f64));
+                assert_eq!(p[k], Some(r as u64));
+            }
+            row += c.rows;
+        }
+        assert_eq!(row, rows);
+    }
 }
