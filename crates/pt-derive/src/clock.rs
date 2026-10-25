@@ -5,7 +5,7 @@ use pt_format::Value;
 use crate::raw::Raw;
 
 /// Method name of the REALTIME → MONO_RAW map.
-pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/3";
+pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/4";
 
 /// Growth of boot − mono between consecutive clock pairs above which the endpoint was
 /// suspended (the prober's `STALL_NS`, probe.md §4.3).
@@ -85,11 +85,21 @@ impl Suspends {
     }
 }
 
-/// Piecewise-linear REALTIME → MONO_RAW map for one endpoint.
+/// A jump of real − mono between neighbouring pairs above which REALTIME stepped.
+const STEP_NS: i64 = 1_000_000;
+
+/// How far before a mono hint a stamp may still map: the step threshold, so an offset error
+/// below it never moves a stamp to the other side of a step (derivation.md "Clock steps").
+const HINT_SLACK_NS: i64 = STEP_NS;
+
+/// Piecewise-linear REALTIME → MONO_RAW map for one endpoint, cut into step-free segments at
+/// every clock step and suspend (derivation.md "Clock steps").
 #[derive(Debug, Clone, Default)]
 pub struct RealToMono {
-    /// (real, mono) sorted by real.
+    /// (real, mono) sorted by mono.
     pts: Vec<(i64, i64)>,
+    /// Index into `pts` of the first pair of each segment after the first, ascending.
+    cuts: Vec<usize>,
     pub steps: Vec<(i64, i64)>,
     pub suspends: Suspends,
 }
@@ -104,8 +114,10 @@ impl RealToMono {
                 }
             }
         }
-        pts.sort();
-        pts.dedup_by_key(|p| p.0);
+        // MONO_RAW never steps, so mono order is the order the pairs were taken in; REALTIME
+        // may step back, where sorting by it would interleave the pairs of both sides.
+        pts.sort_by_key(|p| (p.1, p.0, p.2));
+        pts.dedup_by_key(|p| p.1);
         // The pacer's suspend events (probe.md §4.3), each recorded after a wake: (t,
         // suspended_ns).
         let mut woke: Vec<(i64, Option<i64>)> = raw
@@ -128,14 +140,16 @@ impl RealToMono {
             .collect();
         woke.sort_unstable();
         let mut steps = Vec::new();
+        let mut cuts = Vec::new();
         let mut suspends = Suspends::default();
         // The previous interval's suspend, while no event has placed it: its event may be
         // recorded after its later pair, that is in this interval.
         let mut unplaced: Option<i64> = None;
-        for w in pts.windows(2) {
+        for (i, w) in pts.windows(2).enumerate() {
             let (d0, d1) = (w[0].0 - w[0].1, w[1].0 - w[1].1);
-            if (d1 - d0).abs() > 1_000_000 {
+            if (d1 - d0).abs() > STEP_NS {
                 steps.push((w[1].1, d1 - d0));
+                cuts.push(i + 1);
             }
             if let (Some(b0), Some(b1)) = (w[0].2, w[1].2) {
                 let grew = (b1 - w[1].1) - (b0 - w[0].1);
@@ -165,6 +179,9 @@ impl RealToMono {
                         since,
                         ns: grew,
                     });
+                    if cuts.last() != Some(&(i + 1)) {
+                        cuts.push(i + 1);
+                    }
                     if at == pair {
                         unplaced = Some(grew);
                     }
@@ -176,6 +193,7 @@ impl RealToMono {
         suspends.list.sort();
         RealToMono {
             pts: pts.into_iter().map(|(r, m, _)| (r, m)).collect(),
+            cuts,
             steps,
             suspends,
         }
@@ -185,30 +203,89 @@ impl RealToMono {
         self.pts.is_empty()
     }
 
-    /// Map a REALTIME value to MONO_RAW. Between the two pairs of a suspend the map is a step:
-    /// the earlier pair's offset below the placement, then the later pair's offset, never below
-    /// the placement.
-    pub fn map(&self, real: i64) -> Option<i64> {
-        let p = &self.pts;
-        match p.len() {
-            0 => None,
-            1 => Some(real - (p[0].0 - p[0].1)),
-            n => {
-                let i = p.partition_point(|x| x.0 <= real).clamp(1, n - 1);
-                let (a, b) = (p[i - 1], p[i]);
-                if real > a.0
-                    && real < b.0
-                    && let Some(s) = self.suspends.list.iter().find(|s| s.pair == b.1)
-                {
-                    let before = a.1 + (real - a.0);
-                    if before < s.at {
-                        return Some(before);
-                    }
-                    return Some((b.1 - (b.0 - real)).max(s.at));
-                }
-                let slope = (b.1 - a.1) as f64 / (b.0 - a.0).max(1) as f64;
-                Some(a.1 + ((real - a.0) as f64 * slope).round() as i64)
-            }
+    /// The pairs of segment `k`.
+    fn segment(&self, k: usize) -> &[(i64, i64)] {
+        let lo = if k == 0 { 0 } else { self.cuts[k - 1] };
+        let hi = self.cuts.get(k).copied().unwrap_or(self.pts.len());
+        &self.pts[lo..hi]
+    }
+
+    /// The suspend at cut `c`, if the cut is one.
+    fn cut_suspend(&self, c: usize) -> Option<&Suspend> {
+        let pair = self.pts[self.cuts[c]].1;
+        self.suspends.list.iter().find(|s| s.pair == pair)
+    }
+
+    /// Whether `mono` lies before cut `c`: below a suspend's placement, or below the later
+    /// pair of a step, whose place in the pair interval is unknown.
+    fn before_cut(&self, c: usize, mono: i64) -> bool {
+        match self.cut_suspend(c) {
+            Some(s) => mono < s.at,
+            None => mono < self.pts[self.cuts[c]].1,
+        }
+    }
+
+    /// Whether `mono` lies after cut `c`: at or above a suspend's placement, or above the
+    /// earlier pair of a step.
+    fn after_cut(&self, c: usize, mono: i64) -> bool {
+        match self.cut_suspend(c) {
+            Some(s) => mono >= s.at,
+            None => mono > self.pts[self.cuts[c] - 1].1,
+        }
+    }
+
+    /// The mono of a real stamp in the range cut `c` skipped: a suspend's placement, else the
+    /// linear interpolation between the cut's two pairs (`/3`'s result).
+    fn fill(&self, c: usize, real: i64) -> i64 {
+        if let Some(s) = self.cut_suspend(c) {
+            return s.at;
+        }
+        let j = self.cuts[c];
+        let (a, b) = (self.pts[j - 1], self.pts[j]);
+        let slope = (b.1 - a.1) as f64 / (b.0 - a.0).max(1) as f64;
+        (a.1 + ((real - a.0) as f64 * slope).round() as i64).clamp(a.1, b.1)
+    }
+
+    /// Map a REALTIME value to MONO_RAW (derivation.md "Clock steps"). Each step-free segment
+    /// whose mapping of `real` lies on its own side of the cuts beside it gives a candidate.
+    /// Where several do, `hint` (a mono the stamp is not expected to precede) picks the
+    /// earliest at or after `hint − HINT_SLACK_NS`, else the latest; without a hint the mono
+    /// is unknown. Across a suspend the map is a step: the earlier segment below the
+    /// placement, then the later one, never below the placement.
+    pub fn map(&self, real: i64, hint: Option<i64>) -> Option<i64> {
+        if self.pts.is_empty() {
+            return None;
+        }
+        if self.cuts.is_empty() {
+            return Some(interp(&self.pts, real));
+        }
+        let n = self.cuts.len() + 1;
+        let at: Vec<i64> = (0..n).map(|k| interp(self.segment(k), real)).collect();
+        let mut cand: Vec<i64> = (0..n)
+            .filter(|&k| {
+                (k == 0 || self.after_cut(k - 1, at[k]))
+                    && (k == n - 1 || self.before_cut(k, at[k]))
+            })
+            .map(|k| at[k])
+            .collect();
+        if cand.is_empty() {
+            // In the real range a forward step or suspend skipped.
+            cand = (0..n - 1)
+                .filter(|&c| !self.before_cut(c, at[c]) && !self.after_cut(c, at[c + 1]))
+                .map(|c| self.fill(c, real))
+                .collect();
+        }
+        cand.sort_unstable();
+        cand.dedup();
+        match (cand.as_slice(), hint) {
+            ([], _) => None,
+            ([m], _) => Some(*m),
+            (_, None) => None,
+            (c, Some(h)) => c
+                .iter()
+                .find(|&&m| m >= h - HINT_SLACK_NS)
+                .or(c.last())
+                .copied(),
         }
     }
 
@@ -218,7 +295,7 @@ impl RealToMono {
         let (mut dm, mut dr) = (0i64, 0i64);
         for w in self.pts.windows(2) {
             let (d0, d1) = (w[0].0 - w[0].1, w[1].0 - w[1].1);
-            if (d1 - d0).abs() > 1_000_000 {
+            if (d1 - d0).abs() > STEP_NS {
                 continue;
             }
             dr += w[1].0 - w[0].0;
@@ -231,6 +308,14 @@ impl RealToMono {
         Value::map()
             .with("method", method)
             .with("pairs", self.pts.len())
+            .with(
+                "segments",
+                if self.pts.is_empty() {
+                    0
+                } else {
+                    self.cuts.len() + 1
+                },
+            )
             .with(
                 "steps",
                 Value::Array(
@@ -257,6 +342,21 @@ impl RealToMono {
                         .collect(),
                 ),
             )
+    }
+}
+
+/// Piecewise-linear interpolation of `real` between the (real, mono) pairs `p` of one
+/// step-free segment, extrapolated with the end pair intervals' slope.
+fn interp(p: &[(i64, i64)], real: i64) -> i64 {
+    match p.len() {
+        0 => real,
+        1 => real - (p[0].0 - p[0].1),
+        n => {
+            let i = p.partition_point(|x| x.0 <= real).clamp(1, n - 1);
+            let (a, b) = (p[i - 1], p[i]);
+            let slope = (b.1 - a.1) as f64 / (b.0 - a.0).max(1) as f64;
+            a.1 + ((real - a.0) as f64 * slope).round() as i64
+        }
     }
 }
 
@@ -447,6 +547,13 @@ impl Offset {
         self.suspends_a.from_cont(a)
     }
 
+    /// Convert a.mono to b.mono: the inverse of [`Offset::b_to_a`].
+    pub fn a_to_b(&self, a_mono: i64) -> i64 {
+        let a = self.suspends_a.to_cont(a_mono) as f64;
+        let b = (a + self.theta0 + self.skew * (a - self.t_ref)).round() as i64;
+        self.suspends_b.from_cont(b)
+    }
+
     pub fn to_value(&self) -> Value {
         Value::map()
             .with("method", OFFSET_METHOD)
@@ -535,13 +642,19 @@ impl TimeBase {
         }
     }
 
-    /// Endpoint real → trace ns.
-    pub fn real(&self, ep: &str, real: i64) -> Option<i64> {
+    /// Endpoint real → trace ns. `hint` is a trace time the stamp is not expected to precede,
+    /// which picks the side of a clock step a stamp in its overlap lies on (derivation.md
+    /// "Clock steps").
+    pub fn real(&self, ep: &str, real: i64, hint: Option<i64>) -> Option<i64> {
         match ep {
-            "a" => self.a.map(real).map(|m| m - self.t0),
+            "a" => self
+                .a
+                .map(real, hint.map(|h| h + self.t0))
+                .map(|m| m - self.t0),
             _ => {
-                let m = self.b.map(real)?;
-                Some(self.off.as_ref()?.b_to_a(m) - self.t0)
+                let off = self.off.as_ref()?;
+                let m = self.b.map(real, hint.map(|h| off.a_to_b(h + self.t0)))?;
+                Some(off.b_to_a(m) - self.t0)
             }
         }
     }
@@ -565,8 +678,8 @@ mod tests {
             pts: vec![(1_000, 100), (2_000, 1_100)],
             ..Default::default()
         };
-        assert_eq!(m.map(1_500), Some(600));
-        assert_eq!(m.map(3_000), Some(2_100));
+        assert_eq!(m.map(1_500, None), Some(600));
+        assert_eq!(m.map(3_000, None), Some(2_100));
     }
 
     #[test]
@@ -580,6 +693,73 @@ mod tests {
         let a = 2_000_000_000i64;
         let b = a + (o.theta0 + o.skew * (a as f64 - o.t_ref)) as i64;
         assert!((o.b_to_a(b) - a).abs() < 10);
+        assert!((o.a_to_b(a) - b).abs() < 10);
+        assert!((o.b_to_a(o.a_to_b(a)) - a).abs() < 10);
+    }
+
+    /// Clock pairs at 1 Hz of mono over 30 s with real = mono + 7 s, and REALTIME stepped by
+    /// `jump` ns between the pairs at mono 10 s and 11 s.
+    fn stepped_pairs(jump: i64) -> crate::raw::Rows {
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * 1_000_000_000).collect();
+        let real = mono
+            .iter()
+            .map(|m| m + 7_000_000_000 + if *m > T0 + 10_000_000_000 { jump } else { 0 })
+            .collect();
+        rows(&[("real", real), ("mono", mono)])
+    }
+
+    #[test]
+    fn backward_step_overlap_maps_by_the_hint() {
+        // REALTIME steps back 3 s: the real values of mono 8 s … 10 s and 11 s … 13 s overlap,
+        // and /3, sorted by real, interleaved the pairs of both sides.
+        let mut raw = Raw::default();
+        raw.tables
+            .insert("pairs[a]".into(), stepped_pairs(-3e9 as i64));
+        let m = RealToMono::from_raw(&raw, "a");
+        let s = |x: f64| T0 + (x * 1e9) as i64;
+        assert_eq!(m.steps, vec![(s(11.0), -3_000_000_000)]);
+        let v = m.to_value(PAIRS_METHOD);
+        assert_eq!(v.get("segments").and_then(Value::as_i64), Some(2));
+        // A stamp at mono 9.5 s, or at 12.5 s: the same real value.
+        let r = s(9.5) + 7_000_000_000;
+        assert_eq!(r, s(12.5) + 4_000_000_000);
+        assert_eq!(m.map(r, None), None);
+        assert_eq!(m.map(r, Some(s(9.49))), Some(s(9.5)));
+        // A hint up to 1 ms after the stamp still finds it.
+        assert_eq!(m.map(r, Some(s(9.5005))), Some(s(9.5)));
+        assert_eq!(m.map(r, Some(s(12.49))), Some(s(12.5)));
+        // A hint after both: the later.
+        assert_eq!(m.map(r, Some(s(20.0))), Some(s(12.5)));
+        // Outside the overlap there is one side, hint or not.
+        for (x, real) in [
+            (5.0, s(5.0) + 7_000_000_000),
+            (20.0, s(20.0) + 4_000_000_000),
+        ] {
+            assert_eq!(m.map(real, None), Some(s(x)), "mono {x}");
+            assert_eq!(m.map(real, Some(s(0.0))), Some(s(x)), "mono {x}");
+        }
+        // The rate skips the step.
+        assert!((m.rate().unwrap() - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn forward_step_is_not_interpolated_across() {
+        // REALTIME steps forward 300 ms somewhere between the pairs at mono 10 s and 11 s.
+        let mut raw = Raw::default();
+        raw.tables
+            .insert("pairs[a]".into(), stepped_pairs(300_000_000));
+        let m = RealToMono::from_raw(&raw, "a");
+        let s = |x: f64| T0 + (x * 1e9) as i64;
+        assert_eq!(m.steps, vec![(s(11.0), 300_000_000)]);
+        // A stamp of real mono + 7 s in the pair interval: before the step at mono 10.5 s, or
+        // after it at 10.2 s. /3's line put it at about 10.27 s, which is neither.
+        let r = s(10.5) + 7_000_000_000;
+        assert_eq!(m.map(r, Some(s(10.49))), Some(s(10.5)));
+        assert_eq!(m.map(r, Some(s(10.19))), Some(s(10.2)));
+        assert_eq!(m.map(r, None), None);
+        // Away from the step, each side's own offset.
+        assert_eq!(m.map(s(9.5) + 7_000_000_000, None), Some(s(9.5)));
+        assert_eq!(m.map(s(11.5) + 7_300_000_000, None), Some(s(11.5)));
     }
 
     /// Deterministic uniform [0, 1).
@@ -844,26 +1024,32 @@ mod tests {
         );
         // Before the suspend: the earlier pair's offset (real = mono + 7 s).
         let r0 = T0 + 10_000_000_000 + 7_000_000_000;
-        assert_eq!(m.map(r0 + 400_000_000), Some(T0 + 10_400_000_000));
+        assert_eq!(m.map(r0 + 400_000_000, None), Some(T0 + 10_400_000_000));
         // Inside the suspend and after the wake, until the later pair: its mono.
-        assert_eq!(m.map(r0 + 1_000_000_000), Some(at));
-        assert_eq!(m.map(r0 + 500_000_000_000), Some(at));
+        assert_eq!(m.map(r0 + 1_000_000_000, None), Some(at));
+        assert_eq!(m.map(r0 + 500_000_000_000, None), Some(at));
         // After the later pair: its offset again.
-        assert_eq!(m.map(at + 907_500_000_000), Some(at + 500_000_000));
+        assert_eq!(m.map(at + 907_500_000_000, None), Some(at + 500_000_000));
         // Monotonic throughout.
         let mut last = i64::MIN;
         for k in 0..2_000 {
-            let mono = m.map(r0 - 1_000_000_000 + k * 1_000_000_000).unwrap();
+            let mono = m.map(r0 - 1_000_000_000 + k * 1_000_000_000, None).unwrap();
             assert!(mono >= last, "step {k}");
             last = mono;
         }
         // The suspend is also a step of real − mono, so the pairs rate skips it.
         assert!((m.rate().unwrap() - 1.0).abs() < 1e-12);
-        // Without boot there is no suspend: the map is the linear interpolation of /1.
+        // Without boot there is no suspend, only a step: a stamp in the range it skipped maps
+        // by the linear interpolation of /1 between its two pairs.
         raw.tables.get_mut("pairs[a]").unwrap().cols.remove("boot");
         let m = RealToMono::from_raw(&raw, "a");
         assert!(m.suspends.list.is_empty());
-        assert!(m.map(r0 + 500_000_000_000).unwrap() > T0 + 10_400_000_000);
+        assert_eq!(m.steps, vec![(at, 900_000_000_000)]);
+        let mid = m.map(r0 + 500_000_000_000, None).unwrap();
+        assert!(mid > T0 + 10_400_000_000 && mid < at);
+        // Either side of it, each pair's own offset.
+        assert_eq!(m.map(r0 + 400_000_000, None), Some(T0 + 10_400_000_000));
+        assert_eq!(m.map(at + 907_500_000_000, None), Some(at + 500_000_000));
     }
 
     /// An EVNT `stall` event of `ep` at mono `t`.
@@ -917,17 +1103,20 @@ mod tests {
         let before = |mono: i64| mono + 7_000_000_000;
         let after = |mono: i64| mono + 7_000_000_000 + susp;
         assert_eq!(
-            m.map(before(T0 + 10_400_000_000)),
+            m.map(before(T0 + 10_400_000_000), None),
             Some(T0 + 10_400_000_000)
         );
         // Inside the suspend: its placement.
-        assert_eq!(m.map(before(woke) + susp / 2), Some(woke));
+        assert_eq!(m.map(before(woke) + susp / 2, None), Some(woke));
         // After the wake and before the later pair: the later pair's offset, not its mono.
-        assert_eq!(m.map(after(T0 + 10_800_000_000)), Some(T0 + 10_800_000_000));
+        assert_eq!(
+            m.map(after(T0 + 10_800_000_000), None),
+            Some(T0 + 10_800_000_000)
+        );
         let mut last = i64::MIN;
         for k in 0..2_000 {
             let mono = m
-                .map(before(since) - 1_000_000_000 + k * 500_000_000)
+                .map(before(since) - 1_000_000_000 + k * 500_000_000, None)
                 .unwrap();
             assert!(mono >= last, "step {k}");
             last = mono;
