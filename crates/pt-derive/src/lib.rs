@@ -68,7 +68,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "delay.size-slope/1",
         "capacity.saturated-arrivals/2",
         "capacity.train-dispersion/1",
-        "queue.loss-onset/2",
+        "queue.loss-onset/3",
         "policer.lossy-flat/2",
         "hostdrop.rxq-gap/1",
         "hostdrop.host-fullsock/1",
