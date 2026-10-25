@@ -71,6 +71,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
         "capacity.train-dispersion/1",
         "queue.loss-onset/3",
         dir::POLICER_METHOD,
+        dir::CLASS_POLICER_METHOD,
         "hostdrop.rxq-gap/1",
         "hostdrop.host-fullsock/1",
         "qdisc.drop-count/2",
@@ -156,7 +157,7 @@ pub fn derive(f: &PtfFile, tool: &Tool) -> Vec<Section> {
             );
         }
     }
-    let mut plcy = policy::plcy(&raw, &tb);
+    let mut plcy = policy::plcy(&raw, &tb, &ab.class_policers);
     if overlaid {
         overlay::limit_policy(&mut plcy);
     }
