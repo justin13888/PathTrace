@@ -47,6 +47,7 @@ Queue depth (bytes and time) comes from peak queueing delay before loss onset, c
 ### REQ-DRV-007: Policer
 - status: met
 - spec: §8, §7.4
+- design: docs/design/derivation.md
 - evidence: EXP-0002-r14
 
 A token-bucket policer (rate, burst) is detected per class: loss without delay growth, with an initial burst followed by a plateau.
