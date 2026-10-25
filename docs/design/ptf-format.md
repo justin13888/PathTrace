@@ -355,3 +355,11 @@ EVNT types added in 1.3: `host_state {clock_sync, power}` (values as the META ke
 | `train_offsets[dir]` | train, idx, offset ns (nullable = lost) |
 
 PATH fields reference these by name (e.g. `"opportunities": "capacity_opps[a_to_b]"`). The CDDL for every head is `ptf-1.0.cddl`.
+
+## Derived fields
+
+Conventions a reader of PATH needs in order to interpret a value, beyond its method's rule in derivation.md:
+
+- **Gilbert-Elliott loss** (`PATH.<dir>.loss.ge`): `p` = P(good → bad) and `r` = P(bad → good) per packet. `h` and `k` are **loss** probabilities: `h` = P(loss | bad state) and `k` = P(loss | good state). `loss.gilbert-runs` writes `h = 1, k = 0`, meaning every packet in the bad state is lost and none in the good one. Gilbert-Elliott literature, and netem, often use h and k for the probability of *delivery* in each state instead. netem's `gemodel p r 1-h 1-k` takes loss probabilities in its third and fourth places, so PATH's `h` and `k` go there unchanged (`gemodel p r 100% 0%` for `h = 1, k = 0`, `export.netem/1`). A reader that takes them as delivery probabilities inverts the loss.
+- **Capacity segments** (`PATH.<dir>.capacity.segments`): `quality` is `saturated` (measured delivery opportunities, `workload: "heavy"`) or `estimated` (a per-segment `rate_bps` from a probe that did not saturate the path, `workload` naming it, e.g. `chirp`, with its own `method`). Time outside every segment is `unknown` (`outside_segments`), never zero capacity.
+- **Receive-stamp sources**: a map `{kernel, user, unknown}` (`timestamps.rx_counts`, and `rx_src` on an estimate) counts received packets by `pkt.rx_src`. `unknown` counts those whose `rx_src` is null.
