@@ -212,7 +212,8 @@ struct ProbeArgs {
     /// Profile; `auto` picks `light` on metered connections, else `standard`.
     #[arg(long, default_value = "auto", value_parser = ["auto", "smoke", "light", "standard", "deep"])]
     profile: String,
-    /// Tracking duration for the deep profile, seconds.
+    /// Tracking duration, seconds (deep default 600): one short saturation per minute, at most
+    /// 150 rounds (under 9060 s); refused when its background traffic would not fit the data cap.
     #[arg(long)]
     track_secs: Option<u64>,
     /// Output directory for logs and the trace.

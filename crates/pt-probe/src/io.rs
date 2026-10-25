@@ -178,6 +178,18 @@ impl Shared {
             cap_hit: AtomicBool::new(false),
         })
     }
+
+    /// Install flow definition `s`. A flow id defined again is a new use of it that restarts
+    /// at seq 0, so its receive statistics (the `min_owd` queueing-delay baseline, highest seq,
+    /// counters) are dropped rather than mixed with the earlier use's (docs/design/probe.md §6,
+    /// Tracking).
+    pub fn define_flow(&self, s: FlowSpec) {
+        let id = s.id;
+        let earlier = self.flows.write().expect("lock").insert(id, s);
+        if earlier.is_some() {
+            self.fb.lock().expect("lock").remove(&id);
+        }
+    }
 }
 
 /// Commands to the pacer.
@@ -1266,6 +1278,42 @@ mod tests {
         // Already stopped (by the phase end, the dead-man or an earlier halt): nothing to record.
         assert!(!halt(&mut gens, 7));
         assert_eq!(gens.len(), 1);
+    }
+
+    #[test]
+    fn redefined_flow_drops_its_feedback_state() {
+        let mk = |id| {
+            crate::plan::spec(
+                id,
+                "heavy",
+                Role::A,
+                Sock::Main,
+                1200,
+                Pattern::Iso {
+                    interval_ns: 1_000_000,
+                },
+                10,
+                3_000_000_000,
+                4433,
+            )
+        };
+        let shared = Shared::new(Role::B, u64::MAX, u64::MAX);
+        let used = FbStats {
+            highest_seq: 900,
+            count: 901,
+            min_owd: Some(-5_000_000),
+            ..FbStats::default()
+        };
+        // A first definition keeps whatever already arrived for it.
+        shared.fb.lock().unwrap().insert(100, used.clone());
+        shared.define_flow(mk(100));
+        assert_eq!(shared.fb.lock().unwrap()[&100].highest_seq, 900);
+        // Defining it again starts its statistics afresh; other flows keep theirs.
+        shared.fb.lock().unwrap().insert(101, used);
+        shared.define_flow(mk(100));
+        assert!(!shared.fb.lock().unwrap().contains_key(&100));
+        assert_eq!(shared.fb.lock().unwrap()[&101].min_owd, Some(-5_000_000));
+        assert!(shared.flows.read().unwrap().contains_key(&100));
     }
 
     #[test]

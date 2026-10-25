@@ -286,6 +286,43 @@ pub struct ProbeOpts {
     pub verbose: bool,
 }
 
+/// Tracking rounds a session may run: round i uses flow id `ids::TRACK0 + i`, and 100–249 is
+/// all the one-byte id space has below the control flows (250, 251). A reused id would restart
+/// at seq 0 and `merge`, which joins by (flow, seq), would join its sends to the earlier use's
+/// arrivals (issue #106).
+pub const MAX_TRACK_ROUNDS: u64 = 150;
+
+/// Whether profile `p` (its data cap already lowered by `--data-cap`) can run `track_s`
+/// seconds of tracking: at most [`MAX_TRACK_ROUNDS`] rounds, and background traffic over the
+/// planned session (at a 1500-byte MTU, the most a session uses) within the cap
+/// (docs/design/probe.md §6, Tracking). The error names the largest tracking time that fits.
+pub fn check_track(p: &Profile, track_s: u64) -> Result<(), String> {
+    if track_s == 0 {
+        return Ok(());
+    }
+    let fits_cap =
+        |t: u64| crate::plan::background_bps(p, 1500) * p.planned_s(t) <= p.data_cap as f64;
+    let fits = |t: u64| Profile::track_rounds(t) <= MAX_TRACK_ROUNDS && fits_cap(t);
+    if fits(track_s) {
+        return Ok(());
+    }
+    let max = (0..track_s.min((MAX_TRACK_ROUNDS + 1) * 60))
+        .rev()
+        .find(|&t| fits(t))
+        .unwrap_or(0);
+    let why = if Profile::track_rounds(track_s) > MAX_TRACK_ROUNDS {
+        format!("more than {MAX_TRACK_ROUNDS} tracking rounds (one per 60 s)")
+    } else {
+        format!(
+            "background traffic past the {} profile's {} B data cap",
+            p.name, p.data_cap
+        )
+    };
+    Err(format!(
+        "--track-secs {track_s} needs {why}; at most {max} s fits"
+    ))
+}
+
 #[derive(Debug, Clone)]
 pub struct ProbeOutcome {
     pub trace_id: String,
@@ -484,12 +521,7 @@ impl Ctx {
         }
         for s in specs {
             self.rec.flow(s.to_value());
-            self.ep
-                .shared
-                .flows
-                .write()
-                .expect("lock")
-                .insert(s.id, s.clone());
+            self.ep.shared.define_flow(s.clone());
             if s.sender == Role::A {
                 if is_controlled(&s.pattern) {
                     self.ctrlr.add(s.id, at, s.duration_ns, s.max_bytes);
@@ -931,6 +963,8 @@ fn handshake_tcp(ip: IpAddr, init: &[u8]) -> Option<(TcpStream, u32, Vec<u8>)> {
 /// Run one measurement session as the initiator. Always returns the initiator log path when a
 /// session was established, even if phases failed (REQ-PRB-020).
 pub fn run_probe(opts: &ProbeOpts) -> io::Result<ProbeOutcome> {
+    check_track(&opts.profile, opts.track_s.unwrap_or(opts.profile.track_s))
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
     let kp: Keypair = config::load_keypair(&opts.config_dir)?;
     let (_, all) = resolve(&opts.responder.addr, opts.prefer_v6)?;
     let sopts = sock_opts();
@@ -1807,14 +1841,16 @@ fn run_phases(
         if !ctx.phase(10, "tracking") || ctx.udp_blocked(10, "tracking saturations") {
             return;
         }
-        let rounds = track / 60;
+        // `run_probe` refused a longer tracking time; the bound keeps every id unique anyway.
+        let rounds = Profile::track_rounds(track).min(MAX_TRACK_ROUNDS);
         for i in 0..rounds {
             ctx.sleep(57.0);
             if ctx.interrupted() {
                 return;
             }
             let sender = if i % 2 == 0 { Role::A } else { Role::B };
-            let id = ids::TRACK0.saturating_add((i % 150) as u8);
+            // Every round has a flow id of its own (i < MAX_TRACK_ROUNDS = 150).
+            let id = ids::TRACK0 + i as u8;
             if let Some(s) = ctx.heavy(id, sender, 10, 3.0) {
                 ctx.start(vec![s], 50);
             }
@@ -2479,7 +2515,7 @@ fn responder_session(
                         continue;
                     };
                     rec.flow(s.to_value());
-                    shared.flows.write().expect("lock").insert(s.id, s.clone());
+                    shared.define_flow(s.clone());
                     if s.sender == Role::B {
                         if is_controlled(&s.pattern) {
                             ctrlr.add(s.id, at, s.duration_ns, s.max_bytes);
@@ -2533,6 +2569,44 @@ pub fn recv_timeout<T>(rx: &Receiver<T>, d: Duration) -> Option<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn track_bounds_refuse_wrapping_ids_and_overfull_caps() {
+        let p = |n: &str| Profile::by_name(n).unwrap();
+        // No tracking always fits, whatever the cap.
+        assert_eq!(check_track(&p("light"), 0), Ok(()));
+        // deep: 150 rounds (ids 100..=249) is the bound; round 151 would reuse id 100.
+        assert_eq!(check_track(&p("deep"), 600), Ok(()));
+        assert_eq!(check_track(&p("deep"), 9059), Ok(()));
+        assert_eq!(
+            check_track(&p("deep"), 9060),
+            Err("--track-secs 9060 needs more than 150 tracking rounds (one per 60 s); at most 9059 s fits".into())
+        );
+        assert!(
+            check_track(&p("deep"), 100_000)
+                .unwrap_err()
+                .ends_with("at most 9059 s fits")
+        );
+        // light: 15.4 kB/s of background over (35 s + tracking) within 2 MB.
+        assert_eq!(check_track(&p("light"), 60), Ok(()));
+        assert_eq!(
+            check_track(&p("light"), 600),
+            Err("--track-secs 600 needs background traffic past the light profile's 2000000 B data cap; at most 94 s fits".into())
+        );
+        // standard: 36.4 kB/s over (106 s + tracking) within 200 MB.
+        assert_eq!(check_track(&p("standard"), 5388), Ok(()));
+        assert!(
+            check_track(&p("standard"), 5389)
+                .unwrap_err()
+                .ends_with("at most 5388 s fits")
+        );
+        // A lowered cap lowers the bound: deep's default 600 s does not fit in 10 MB.
+        let small = p("deep").with_data_cap(Some(10_000_000));
+        assert!(check_track(&small, 600).is_err());
+        // Every round of the longest tracking time has an id of its own, below the control flows.
+        let last = ids::TRACK0 + (Profile::track_rounds(9059) - 1) as u8;
+        assert_eq!(last, 249);
+    }
 
     #[test]
     fn clock_domains_record_their_os_source() {
