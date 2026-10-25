@@ -392,6 +392,10 @@ const MIN_SPAN_NS: f64 = 10e9;
 const MAX_SKEW: f64 = 500e-6;
 /// Span (ns) from which an exchange skew earns full confidence.
 const FULL_SPAN_NS: f64 = 60e9;
+/// Smallest σ (1 ppm) the exchange and pairs skews are compared with.
+const MIN_SKEW_SIGMA: f64 = 1e-6;
+/// σ multiple beyond which the exchange skew disagrees with the pairs skew.
+const SKEW_AGREE_SIGMAS: f64 = 3.0;
 
 /// Where `Offset::skew` came from (derivation.md "Clock skew").
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -442,6 +446,9 @@ pub struct Offset {
     pub skew_exchange_uncertainty: Option<f64>,
     /// Pairs skew, whether or not it was used.
     pub skew_pairs: Option<f64>,
+    /// Whether the exchange skew disagreed with the pairs skew by more than 3σ;
+    /// None unless both were usable (derivation.md "Skew agreement").
+    pub skew_disagrees: Option<bool>,
     /// t1 span of the exchanges (ns).
     pub span_ns: f64,
     /// Suspends of each endpoint; the fit is on their suspend-continuous clocks
@@ -490,7 +497,7 @@ impl Offset {
     }
 
     /// Fit the offset to `ex`, with `pairs` the pairs-derived skew if any
-    /// (derivation.md "Time base", `clock.exchange-minfilter/4`).
+    /// (derivation.md "Time base", `clock.exchange-minfilter/5`).
     pub fn fit(ex: &[Exchange], pairs: Option<f64>) -> Option<Offset> {
         let s: Vec<&Exchange> = ex
             .iter()
@@ -531,8 +538,14 @@ impl Offset {
         let env_ok = span_ns >= MIN_SPAN_NS
             && env.is_some_and(|(sf, sb)| sf.abs() <= MAX_SKEW && sb.abs() <= MAX_SKEW);
         let pairs_ok = pairs.filter(|p| p.abs() <= MAX_SKEW);
+        let skew_disagrees = match (env_ok, skew_exchange, skew_exchange_uncertainty, pairs_ok) {
+            (true, Some(k), Some(u), Some(p)) => {
+                Some((k - p).abs() > SKEW_AGREE_SIGMAS * u.max(MIN_SKEW_SIGMA))
+            }
+            _ => None,
+        };
         let (skew, skew_source) = match (env_ok, skew_exchange, pairs_ok) {
-            (true, Some(k), _) => (k, SkewSource::Exchange),
+            (true, Some(k), _) if skew_disagrees != Some(true) => (k, SkewSource::Exchange),
             (_, _, Some(p)) => (p, SkewSource::Pairs),
             _ => (0.0, SkewSource::None),
         };
@@ -548,6 +561,7 @@ impl Offset {
             skew_exchange,
             skew_exchange_uncertainty,
             skew_pairs: pairs,
+            skew_disagrees,
             span_ns,
             suspends_a: Suspends::default(),
             suspends_b: Suspends::default(),
@@ -558,6 +572,7 @@ impl Offset {
         match self.skew_source {
             _ if self.used < 3 => 0.4,
             SkewSource::None => 0.4,
+            SkewSource::Pairs if self.skew_disagrees == Some(true) => 0.5,
             SkewSource::Pairs => 0.6,
             SkewSource::Exchange if self.used >= 8 && self.span_ns >= FULL_SPAN_NS => 0.9,
             SkewSource::Exchange => 0.7,
@@ -592,6 +607,7 @@ impl Offset {
                 self.skew_exchange_uncertainty.map(|k| k * 1e9),
             )
             .with("skew_pairs_ppb", self.skew_pairs.map(|k| k * 1e9))
+            .with("skew_disagrees", self.skew_disagrees)
             .with("span_ns", self.span_ns)
             .with(
                 "t_ref_a_mono",
@@ -611,7 +627,7 @@ impl Offset {
 }
 
 /// Method name of the b.mono → a.mono offset.
-pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/4";
+pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/5";
 
 /// Slope of the line under every point that minimises the summed vertical
 /// distance to them: the lower convex hull's edge spanning the points' mean x.
@@ -889,8 +905,10 @@ mod tests {
             };
             (10e6 + q, 10e6 + r.next() * 2e6)
         });
-        let o = Offset::fit(&ex, Some(-300e-6)).unwrap();
+        // Pairs that agree within 3σ do not displace the envelope.
+        let o = Offset::fit(&ex, Some(21e-6)).unwrap();
         assert_eq!(o.skew_source, SkewSource::Exchange);
+        assert_eq!(o.skew_disagrees, Some(false));
         assert!((o.skew - 20e-6).abs() < 1e-6, "skew {}", o.skew);
         assert!(o.skew_exchange_uncertainty.unwrap() < 20e-6);
         assert_eq!(o.confidence(), 0.9);
@@ -900,6 +918,49 @@ mod tests {
             v.get("skew_source").and_then(Value::as_str),
             Some("exchange")
         );
+    }
+
+    #[test]
+    fn exchange_skew_that_disagrees_with_the_pairs_gives_way_to_them() {
+        // Issue #139, trace 01a15438: true skew 16 ppm, but over 120 s the
+        // forward floor drifts +52 ppm and the backward −36 ppm, so the
+        // envelope reads (s_f − s_b)/2 = 60 ppm with |s_f + s_b|/2 = 8 ppm.
+        // The pairs' 16 ppm is 44 ppm away, more than 3σ = 24 ppm.
+        let ex = exchanges(240, 500_000_000, 16e-6, |i| {
+            let t = i as f64 * 500e6;
+            (10e6 + 52e-6 * t, 10e6 - 36e-6 * t + 6e6)
+        });
+        let o = Offset::fit(&ex, Some(16e-6)).unwrap();
+        assert!((o.skew_exchange.unwrap() - 60e-6).abs() < 1e-6);
+        assert!((o.skew_exchange_uncertainty.unwrap() - 8e-6).abs() < 1e-6);
+        assert_eq!(o.skew_disagrees, Some(true));
+        assert_eq!(o.skew_source, SkewSource::Pairs);
+        assert_eq!(o.skew, 16e-6);
+        assert_eq!(o.confidence(), 0.5);
+        let v = o.to_value();
+        assert_eq!(v.get("skew_disagrees").and_then(Value::as_bool), Some(true));
+        // Pairs within 3σ (|60 − 40| = 20 ≤ 24 ppm) keep the envelope.
+        let o = Offset::fit(&ex, Some(40e-6)).unwrap();
+        assert_eq!(o.skew_disagrees, Some(false));
+        assert_eq!(o.skew_source, SkewSource::Exchange);
+        assert_eq!(o.confidence(), 0.9);
+        // Without pairs there is nothing to disagree with.
+        let o = Offset::fit(&ex, None).unwrap();
+        assert_eq!(o.skew_disagrees, None);
+        assert_eq!(o.skew_source, SkewSource::Exchange);
+    }
+
+    #[test]
+    fn exchange_skew_is_compared_with_at_least_one_ppm() {
+        // Clean floors: the envelope's uncertainty is ~0, so σ is the 1 ppm
+        // floor and pairs 2.5 ppm away agree while 3.5 ppm away do not.
+        let ex = exchanges(240, 500_000_000, 20e-6, |_| (10e6, 10e6));
+        let o = Offset::fit(&ex, Some(22.5e-6)).unwrap();
+        assert!(o.skew_exchange_uncertainty.unwrap() < 0.1e-6);
+        assert_eq!(o.skew_source, SkewSource::Exchange);
+        let o = Offset::fit(&ex, Some(23.5e-6)).unwrap();
+        assert_eq!(o.skew_source, SkewSource::Pairs);
+        assert_eq!(o.confidence(), 0.5);
     }
 
     #[test]
@@ -1500,6 +1561,14 @@ mod tests {
         for v in pb.cols.values_mut() {
             for x in v.iter_mut().flatten() {
                 *x += b0 - T0;
+            }
+        }
+        // b's MONO_RAW is 20 ppm fast against its NTP-disciplined REALTIME, so the pairs
+        // agree with the exchanges.
+        let mono_b: Vec<i64> = pb.cols["mono"].iter().flatten().copied().collect();
+        for (x, m) in pb.cols.get_mut("real").unwrap().iter_mut().zip(&mono_b) {
+            if let Some(x) = x {
+                *x -= ((m - b0) as f64 * (1.0 - 1.0 / (1.0 + 20e-6))).round() as i64;
             }
         }
         raw.tables.insert("pairs[b]".into(), pb);
