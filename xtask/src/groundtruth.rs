@@ -1261,13 +1261,17 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 // (issue #40): hold on the RTT-old queue gave 5.8–6.1 s there, hold on the
                 // predicted queue 7.7–8.1 s alone and 6.56 s beside two other scenarios on a
                 // loaded host (EXP-0002-r11), so the floor sits between the two laws at 6.5 s.
-                // a→b stays at about 4.1 s either way.
+                // a→b stays at about 4.1 s either way. Only `saturated` segments count: the
+                // chirp's `estimated` segment would otherwise lift a slow ramp over the floor.
                 let min_s = if dir == "b_to_a" { 6.5 } else { 3.0 };
                 let sat_s = t
                     .dir(dir, "/capacity/segments")
                     .and_then(Value::as_array)
                     .map(|s| {
                         s.iter()
+                            .filter(|w| {
+                                w.get("quality").and_then(Value::as_str) == Some("saturated")
+                            })
                             .filter_map(|w| Some(num(w.get("t1")?)? - num(w.get("t0")?)?))
                             .sum::<f64>()
                             / 1e9
