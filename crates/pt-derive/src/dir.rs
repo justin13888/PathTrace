@@ -245,7 +245,8 @@ struct Onset {
     /// saturation (3 s) only holds the controller's queue target, so its losses come at its
     /// maximum delay whatever the discipline.
     heavy: bool,
-    /// Median queueing delay before its losses over its maximum queueing delay.
+    /// Its onset depth (median over its losses of the maximum queueing delay in the 500 ms
+    /// before each) over its maximum queueing delay.
     ratio: f64,
     /// Losses with queueing delay below 2 ms.
     low_queue: bool,
