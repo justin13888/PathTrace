@@ -855,4 +855,98 @@ mod tests {
         let m = T0 + 20_000_000_000;
         assert!((o2.b_to_a(b(m as f64).round() as i64) - m).abs() > 100_000_000_000);
     }
+
+    #[test]
+    fn responder_suspend_is_a_clock_step_not_a_skew() {
+        // 400 s of a.mono with an exchange every 0.1 s, 10 ms each way, b 20 ppm fast; b is
+        // suspended for 300 s once its mono reaches 30.6 s past its first pair: b.mono stands
+        // still while a.mono runs on, and the exchanges that reach b while it sleeps are lost.
+        // b's pairs (1 Hz of b.mono) see it between 30 s and 31 s past their first.
+        let susp = 300_000_000_000i64;
+        let b0 = T0 + THETA0 as i64;
+        let sb = b0 + 30_600_000_000;
+        let at = b0 + 31_000_000_000;
+        // b's suspend-continuous clock at an a.mono, and b.mono at a continuous time (None
+        // while b sleeps).
+        let c = |t: f64| t + THETA0 + 20e-6 * (t - T0 as f64);
+        let bmono = |c: f64| {
+            if c < sb as f64 {
+                Some(c)
+            } else if c < (sb + susp) as f64 {
+                None
+            } else {
+                Some(c - susp as f64)
+            }
+        };
+        let ex: Vec<Exchange> = (0..4_000i64)
+            .filter_map(|i| {
+                let t1 = T0 + i * 100_000_000;
+                let ta = t1 as f64 + 10e6;
+                Some(Exchange {
+                    t1,
+                    t2: bmono(c(ta))?.round() as i64,
+                    t3: bmono(c(ta + 1e6))?.round() as i64,
+                    t4: t1 + 21_000_000,
+                })
+            })
+            .collect();
+        let col = |f: fn(&Exchange) -> i64| ex.iter().map(f).collect::<Vec<_>>();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "exchange[a]".into(),
+            rows(&[
+                ("t1", col(|e| e.t1)),
+                ("t2", col(|e| e.t2)),
+                ("t3", col(|e| e.t3)),
+                ("t4", col(|e| e.t4)),
+            ]),
+        );
+        raw.tables
+            .insert("pairs[a]".into(), suspended_pairs(410, 0, 0));
+        let mut pb = suspended_pairs(110, 30_000_000_000, susp);
+        for v in pb.cols.values_mut() {
+            for x in v.iter_mut().flatten() {
+                *x += b0 - T0;
+            }
+        }
+        raw.tables.insert("pairs[b]".into(), pb);
+        let tb = TimeBase::from_raw(&raw);
+        assert!(tb.a.suspends.list.is_empty());
+        assert_eq!(tb.b.suspends.list.len(), 1);
+        assert_eq!(
+            (tb.b.suspends.list[0].at, tb.b.suspends.list[0].ns),
+            (at, susp)
+        );
+        let o = tb.off.as_ref().unwrap();
+        // The exchanges with t2 or t3 between b's two pairs of the suspend are left out.
+        let ambiguous = ex
+            .iter()
+            .filter(|e| {
+                [e.t2, e.t3]
+                    .iter()
+                    .any(|&m| m > at - 1_000_000_000 && m < at)
+            })
+            .count();
+        assert!(ambiguous > 0);
+        assert_eq!(o.samples, ex.len() - ambiguous);
+        assert_eq!(o.skew_source, SkewSource::Exchange);
+        assert!((o.skew - 20e-6).abs() < 1e-8, "skew {}", o.skew);
+        // b times before the suspend and after its later pair map to their a.mono.
+        for m in [
+            T0 + 20_000_000_000,
+            T0 + 30_500_000_000,
+            T0 + 332_000_000_000,
+            T0 + 390_000_000_000,
+        ] {
+            let bm = bmono(c(m as f64)).unwrap().round() as i64;
+            let got = o.b_to_a(bm);
+            assert!((got - m).abs() < 1_000, "a.mono {m}: {got}");
+        }
+        // Fitted on b.mono as one line, as /2 did, the same exchanges put b times tens of
+        // seconds away from their a.mono.
+        let o2 = Offset::fit(&ex, None).unwrap();
+        let m = T0 + 20_000_000_000;
+        let bm = bmono(c(m as f64)).unwrap().round() as i64;
+        assert!((o2.b_to_a(bm) - m).abs() > 10_000_000_000);
+    }
 }
