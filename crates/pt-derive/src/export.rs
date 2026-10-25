@@ -451,6 +451,31 @@ mod tests {
     }
 
     #[test]
+    fn mahimahi_without_segments_does_not_fill() {
+        let rate = MAHIMAHI_QUANTUM as f64 * 8.0 * 1e3;
+        for capacity in [
+            Value::map().with("median_rate_bps", rate),
+            Value::map()
+                .with("median_rate_bps", rate)
+                .with("segments", Value::Array(Vec::new())),
+        ] {
+            let e = mahimahi_lines(&two_windows(capacity), "a_to_b");
+            assert_eq!(e.lines.len(), 200);
+            let sc = e.sidecar.unwrap();
+            assert_eq!(sc.get("filled_lines").and_then(Value::as_u64), Some(0));
+            assert_eq!(
+                sc.get("filled").and_then(Value::as_array).map(<[_]>::len),
+                Some(0)
+            );
+            assert_eq!(sc.get("fill_rate_bps"), Some(&Value::Null));
+            assert_eq!(
+                sc.get("reason").and_then(Value::as_str),
+                Some("no saturated segments in PATH capacity")
+            );
+        }
+    }
+
+    #[test]
     fn mahimahi_nothing_to_export() {
         let f = PtfFile {
             major: pt_format::container::MAJOR,
