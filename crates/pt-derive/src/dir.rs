@@ -15,6 +15,8 @@ pub const CAPACITY_METHOD: &str = "capacity.saturated-arrivals/3";
 pub const CHIRP_METHOD: &str = "capacity.chirp-dispersion/1";
 /// Policer rate and token-bucket burst (derivation.md, `policer`).
 pub const POLICER_METHOD: &str = "policer.lossy-flat/3";
+/// The policer rule applied to one P7 class saturation (derivation.md, PLCY `policer`).
+pub const CLASS_POLICER_METHOD: &str = "policer.class-lossy-flat/1";
 
 /// One transmitted probe packet on the trace time axis.
 #[derive(Debug, Clone)]
@@ -449,6 +451,68 @@ pub fn policer_burst(ps: &[&Pkt], rate_bps: f64) -> Option<f64> {
     Some(best.max(0.0))
 }
 
+/// Queueing delay below which losses show a policer, which queues nothing (`queue.loss-onset/3`).
+const POLICER_QUEUE_NS: f64 = 2_000_000.0;
+
+/// Policer verdict of one P7 class saturation (`policer.class-lossy-flat/1`, derivation.md).
+/// `ps` is the flow; `depth` is the median, over its losses, of the maximum queueing delay in
+/// the 500 ms before each (None when no loss had one). Host drops are not losses.
+pub fn class_policer(ps: &[&Pkt], depth: Option<f64>) -> Value {
+    let lost: Vec<i64> = ps
+        .iter()
+        .filter(|p| p.rx.is_none() && !p.host_drop)
+        .filter_map(|p| p.tx)
+        .collect();
+    let verdict = |status: &str, confidence: f64| {
+        field(status, CLASS_POLICER_METHOD, confidence)
+            .with("scope", "class")
+            .with("losses", lost.len())
+    };
+    let Some(t_loss) = lost.iter().copied().min() else {
+        return verdict("unknown", 0.0)
+            .with("detected", false)
+            .with("depth_time_ns", Value::Null);
+    };
+    let Some(d) = depth else {
+        return verdict("unknown", 0.0)
+            .with("detected", Value::Null)
+            .with("depth_time_ns", Value::Null)
+            .with("reason", "no queueing delay at any loss (no base delay)");
+    };
+    if d >= POLICER_QUEUE_NS {
+        return verdict("unknown", 0.0)
+            .with("detected", false)
+            .with("depth_time_ns", d);
+    }
+    // After the first loss the bucket is empty: what arrives comes at the token rate.
+    let mut after: Vec<(i64, i64)> = ps
+        .iter()
+        .filter(|p| p.tx.is_some_and(|t| t >= t_loss) && !p.host_drop)
+        .filter_map(|p| Some((p.rx?, p.size)))
+        .collect();
+    after.sort_unstable();
+    let rate = match (after.first(), after.last()) {
+        (Some(a), Some(b)) if after.len() >= 2 && b.0 > a.0 => {
+            let bytes: i64 = after[1..].iter().map(|x| x.1).sum();
+            Some(bytes as f64 * 8.0 * 1e9 / (b.0 - a.0) as f64)
+        }
+        _ => None,
+    };
+    verdict("estimated", 0.6)
+        .with("detected", true)
+        .with("depth_time_ns", d)
+        .with("rate_bps", rate)
+        .with("burst_bytes", rate.and_then(|r| policer_burst(ps, r)))
+}
+
+/// `policer.class-lossy-flat/1` for a UDP class that had no P7 saturation.
+pub fn class_policer_absent() -> Value {
+    field("unknown", CLASS_POLICER_METHOD, 0.0)
+        .with("scope", "class")
+        .with("detected", Value::Null)
+        .with("reason", "no class saturation")
+}
+
 /// Steps of the unloaded base delay (`pathchange.base-delay-step/1`, derivation.md): `segs` are
 /// the `base_delay` segments (t, delay ns) whose ±5 s window overlaps no loaded interval.
 /// Returns (t, median before, median after) per change, in time order.
@@ -508,6 +572,8 @@ pub struct DirOut {
     /// Saturated rate per phase (for coupling).
     pub phase_rate: BTreeMap<i64, f64>,
     pub opps: Vec<(i64, i64)>,
+    /// Policer verdict of each P7 class saturation, by flow (`policer.class-lossy-flat/1`).
+    pub class_policers: BTreeMap<i64, Value>,
 }
 
 fn table(name: &str, dir: &str, cols: Vec<Column>, rows: usize) -> Table {
@@ -1247,8 +1313,14 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             onsets.push(Onset {
                 heavy: ps[0].kind == "heavy",
                 ratio: depth / qmax,
-                low_queue: depth < 2_000_000.0,
+                low_queue: depth < POLICER_QUEUE_NS,
             });
+        }
+        if ps[0].kind == "class-sat" {
+            out.class_policers.insert(
+                ps[0].flow,
+                class_policer(ps, (!at_loss.is_empty()).then_some(depth)),
+            );
         }
         depths.push(depth);
     }
@@ -1982,6 +2054,54 @@ mod tests {
             .map(|k| pk(40, k, k * gap, Some(k * gap), None))
             .collect();
         assert_eq!(policer_burst(&ok.iter().collect::<Vec<_>>(), rate), None);
+    }
+
+    /// `policer.class-lossy-flat/1`: a class saturation through a 10 Mbit/s token bucket of
+    /// 30 000 B, fed at 20 Mbit/s, gives the bucket's rate and burst; tail drop at a full queue,
+    /// a lossless saturation and a loss without a queueing delay give no policer.
+    #[test]
+    fn class_policer_reads_one_class_saturation() {
+        let (rate, bucket, gap) = (10e6, 30_000.0, 600_000i64);
+        let mut tokens: f64 = bucket;
+        let mut ps = Vec::new();
+        for k in 0..2_000i64 {
+            let t = k * gap;
+            if k > 0 {
+                tokens = (tokens + rate * gap as f64 / 8e9).min(bucket);
+            }
+            let pass = tokens >= 1500.0;
+            if pass {
+                tokens -= 1500.0;
+            }
+            let mut p = pk(16, k, t, pass.then_some(t + 5_000_000), None);
+            p.kind = "class-sat".into();
+            ps.push(p);
+        }
+        let refs: Vec<&Pkt> = ps.iter().collect();
+        let v = class_policer(&refs, Some(100_000.0));
+        assert_eq!(v.get("status").and_then(Value::as_str), Some("estimated"));
+        assert_eq!(v.get("detected").and_then(Value::as_bool), Some(true));
+        assert_eq!(v.get("scope").and_then(Value::as_str), Some("class"));
+        let r = v.get("rate_bps").and_then(Value::as_f64).unwrap();
+        assert!((r / rate - 1.0).abs() < 0.01, "{r}");
+        let b = v.get("burst_bytes").and_then(Value::as_f64).unwrap();
+        assert!((b - bucket).abs() <= 1500.0, "{b}");
+        // The same losses at a full 40 ms queue are tail drop.
+        let q = class_policer(&refs, Some(40_000_000.0));
+        assert_eq!(q.get("detected").and_then(Value::as_bool), Some(false));
+        assert_eq!(q.get("status").and_then(Value::as_str), Some("unknown"));
+        assert_eq!(q.get("rate_bps"), None);
+        // No queueing delay at any loss: the verdict is unknown, not false.
+        let n = class_policer(&refs, None);
+        assert_eq!(n.get("detected"), Some(&Value::Null));
+        // No loss: no policer below the saturation rate.
+        let ok: Vec<Pkt> = (0..10)
+            .map(|k| pk(16, k, k * gap, Some(k * gap + 5_000_000), None))
+            .collect();
+        let v = class_policer(&ok.iter().collect::<Vec<_>>(), None);
+        assert_eq!(v.get("detected").and_then(Value::as_bool), Some(false));
+        assert_eq!(v.get("losses").and_then(Value::as_u64), Some(0));
+        assert_eq!(class_policer_absent().get("detected"), Some(&Value::Null));
     }
 
     /// The drain cross-check counts what arrives while the last packet's queue empties.

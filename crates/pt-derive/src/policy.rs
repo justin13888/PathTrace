@@ -89,7 +89,9 @@ fn flow_rate(raw: &Raw, dir: &str, flow: i64) -> Option<(f64, f64)> {
     ))
 }
 
-pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
+/// `class_policers`: the a→b class saturations' policer verdicts by flow
+/// (`dir::DirOut::class_policers`).
+pub fn plcy(raw: &Raw, tb: &TimeBase, class_policers: &BTreeMap<i64, Value>) -> Value {
     let rtts = echo_rtts(raw, tb);
     let mut udp_min_rtt = f64::MAX;
     let mut classes = Value::map();
@@ -101,12 +103,17 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
     ] {
         let (echoes, r) = rtts.get(&flow).cloned().unwrap_or_default();
         let mut rr = r.clone();
+        let policer = class_policers
+            .get(&sat_flow)
+            .cloned()
+            .unwrap_or_else(crate::dir::class_policer_absent);
         if echoes == 0 {
             classes = classes.with(
                 class,
                 Value::map()
                     .with("reachable", false)
-                    .with("transport", "udp"),
+                    .with("transport", "udp")
+                    .with("policer", policer),
             );
             continue;
         }
@@ -132,7 +139,8 @@ pub fn plcy(raw: &Raw, tb: &TimeBase) -> Value {
                 .with(
                     "loss_differential",
                     sat.zip(ref_rate).map(|(s, r)| s.1 - r.1),
-                ),
+                )
+                .with("policer", policer),
         );
     }
     // TCP classes from tcp_probe events.
