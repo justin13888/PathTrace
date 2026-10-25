@@ -1,4 +1,4 @@
-; PTF 1.x section heads (1.0, with 1.1 and 1.2 additions marked), CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
+; PTF 1.x section heads (1.0, with 1.1, 1.2 and 1.4 additions marked), CDDL (RFC 8610). Normative for heads; see ptf-format.md for semantics.
 ; All maps are deterministic CBOR (ptf-format.md Part II §4). Every map is open: readers ignore
 ; unknown keys (`* tstr => any`), so minor versions can add keys (P6).
 
@@ -50,7 +50,7 @@ meta = {
   ? clocks: { * clock-id => { kind: "monotonic_raw" / "realtime" / "tai" / "trace", ? endpoint: "a" / "b", ? shifted: bool, ? source: tstr, * tstr => any } },   ; 1.2: source (§6; absent = the Linux clocks)
   redaction: "full" / "shareable" / "anonymous",
   ? complete: bool,
-  ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null }],
+  ? merged_from: [* { role: tstr, content_digest: tstr, ? stopped: tstr / null, ? meta: { * tstr => any } }],   ; 1.4: meta (log head keys the trace does not hold as logged)
   ? imported: { * tstr => any },
   ? merge_checks: { * tstr => any },                 ; 1.1: TX stamp join checks (probe.md §4.1)
   ? extra: any,
@@ -81,7 +81,7 @@ socket = {
 }
 
 ; ---------------------------------------------------------------- FLOW
-flow-head = { flows: [* flow], * tstr => any }
+flow-head = { flows: [* flow], ? pii: pii-map, ? merged_from: [* { ? flows: [* any], ? heads: [* { * tstr => any }] }], * tstr => any }   ; 1.4: merged_from
 flow = {
   id: uint, kind: tstr, sender: "a" / "b", sock: tstr, dst_port: uint, class: tstr,
   ? quic_shape: "header/1" / tstr / null, phase: uint, size: uint,
@@ -92,7 +92,7 @@ flow = {
 }
 
 ; ---------------------------------------------------------------- EVNT
-evnt-head = { events: [* event], ? pii: pii-map, * tstr => any }
+evnt-head = { events: [* event], ? pii: pii-map, ? merged_from: [* { ? heads: [* { * tstr => any }] }], * tstr => any }   ; 1.4: merged_from
 event = { t: uint, clock: clock-id, endpoint: "a" / "b", type: tstr, detail: { * tstr => any }, * tstr => any }
 ; Identifying event values are wrapped as { value: any, pii: pii-class } and listed in pii.
 
