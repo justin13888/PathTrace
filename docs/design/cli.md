@@ -30,7 +30,7 @@
 | `merge <a.ptflog> [<b.ptflog>] -o <out.ptf>` | either | Offline merge (REQ-PRB-018), then derive |
 | `fetch --resume <id.session>` or `fetch --responder <name> --session <hex> --token <hex> --out <file>` | initiator | Retrieve a responder log later. `--resume` reads the session file `probe` writes after the handshake (it includes the pinned TLS certificate, so the log travels over TLS); the explicit form fetches over plain TCP on the responder's port |
 | `derive <file> [-o out]` | any | Re-derive PATH/SERS/PLCY/VALD from the raw layer |
-| `export netem <file>` / `export mahimahi <file> -o <prefix>` | any | Export the derived model (REQ-FMT-021) |
+| `export netem <file>` / `export mahimahi <file> -o <prefix>` | any | Export the derived model (REQ-FMT-021). `export mahimahi` writes `<prefix>.up` (a->b) and `<prefix>.down` (b->a), each with a sidecar `<prefix>.<up\|down>.json` listing the gaps between saturated windows it filled at the median saturated rate (`export.mahimahi/2`, derivation.md "Exports") |
 | `import mahimahi <up> [<down>] -o <out.ptf>` | any | Import Mahimahi traces |
 | `trace redact <file> --level shareable\|anonymous -o <out>` | any | Remove identifying data (REQ-FMT-016) |
 | `trace check <file> [--json]` | any | Strict validation (REQ-FMT-018) |
