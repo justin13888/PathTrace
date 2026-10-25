@@ -98,7 +98,7 @@ fn smoke_session_through_netem() {
         let rows = info["tables"][dir]["rows"].as_u64().unwrap_or(0);
         assert!(rows > 1000, "{dir}: {rows} rows");
     }
-    assert_eq!(info["ptf_version"], "1.3", "{info}");
+    assert_eq!(info["ptf_version"], "1.4", "{info}");
     // PTF 1.3 host state on both endpoints (probe.md §4.5), and no suspend.
     for ep in ["a", "b"] {
         let h = &info["host_state"][ep];
