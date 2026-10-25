@@ -185,6 +185,9 @@ impl Shared {
 pub enum PacerCmd {
     Start(FlowSpec, u64),
     Stop(u8),
+    /// Stop a flow for good and record `flow_stopped` with `detail` (which carries `flow` and
+    /// `reason`), when the flow is still running: a stop the controller decided (probe.md §7).
+    Halt(u8, Value),
     StopAll,
     SetRate(u8, u64),
     SetTagger(Box<Tagger>),
@@ -323,6 +326,14 @@ fn dead_man(kind: &str, feedback_lost: bool, paused: bool) -> DeadMan {
     }
 }
 
+/// Remove flow `id` from the running generators; true when it was running, so a stop that
+/// races the flow's own end is not recorded twice.
+fn halt(gens: &mut Vec<Gen>, id: u8) -> bool {
+    let n = gens.len();
+    gens.retain(|g| g.spec.id != id);
+    gens.len() != n
+}
+
 /// One packet scheduled for sending: flow, schedule entry, destination, QUIC framing, type, phase.
 type DueItem = (u8, Due, SocketAddr, bool, PktType, u16);
 
@@ -404,6 +415,11 @@ fn pacer_loop(
                 gens.push(Gen::new(spec, at.max(mono_raw())));
             }
             PacerCmd::Stop(id) => gens.retain(|g| g.spec.id != id),
+            PacerCmd::Halt(id, detail) => {
+                if halt(gens, id) {
+                    rec.event_nb("flow_stopped", detail);
+                }
+            }
             PacerCmd::StopAll => gens.clear(),
             PacerCmd::SetRate(id, bps) => {
                 let cap = shared.rate_cap_bps.load(Ordering::Relaxed);
@@ -1222,6 +1238,34 @@ mod tests {
         for k in ["light", "nat", "class", "control"] {
             assert_eq!(dead_man(k, true, false), DeadMan::Run, "{k}");
         }
+    }
+
+    #[test]
+    fn halt_stops_a_running_flow_once() {
+        let iso = Pattern::Iso {
+            interval_ns: 1_000_000,
+        };
+        let mk = |id| {
+            let s = crate::plan::spec(
+                id,
+                "heavy",
+                Role::A,
+                Sock::Main,
+                1200,
+                iso.clone(),
+                5,
+                1_000_000_000,
+                4433,
+            );
+            Gen::new(s, 0)
+        };
+        let mut gens = vec![mk(7), mk(8)];
+        assert!(halt(&mut gens, 7));
+        assert_eq!(gens.len(), 1);
+        assert_eq!(gens[0].spec.id, 8);
+        // Already stopped (by the phase end, the dead-man or an earlier halt): nothing to record.
+        assert!(!halt(&mut gens, 7));
+        assert_eq!(gens.len(), 1);
     }
 
     #[test]
