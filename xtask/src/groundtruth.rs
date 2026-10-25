@@ -82,8 +82,10 @@ pub fn scenarios() -> Vec<Scenario> {
     // A pure policer: drop above rate + burst, no queue (tbf would queue `burst` bytes).
     let police = "tc qdisc del dev mb0 root; tc qdisc add dev mb0 root handle 1: prio; \
         tc filter add dev mb0 parent 1: protocol ip u32 match u32 0 0 police rate 5mbit burst 20k drop flowid 1:1";
-    // The same policer on UDP port 443 only (simulator-requirements.md S2); everything else
-    // goes through a 20 Mbit/s tail-drop queue, so only the port-443 classes are policed.
+    // The same policer on UDP port 443 only; everything else goes through a 20 Mbit/s
+    // tail-drop queue, so only the port-443 classes are policed. simulator-requirements.md S2
+    // names tbf on one UDP port via a u32 filter; this uses a u32 police action instead, as
+    // `police` does, because tbf would queue `burst` bytes and a policer has no queue.
     let police443 = "tc qdisc del dev mb0 root; \
         tc qdisc add dev mb0 root handle 1: prio bands 3; \
         tc qdisc add dev mb0 parent 1:1 handle 10: netem delay 10ms limit 100000; \
@@ -547,22 +549,35 @@ const UDP_CLASSES: [&str; 3] = ["udp/high-port", "udp/443", "udp/443-quic"];
 
 /// `policer.class-lossy-flat/1` against the truth: per `(class, policed)`, a reachable class
 /// is `detected` exactly when policed, and a policed one is delivered at the 5 Mbit/s token
-/// rate. An unreachable class has no saturation to judge and is skipped, but at least one
-/// policed class must be judged. With `rate_gated` false the rate is recorded but does not
-/// decide the check.
-fn class_policer_checks(c: &mut Vec<Check>, t: &Trace, classes: &[(&str, bool)], rate_gated: bool) {
+/// rate. An unreachable policed class has no saturation to judge and is skipped, but at least
+/// one policed class must be judged. An unpoliced class is the control that a verdict is not
+/// credited to every class, so it fails when it is not reachable. With `rate_gated` false the
+/// rate is recorded but does not decide the check.
+fn class_policer_checks(
+    c: &mut Vec<Check>,
+    plcy: &Value,
+    classes: &[(&str, bool)],
+    rate_gated: bool,
+) {
     let mut judged = 0;
     for &(class, policed) in classes {
         let entry = format!("/classes/{}", class.replace('/', "~1"));
-        let reachable = t
-            .plcy
+        let reachable = plcy
             .pointer(&format!("{entry}/reachable"))
             .and_then(Value::as_bool);
         if reachable != Some(true) {
+            if !policed {
+                chk(
+                    c,
+                    &format!("{class} reachable (unpoliced control)"),
+                    true,
+                    format!("{reachable:?}"),
+                    false,
+                );
+            }
             continue;
         }
-        let det = t
-            .plcy
+        let det = plcy
             .pointer(&format!("{entry}/policer/detected"))
             .and_then(Value::as_bool);
         chk(
@@ -574,8 +589,7 @@ fn class_policer_checks(c: &mut Vec<Check>, t: &Trace, classes: &[(&str, bool)],
         );
         if policed {
             judged += 1;
-            let r = t
-                .plcy
+            let r = plcy
                 .pointer(&format!("{entry}/policer/rate_bps"))
                 .and_then(num);
             let name = if rate_gated {
@@ -863,7 +877,7 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 rel_ok(r, ip_rate(5e6), 0.15),
             );
             // Every packet is policed, so every reachable UDP class is.
-            class_policer_checks(&mut c, t, &UDP_CLASSES.map(|k| (k, true)), true);
+            class_policer_checks(&mut c, &t.plcy, &UDP_CLASSES.map(|k| (k, true)), true);
         }
         "policer-udp443" => {
             // Only UDP port 443 is policed: both classes on it, never the high port. The
@@ -872,7 +886,7 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
             // TODO(#142): gate the rate once the method takes it over the policed stretches.
             class_policer_checks(
                 &mut c,
-                t,
+                &t.plcy,
                 &[
                     ("udp/high-port", false),
                     ("udp/443", true),
@@ -2037,4 +2051,95 @@ pub fn main(root: &Path, which: &str, jobs: usize) -> Result<bool> {
     print!("{md}");
     println!("verdict: {}", if all { "pass" } else { "fail" });
     Ok(all)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A PLCY head whose classes are `(class, reachable, detected, rate_bps)`.
+    fn plcy(classes: &[(&str, bool, bool, f64)]) -> Value {
+        let mut m = Value::map();
+        for &(class, reachable, detected, rate) in classes {
+            let mut e = Value::map().with("reachable", reachable);
+            if reachable {
+                e = e.with(
+                    "policer",
+                    Value::map()
+                        .with("detected", detected)
+                        .with("rate_bps", rate),
+                );
+            }
+            m = m.with(class, e);
+        }
+        Value::map().with("classes", m)
+    }
+
+    const ONE_PORT: [(&str, bool); 3] = [
+        ("udp/high-port", false),
+        ("udp/443", true),
+        ("udp/443-quic", true),
+    ];
+
+    fn passes(p: &Value, classes: &[(&str, bool)], rate_gated: bool) -> (bool, Vec<Check>) {
+        let mut c = Vec::new();
+        class_policer_checks(&mut c, p, classes, rate_gated);
+        (c.iter().all(|k| k.pass), c)
+    }
+
+    #[test]
+    fn one_port_policer_passes_on_the_truth() {
+        let p = plcy(&[
+            ("udp/high-port", true, false, 0.0),
+            ("udp/443", true, true, 3.2e6),
+            ("udp/443-quic", true, true, 3.5e6),
+        ]);
+        let (ok, c) = passes(&p, &ONE_PORT, false);
+        assert!(ok, "{c:?}");
+        // Recorded-only: the low rate is reported, but a gated check fails it.
+        assert!(!passes(&p, &ONE_PORT, true).0);
+    }
+
+    #[test]
+    fn unreachable_unpoliced_control_fails() {
+        let p = plcy(&[
+            ("udp/high-port", false, false, 0.0),
+            ("udp/443", true, true, 4.9e6),
+            ("udp/443-quic", true, true, 4.9e6),
+        ]);
+        let (ok, c) = passes(&p, &ONE_PORT, true);
+        assert!(!ok);
+        assert!(
+            c.iter()
+                .any(|k| !k.pass && k.name == "udp/high-port reachable (unpoliced control)")
+        );
+    }
+
+    #[test]
+    fn verdict_credited_to_the_control_fails() {
+        let p = plcy(&[
+            ("udp/high-port", true, true, 4.9e6),
+            ("udp/443", true, true, 4.9e6),
+            ("udp/443-quic", true, true, 4.9e6),
+        ]);
+        assert!(!passes(&p, &ONE_PORT, true).0);
+    }
+
+    #[test]
+    fn all_policed_skips_unreachable_but_needs_one_judged() {
+        let all = UDP_CLASSES.map(|k| (k, true));
+        let some = plcy(&[
+            ("udp/high-port", true, true, 4.85e6),
+            ("udp/443", false, false, 0.0),
+            ("udp/443-quic", true, true, 4.8e6),
+        ]);
+        let (ok, c) = passes(&some, &all, true);
+        assert!(ok, "{c:?}");
+        let none = plcy(&[
+            ("udp/high-port", false, false, 0.0),
+            ("udp/443", false, false, 0.0),
+            ("udp/443-quic", false, false, 0.0),
+        ]);
+        assert!(!passes(&none, &all, true).0);
+    }
 }
