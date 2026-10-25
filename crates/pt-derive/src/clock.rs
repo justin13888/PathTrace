@@ -4,41 +4,115 @@ use pt_format::Value;
 
 use crate::raw::Raw;
 
+/// Method name of the REALTIME → MONO_RAW map.
+pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/2";
+
+/// Growth of boot − mono between consecutive clock pairs above which the endpoint was
+/// suspended (the prober's `STALL_NS`, probe.md §4.3).
+const SUSPEND_NS: i64 = 2_000_000;
+
+/// One suspend of an endpoint: MONO_RAW stood still for `ns` while the clocks that count
+/// suspend ran, somewhere between the clock pairs at mono `since` and `at`. It is placed at `at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Suspend {
+    pub at: i64,
+    pub since: i64,
+    pub ns: i64,
+}
+
+/// Suspends of one endpoint's MONO_RAW (derivation.md "Suspends"), sorted by `at`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Suspends {
+    pub list: Vec<Suspend>,
+}
+
+impl Suspends {
+    /// mono → the suspend-continuous clock: mono plus every suspend placed at or before it.
+    pub fn to_cont(&self, mono: i64) -> i64 {
+        mono + self
+            .list
+            .iter()
+            .take_while(|s| s.at <= mono)
+            .map(|s| s.ns)
+            .sum::<i64>()
+    }
+
+    /// The inverse of [`Suspends::to_cont`]; a time inside a suspend maps to the mono at which
+    /// that suspend is placed.
+    pub fn from_cont(&self, cont: i64) -> i64 {
+        let mut acc = 0;
+        for s in &self.list {
+            if cont < s.at + acc {
+                break;
+            }
+            if cont < s.at + acc + s.ns {
+                return s.at;
+            }
+            acc += s.ns;
+        }
+        cont - acc
+    }
+
+    /// Whether `mono` lies strictly between the two pairs of a suspend, where it is unknown
+    /// whether it was before or after the suspend.
+    pub fn ambiguous(&self, mono: i64) -> bool {
+        self.list.iter().any(|s| mono > s.since && mono < s.at)
+    }
+}
+
 /// Piecewise-linear REALTIME → MONO_RAW map for one endpoint.
 #[derive(Debug, Clone, Default)]
 pub struct RealToMono {
     /// (real, mono) sorted by real.
     pts: Vec<(i64, i64)>,
     pub steps: Vec<(i64, i64)>,
+    pub suspends: Suspends,
 }
 
 impl RealToMono {
     pub fn from_raw(raw: &Raw, ep: &str) -> RealToMono {
-        let mut pts: Vec<(i64, i64)> = Vec::new();
+        let mut pts: Vec<(i64, i64, Option<i64>)> = Vec::new();
         if let Some(t) = raw.table(&format!("pairs[{ep}]")) {
             for i in 0..t.n {
                 if let (Some(m), Some(r)) = (t.get("mono", i), t.get("real", i)) {
-                    pts.push((r, m));
+                    pts.push((r, m, t.get("boot", i)));
                 }
             }
         }
         pts.sort();
         pts.dedup_by_key(|p| p.0);
         let mut steps = Vec::new();
+        let mut suspends = Suspends::default();
         for w in pts.windows(2) {
             let (d0, d1) = (w[0].0 - w[0].1, w[1].0 - w[1].1);
             if (d1 - d0).abs() > 1_000_000 {
                 steps.push((w[1].1, d1 - d0));
             }
+            if let (Some(b0), Some(b1)) = (w[0].2, w[1].2) {
+                let grew = (b1 - w[1].1) - (b0 - w[0].1);
+                if grew > SUSPEND_NS {
+                    suspends.list.push(Suspend {
+                        at: w[1].1,
+                        since: w[0].1,
+                        ns: grew,
+                    });
+                }
+            }
         }
-        RealToMono { pts, steps }
+        suspends.list.sort();
+        RealToMono {
+            pts: pts.into_iter().map(|(r, m, _)| (r, m)).collect(),
+            steps,
+            suspends,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
         self.pts.is_empty()
     }
 
-    /// Map a REALTIME value to MONO_RAW.
+    /// Map a REALTIME value to MONO_RAW. Between the two pairs of a suspend the map is a step:
+    /// the earlier pair's offset up to the later pair's mono, then that mono.
     pub fn map(&self, real: i64) -> Option<i64> {
         let p = &self.pts;
         match p.len() {
@@ -47,6 +121,16 @@ impl RealToMono {
             n => {
                 let i = p.partition_point(|x| x.0 <= real).clamp(1, n - 1);
                 let (a, b) = (p[i - 1], p[i]);
+                if real > a.0
+                    && real < b.0
+                    && self
+                        .suspends
+                        .list
+                        .binary_search_by_key(&b.1, |s| s.at)
+                        .is_ok()
+                {
+                    return Some((a.1 + (real - a.0)).min(b.1));
+                }
                 let slope = (b.1 - a.1) as f64 / (b.0 - a.0).max(1) as f64;
                 Some(a.1 + ((real - a.0) as f64 * slope).round() as i64)
             }
@@ -78,6 +162,21 @@ impl RealToMono {
                     self.steps
                         .iter()
                         .map(|(t, d)| Value::map().with("mono", *t).with("jump_ns", *d))
+                        .collect(),
+                ),
+            )
+            .with(
+                "suspends",
+                Value::Array(
+                    self.suspends
+                        .list
+                        .iter()
+                        .map(|s| {
+                            Value::map()
+                                .with("mono", s.at)
+                                .with("since_mono", s.since)
+                                .with("suspended_ns", s.ns)
+                        })
                         .collect(),
                 ),
             )
@@ -142,18 +241,36 @@ pub struct Offset {
     pub skew_pairs: Option<f64>,
     /// t1 span of the exchanges (ns).
     pub span_ns: f64,
+    /// Suspends of each endpoint; the fit is on their suspend-continuous clocks
+    /// (derivation.md "Suspends"), and `t_ref` is on a's.
+    pub suspends_a: Suspends,
+    pub suspends_b: Suspends,
 }
 
 impl Offset {
     pub fn from_raw(raw: &Raw, a: &RealToMono, b: &RealToMono) -> Option<Offset> {
         let t = raw.table("exchange[a]")?;
+        let (sa, sb) = (&a.suspends, &b.suspends);
+        // An exchange with a time between the two pairs of a suspend is left out: on which
+        // side of the suspend that time lies is unknown, so its θ could be off by all of it.
         let ex: Vec<Exchange> = (0..t.n)
             .filter_map(|i| {
+                let (t1, t2, t3, t4) = (
+                    t.get("t1", i)?,
+                    t.get("t2", i)?,
+                    t.get("t3", i)?,
+                    t.get("t4", i)?,
+                );
+                if [t1, t4].iter().any(|&m| sa.ambiguous(m))
+                    || [t2, t3].iter().any(|&m| sb.ambiguous(m))
+                {
+                    return None;
+                }
                 Some(Exchange {
-                    t1: t.get("t1", i)?,
-                    t2: t.get("t2", i)?,
-                    t3: t.get("t3", i)?,
-                    t4: t.get("t4", i)?,
+                    t1: sa.to_cont(t1),
+                    t2: sb.to_cont(t2),
+                    t3: sb.to_cont(t3),
+                    t4: sa.to_cont(t4),
                 })
             })
             .collect();
@@ -161,11 +278,15 @@ impl Offset {
             (Some(ra), Some(rb)) if ra > 0.0 => Some(rb / ra - 1.0),
             _ => None,
         };
-        Offset::fit(&ex, pairs)
+        Offset::fit(&ex, pairs).map(|o| Offset {
+            suspends_a: sa.clone(),
+            suspends_b: sb.clone(),
+            ..o
+        })
     }
 
     /// Fit the offset to `ex`, with `pairs` the pairs-derived skew if any
-    /// (derivation.md "Time base", `clock.exchange-minfilter/2`).
+    /// (derivation.md "Time base", `clock.exchange-minfilter/3`).
     pub fn fit(ex: &[Exchange], pairs: Option<f64>) -> Option<Offset> {
         let s: Vec<&Exchange> = ex
             .iter()
@@ -224,6 +345,8 @@ impl Offset {
             skew_exchange_uncertainty,
             skew_pairs: pairs,
             span_ns,
+            suspends_a: Suspends::default(),
+            suspends_b: Suspends::default(),
         })
     }
 
@@ -237,11 +360,13 @@ impl Offset {
         }
     }
 
-    /// Convert b.mono to a.mono.
+    /// Convert b.mono to a.mono, through both endpoints' suspend-continuous clocks.
     pub fn b_to_a(&self, b_mono: i64) -> i64 {
         // Solve a = b - theta0 - skew*(a - t_ref) ≈ b - offset(b - theta0).
-        let a0 = b_mono as f64 - self.theta0;
-        (b_mono as f64 - (self.theta0 + self.skew * (a0 - self.t_ref))).round() as i64
+        let b = self.suspends_b.to_cont(b_mono) as f64;
+        let a0 = b - self.theta0;
+        let a = (b - (self.theta0 + self.skew * (a0 - self.t_ref))).round() as i64;
+        self.suspends_a.from_cont(a)
     }
 
     pub fn to_value(&self) -> Value {
@@ -257,7 +382,14 @@ impl Offset {
             )
             .with("skew_pairs_ppb", self.skew_pairs.map(|k| k * 1e9))
             .with("span_ns", self.span_ns)
-            .with("t_ref_a_mono", self.t_ref)
+            .with(
+                "t_ref_a_mono",
+                if self.suspends_a.list.is_empty() {
+                    self.t_ref
+                } else {
+                    self.suspends_a.from_cont(self.t_ref.round() as i64) as f64
+                },
+            )
             .with("uncertainty_ns", self.uncertainty_ns)
             .with("min_rtt_ns", self.min_rtt_ns)
             .with("samples", self.samples)
@@ -268,7 +400,7 @@ impl Offset {
 }
 
 /// Method name of the b.mono → a.mono offset.
-pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/2";
+pub const OFFSET_METHOD: &str = "clock.exchange-minfilter/3";
 
 /// Slope of the line under every point that minimises the summed vertical
 /// distance to them: the lower convex hull's edge spanning the points' mean x.
@@ -353,7 +485,7 @@ mod tests {
     fn piecewise_map() {
         let m = RealToMono {
             pts: vec![(1_000, 100), (2_000, 1_100)],
-            steps: vec![],
+            ..Default::default()
         };
         assert_eq!(m.map(1_500), Some(600));
         assert_eq!(m.map(3_000), Some(2_100));
@@ -551,11 +683,176 @@ mod tests {
             .collect();
         let m = RealToMono {
             pts: pts.clone(),
-            steps: vec![],
+            ..Default::default()
         };
         assert!((m.rate().unwrap() - (1.0 - 10e-6)).abs() < 1e-9);
         pts.truncate(9);
-        let m = RealToMono { pts, steps: vec![] };
+        let m = RealToMono {
+            pts,
+            ..Default::default()
+        };
         assert_eq!(m.rate(), None);
+    }
+
+    #[test]
+    fn suspend_continuous_clock_round_trips_and_collapses_the_suspend() {
+        let s = Suspends {
+            list: vec![
+                Suspend {
+                    at: 1_000,
+                    since: 900,
+                    ns: 500,
+                },
+                Suspend {
+                    at: 2_000,
+                    since: 1_900,
+                    ns: 100,
+                },
+            ],
+        };
+        assert!(s.ambiguous(950) && !s.ambiguous(900) && !s.ambiguous(1_000));
+        assert_eq!(s.to_cont(999), 999);
+        assert_eq!(s.to_cont(1_000), 1_500);
+        assert_eq!(s.to_cont(2_500), 3_100);
+        for m in [0, 999, 1_000, 1_001, 1_999, 2_000, 5_000] {
+            assert_eq!(s.from_cont(s.to_cont(m)), m, "mono {m}");
+        }
+        // Continuous times inside a suspend have no mono of their own.
+        assert_eq!(s.from_cont(1_200), 1_000);
+        assert_eq!(s.from_cont(2_550), 2_000);
+    }
+
+    /// Clock pairs at 1 Hz of mono over `secs` s, with the endpoint suspended for `susp` ns
+    /// between the pairs at mono `at` and `at` + 1 s (`susp` = 0: never). REALTIME and boot
+    /// keep running through it.
+    fn suspended_pairs(secs: i64, at: i64, susp: i64) -> crate::raw::Rows {
+        let mono: Vec<i64> = (0..=secs).map(|s| T0 + s * 1_000_000_000).collect();
+        let gap = |m: &i64| if *m > T0 + at { susp } else { 0 };
+        let real = mono.iter().map(|m| m + 7_000_000_000 + gap(m)).collect();
+        let boot = mono.iter().map(|m| m + 3_000_000_000 + gap(m)).collect();
+        rows(&[("real", real), ("mono", mono), ("boot", boot)])
+    }
+
+    #[test]
+    fn pairs_find_the_suspend_and_map_realtime_across_it_as_a_step() {
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            suspended_pairs(30, 10_000_000_000, 900e9 as i64),
+        );
+        let m = RealToMono::from_raw(&raw, "a");
+        let at = T0 + 11_000_000_000;
+        assert_eq!(
+            m.suspends.list,
+            vec![Suspend {
+                at,
+                since: at - 1_000_000_000,
+                ns: 900_000_000_000
+            }]
+        );
+        let v = m.to_value(PAIRS_METHOD);
+        let s = v.get("suspends").and_then(Value::as_array).unwrap();
+        assert_eq!(
+            s[0].get("suspended_ns").and_then(Value::as_i64),
+            Some(900e9 as i64)
+        );
+        // Before the suspend: the earlier pair's offset (real = mono + 7 s).
+        let r0 = T0 + 10_000_000_000 + 7_000_000_000;
+        assert_eq!(m.map(r0 + 400_000_000), Some(T0 + 10_400_000_000));
+        // Inside the suspend and after the wake, until the later pair: its mono.
+        assert_eq!(m.map(r0 + 1_000_000_000), Some(at));
+        assert_eq!(m.map(r0 + 500_000_000_000), Some(at));
+        // After the later pair: its offset again.
+        assert_eq!(m.map(at + 907_500_000_000), Some(at + 500_000_000));
+        // Monotonic throughout.
+        let mut last = i64::MIN;
+        for k in 0..2_000 {
+            let mono = m.map(r0 - 1_000_000_000 + k * 1_000_000_000).unwrap();
+            assert!(mono >= last, "step {k}");
+            last = mono;
+        }
+        // The suspend is also a step of real − mono, so the pairs rate skips it.
+        assert!((m.rate().unwrap() - 1.0).abs() < 1e-12);
+        // Without boot there is no suspend: the map is the linear interpolation of /1.
+        raw.tables.get_mut("pairs[a]").unwrap().cols.remove("boot");
+        let m = RealToMono::from_raw(&raw, "a");
+        assert!(m.suspends.list.is_empty());
+        assert!(m.map(r0 + 500_000_000_000).unwrap() > T0 + 10_400_000_000);
+    }
+
+    #[test]
+    fn initiator_suspend_is_a_clock_step_not_a_skew() {
+        // 120 s of a.mono with an exchange every 0.1 s, 10 ms each way, b 20 ppm fast; a is
+        // suspended for 900 s at a.mono 30.6 s: a.mono stands still, b.mono runs on. The
+        // pairs (1 Hz) see it between a.mono 30 s and 31 s.
+        let susp = 900_000_000_000i64;
+        let s0 = T0 + 30_600_000_000;
+        let at = T0 + 31_000_000_000;
+        // Elapsed time (what b's clock and a's continuous clock count) at an a.mono.
+        let tau = |m: f64| if m >= s0 as f64 { m + susp as f64 } else { m };
+        let b = |t: f64| t + THETA0 + 20e-6 * (t - T0 as f64);
+        let ex: Vec<Exchange> = (0..1_200i64)
+            .map(|i| {
+                let t1 = T0 + i * 100_000_000;
+                let at_b = tau(t1 as f64) + 10e6;
+                Exchange {
+                    t1,
+                    t2: b(at_b).round() as i64,
+                    t3: b(at_b + 1e6).round() as i64,
+                    t4: t1 + 21_000_000,
+                }
+            })
+            .collect();
+        let col = |f: fn(&Exchange) -> i64| ex.iter().map(f).collect::<Vec<_>>();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "exchange[a]".into(),
+            rows(&[
+                ("t1", col(|e| e.t1)),
+                ("t2", col(|e| e.t2)),
+                ("t3", col(|e| e.t3)),
+                ("t4", col(|e| e.t4)),
+            ]),
+        );
+        raw.tables.insert(
+            "pairs[a]".into(),
+            suspended_pairs(130, 30_000_000_000, susp),
+        );
+        let tb = TimeBase::from_raw(&raw);
+        assert_eq!(tb.a.suspends.list.len(), 1);
+        assert_eq!(
+            (tb.a.suspends.list[0].at, tb.a.suspends.list[0].ns),
+            (at, susp)
+        );
+        let o = tb.off.as_ref().unwrap();
+        // The exchanges with a time between the two pairs of the suspend (t1 30.0 s … 30.9 s;
+        // the one at 30.0 s ends at 30.021 s) are left out.
+        assert_eq!(o.samples, 1_200 - 10);
+        assert_eq!(o.skew_source, SkewSource::Exchange);
+        assert!((o.skew - 20e-6).abs() < 1e-8, "skew {}", o.skew);
+        // b times before the suspend and after the wake map to their a.mono.
+        for m in [
+            T0 + 20_000_000_000,
+            T0 + 30_500_000_000,
+            T0 + 31_000_000_000,
+            T0 + 90_000_000_000,
+        ] {
+            let got = o.b_to_a(b(tau(m as f64)).round() as i64);
+            assert!((got - m).abs() < 1_000, "a.mono {m}: {got}");
+        }
+        // A b time inside a's suspend, or after the wake but before the later pair, collapses
+        // onto the suspend's placement.
+        for t in [s0 + susp / 2, T0 + 30_800_000_000 + susp] {
+            assert_eq!(o.b_to_a(b(t as f64).round() as i64), at);
+        }
+        let v = o.to_value();
+        assert_eq!(v.get("method").and_then(Value::as_str), Some(OFFSET_METHOD));
+        let t_ref = v.get("t_ref_a_mono").and_then(Value::as_f64).unwrap();
+        assert!(t_ref > T0 as f64 && t_ref < (T0 + 120_000_000_000) as f64);
+        // Fitted on a.mono as one line, as /2 did, the same exchanges put b times hundreds of
+        // seconds away from their a.mono.
+        let o2 = Offset::fit(&ex, None).unwrap();
+        let m = T0 + 20_000_000_000;
+        assert!((o2.b_to_a(b(m as f64).round() as i64) - m).abs() > 100_000_000_000);
     }
 }
