@@ -239,6 +239,40 @@ pub fn saturating(kind: &str) -> bool {
     matches!(kind, "heavy" | "class-sat")
 }
 
+/// Loss onset of one saturating flow that lost packets (`queue.loss-onset/3`).
+struct Onset {
+    /// A `heavy` flow: it overdrives and so probes the buffer (probe.md §7). A class
+    /// saturation (3 s) only holds the controller's queue target, so its losses come at its
+    /// maximum delay whatever the discipline.
+    heavy: bool,
+    /// Its onset depth (median over its losses of the maximum queueing delay in the 500 ms
+    /// before each) over its maximum queueing delay.
+    ratio: f64,
+    /// Losses with queueing delay below 2 ms.
+    low_queue: bool,
+}
+
+/// Queue discipline from the lossy saturating flows (`queue.loss-onset/3`, derivation.md).
+/// Every lossy flow votes on `policer`; only the heavy flows tell `droptail` from
+/// `aqm_suspected`, and without a lossy heavy flow that is `unknown`.
+fn queue_discipline(saturated: bool, onsets: &[Onset], ce_marks: usize) -> &'static str {
+    let low = onsets.iter().filter(|o| o.low_queue).count();
+    let mut heavy: Vec<f64> = onsets.iter().filter(|o| o.heavy).map(|o| o.ratio).collect();
+    if !saturated {
+        "unknown"
+    } else if low > 0 && low * 2 >= onsets.len() {
+        "policer"
+    } else if ce_marks > 0 {
+        "aqm_suspected"
+    } else {
+        match median(&mut heavy) {
+            None => "unknown",
+            Some(r) if r >= 0.8 => "droptail",
+            Some(_) => "aqm_suspected",
+        }
+    }
+}
+
 /// Intervals (trace ns) during which any saturating or chirp flow was active, per direction.
 pub fn loaded_intervals(pkts: &[Pkt]) -> Vec<(i64, i64)> {
     let mut by_flow: HashMap<i64, (i64, i64)> = HashMap::new();
@@ -981,8 +1015,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     // --- queue (per saturating flow) ---
     let mut depths = Vec::new();
     let mut lossy_depths: Vec<f64> = Vec::new();
-    let mut onset_rel = Vec::new();
-    let mut lossy_lowq = 0usize;
+    let mut onsets = Vec::new();
     let mut losses_total = 0usize;
     let mut ce_marks = 0usize;
     let mut sat_flows: BTreeMap<i64, Vec<&Pkt>> = BTreeMap::new();
@@ -1022,10 +1055,11 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             lossy_depths.push(depth);
         }
         if !at_loss.is_empty() && qmax > 0.0 {
-            onset_rel.push(depth / qmax);
-            if depth < 2_000_000.0 {
-                lossy_lowq += 1;
-            }
+            onsets.push(Onset {
+                heavy: ps[0].kind == "heavy",
+                ratio: depth / qmax,
+                low_queue: depth < 2_000_000.0,
+            });
         }
         depths.push(depth);
     }
@@ -1043,20 +1077,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     } else {
         median(&mut dmed)
     };
-    let mut orel = onset_rel.clone();
-    let discipline = if sat_flows.is_empty() {
-        "unknown"
-    } else if lossy_lowq > 0 && lossy_lowq * 2 >= onset_rel.len() {
-        "policer"
-    } else if ce_marks > 0 {
-        "aqm_suspected"
-    } else if onset_rel.is_empty() {
-        "unknown"
-    } else if median(&mut orel).unwrap_or(0.0) >= 0.8 {
-        "droptail"
-    } else {
-        "aqm_suspected"
-    };
+    let discipline = queue_discipline(!sat_flows.is_empty(), &onsets, ce_marks);
     let buffer_bytes = depth_ns.zip(rate_med).map(|(d, r)| d / 1e9 * r / 8.0);
     out.buffer_bytes = buffer_bytes;
     f = f.with(
@@ -1068,7 +1089,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 } else {
                     "estimated"
                 },
-                "queue.loss-onset/2",
+                "queue.loss-onset/3",
                 if losses_total > 0 { 0.8 } else { 0.4 },
             )
             .with("depth_time_ns", d)
@@ -1085,7 +1106,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 },
             )
             .with("source", src(&["pkt"])),
-            _ => field("unknown", "queue.loss-onset/2", 0.0).with("discipline", "unknown"),
+            _ => field("unknown", "queue.loss-onset/3", 0.0).with("discipline", "unknown"),
         },
     );
     // --- policer ---
@@ -1579,6 +1600,51 @@ mod tests {
         // Two changes, each found once.
         let ch = path_changes(&segs(&[(30, 40), (30, 230), (30, 40)])).unwrap();
         assert_eq!(ch.len(), 2, "{ch:?}");
+    }
+
+    fn onsets(flows: &[(bool, f64, bool)]) -> Vec<Onset> {
+        flows
+            .iter()
+            .map(|&(heavy, ratio, low_queue)| Onset {
+                heavy,
+                ratio,
+                low_queue,
+            })
+            .collect()
+    }
+
+    /// `queue.loss-onset/3`: class saturations hold the queue target, so their losses sit at
+    /// their maximum delay under any discipline and must not outvote the heavy flows. Ratios
+    /// are those of the EXP-0002-r16 `aqm-ecn` trace (fq_codel), which `/2` called droptail
+    /// (issue #103), and of the `rate-delay-asym` and `policer` traces of the same run.
+    #[test]
+    fn class_saturations_do_not_vote_on_the_discipline() {
+        let aqm = onsets(&[
+            (true, 0.696, false),
+            (false, 1.0, false),
+            (false, 1.0, false),
+            (false, 1.0, false),
+            (true, 0.528, false),
+        ]);
+        assert_eq!(queue_discipline(true, &aqm, 0), "aqm_suspected");
+        let droptail = onsets(&[(true, 1.0, false), (true, 1.0, false)]);
+        assert_eq!(queue_discipline(true, &droptail, 0), "droptail");
+        // Class flows that lost at low delay still count towards a policer.
+        let policer = onsets(&[
+            (true, 0.712, true),
+            (false, 0.791, true),
+            (false, 0.795, true),
+            (false, 0.469, true),
+            (true, 0.379, true),
+        ]);
+        assert_eq!(queue_discipline(true, &policer, 0), "policer");
+        // Only class flows lost: nothing probed the buffer.
+        let class_only = onsets(&[(false, 1.0, false), (false, 0.5, false)]);
+        assert_eq!(queue_discipline(true, &class_only, 0), "unknown");
+        // CE marks still mean AQM; no saturation means unknown.
+        assert_eq!(queue_discipline(true, &droptail, 3), "aqm_suspected");
+        assert_eq!(queue_discipline(false, &[], 0), "unknown");
+        assert_eq!(queue_discipline(true, &[], 0), "unknown");
     }
 
     #[test]
