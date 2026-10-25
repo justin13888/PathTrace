@@ -115,7 +115,7 @@ Use this when the responder is reachable only through a tailnet (a home server w
    ```
 
 2. **Pair with the tailnet address.** In step 3, register the responder by its tailnet IP or MagicDNS name, never its public address: `pathtrace responder add vm-ts <host>.<tailnet>.ts.net pt1:...` (or the `100.x.y.z` address from `tailscale ip -4 <host>`).
-3. **Direct path, not DERP.** On the laptop, before every session (and once now):
+3. **Direct path preferred.** On the laptop, before every session (and once now):
 
    ```sh
    mkdir -p ~/traces && cd ~/traces
@@ -124,7 +124,7 @@ Use this when the responder is reachable only through a tailnet (a home server w
 
    On a Mac, the Tailscale app does not put a `tailscale` command on `PATH` by default. Turn on its CLI integration (Tailscale menu > Settings > "Show CLI integration", then install it), or call the app's binary directly: `/Applications/Tailscale.app/Contents/MacOS/Tailscale ping <host>`. The same applies to `tailscale ip` in step 2 above and `tailscale netcheck` below.
 
-   The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`: a direct path. `via DERP(<region>)` means the traffic is relayed through Tailscale's DERP servers over TCP, so a trace would record the relay, not the network: do not record. Fix the direct connection first (UDP 41641 open outbound, `tailscale netcheck` reports `UDP: true`), or record that network without the overlay. Keep the saved output next to the session's trace.
+   The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`: a direct path. `via DERP(<region>)` means the traffic is relayed through Tailscale's DERP servers over TCP, so a trace records the relay, not the network. Try to get a direct connection first (UDP 41641 open outbound, `tailscale netcheck` reports `UDP: true`). If it stays on DERP, record anyway with `--tag derp` and read the trace as the relayed path ([field-session.md](field-session.md#macos-initiator-over-tailscale-trust-checklist) step 1.2), or record that network without the overlay. Keep the saved output next to the session's trace.
 4. **Verify.** `pathtrace doctor vm-ts` warns `tunnel` (`utun*` on a Mac, `tailscale0` on Linux, provider `tailscale`). That warning is expected here; every other check must pass, and the smoke session must complete, as in section 4 above.
 
 Interpretation limits: every probe packet, of every class and transport, travels inside one WireGuard UDP flow between the two Tailscale endpoints. The trace marks this (`trace info` shows `overlay` with `provider: tailscale`), and per-transport treatment, policers, MTU, DSCP and ECN carry `overlay_limited: true`: they describe the tunnel, not the network under it (probe.md §9.9). Capacity, delay, jitter, loss, reorder and queue are still end-to-end measurements of the path the traffic took, tunnel included. A path that switches between direct and DERP during a session changes what the trace describes, so repeat the `tailscale ping` right after the session as well. For a Mac initiator, the per-session sequence (pre-flight, what `trace info` must show, the archive) is the [trust checklist](field-session.md#macos-initiator-over-tailscale-trust-checklist).
