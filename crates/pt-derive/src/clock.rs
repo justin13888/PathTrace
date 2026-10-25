@@ -250,7 +250,9 @@ impl RealToMono {
     /// whose mapping of `real` lies on its own side of the cuts beside it gives a candidate.
     /// Where several do, `hint` (a mono the stamp is not expected to precede) picks the
     /// earliest at or after `hint − HINT_SLACK_NS`, else the latest; without a hint the mono
-    /// is unknown. Across a suspend the map is a step: the earlier segment below the
+    /// is unknown. The hint is only a lower bound: a stamp that lags it by |J| − 1 ms or more
+    /// (a receive stamp over a one-way delay that large) maps |J| early when the wrong
+    /// candidate is the earlier one, and not to unknown. Across a suspend the map is a step: the earlier segment below the
     /// placement, then the later one, never below the placement.
     pub fn map(&self, real: i64, hint: Option<i64>) -> Option<i64> {
         if self.pts.is_empty() {
