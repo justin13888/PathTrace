@@ -82,6 +82,15 @@ pub fn scenarios() -> Vec<Scenario> {
     // A pure policer: drop above rate + burst, no queue (tbf would queue `burst` bytes).
     let police = "tc qdisc del dev mb0 root; tc qdisc add dev mb0 root handle 1: prio; \
         tc filter add dev mb0 parent 1: protocol ip u32 match u32 0 0 police rate 5mbit burst 20k drop flowid 1:1";
+    // The same policer on UDP port 443 only (simulator-requirements.md S2); everything else
+    // goes through a 20 Mbit/s tail-drop queue, so only the port-443 classes are policed.
+    let police443 = "tc qdisc del dev mb0 root; \
+        tc qdisc add dev mb0 root handle 1: prio bands 3; \
+        tc qdisc add dev mb0 parent 1:1 handle 10: netem delay 10ms limit 100000; \
+        tc qdisc add dev mb0 parent 1:2 handle 20: netem delay 10ms rate 20mbit limit 100; \
+        tc qdisc add dev mb0 parent 1:3 handle 30: netem delay 10ms rate 20mbit limit 100; \
+        tc filter add dev mb0 parent 1: protocol ip prio 1 u32 match ip protocol 17 0xff match ip dport 443 0xffff police rate 5mbit burst 20k drop flowid 1:1; \
+        tc filter add dev mb0 parent 1: protocol ip prio 2 u32 match u32 0 0 flowid 1:2";
     // Route MTU on the middlebox (not the first hop, which would fail sends locally).
     let mtu_icmp = "ip route replace 10.0.2.0/24 dev mb0 mtu lock 1400";
     let mtu_bh = "ip route replace 10.0.2.0/24 dev mb0 mtu lock 1400; \
@@ -177,6 +186,15 @@ pub fn scenarios() -> Vec<Scenario> {
             police,
             "",
             "S2 S5",
+        ),
+        s(
+            "policer-udp443",
+            "standard",
+            &netem("delay 10ms"),
+            &netem("delay 10ms rate 20mbit limit 100"),
+            police443,
+            "",
+            "S2",
         ),
         s(
             "aqm-ecn",
@@ -524,6 +542,59 @@ fn fmt(v: Option<f64>) -> String {
     v.map_or("none".into(), |x| format!("{x:.4}"))
 }
 
+/// The UDP classes P7 saturates (probe.md §7), each with a PLCY policer verdict.
+const UDP_CLASSES: [&str; 3] = ["udp/high-port", "udp/443", "udp/443-quic"];
+
+/// `policer.class-lossy-flat/1` against the truth: per `(class, policed)`, a reachable class
+/// is `detected` exactly when policed, and a policed one is delivered at the 5 Mbit/s token
+/// rate. An unreachable class has no saturation to judge and is skipped, but at least one
+/// policed class must be judged.
+fn class_policer_checks(c: &mut Vec<Check>, t: &Trace, classes: &[(&str, bool)]) {
+    let mut judged = 0;
+    for &(class, policed) in classes {
+        let entry = format!("/classes/{}", class.replace('/', "~1"));
+        let reachable = t
+            .plcy
+            .pointer(&format!("{entry}/reachable"))
+            .and_then(Value::as_bool);
+        if reachable != Some(true) {
+            continue;
+        }
+        let det = t
+            .plcy
+            .pointer(&format!("{entry}/policer/detected"))
+            .and_then(Value::as_bool);
+        chk(
+            c,
+            &format!("{class} policer detected"),
+            policed,
+            format!("{det:?}"),
+            det == Some(policed),
+        );
+        if policed {
+            judged += 1;
+            let r = t
+                .plcy
+                .pointer(&format!("{entry}/policer/rate_bps"))
+                .and_then(num);
+            chk(
+                c,
+                &format!("{class} policer rate (±15%)"),
+                format!("{:.0}", ip_rate(5e6)),
+                fmt(r),
+                rel_ok(r, ip_rate(5e6), 0.15),
+            );
+        }
+    }
+    chk(
+        c,
+        "policed classes judged (reachable)",
+        "≥ 1",
+        judged,
+        judged >= 1,
+    );
+}
+
 /// IP-layer rate seen for full-size packets when the shaper counts L2 bytes.
 fn ip_rate(bps: f64) -> f64 {
     bps * 1500.0 / (1500.0 + L2)
@@ -784,6 +855,20 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 format!("{:.0}", ip_rate(5e6)),
                 fmt(r),
                 rel_ok(r, ip_rate(5e6), 0.15),
+            );
+            // Every packet is policed, so every reachable UDP class is.
+            class_policer_checks(&mut c, t, &UDP_CLASSES.map(|k| (k, true)));
+        }
+        "policer-udp443" => {
+            // Only UDP port 443 is policed: both classes on it, never the high port.
+            class_policer_checks(
+                &mut c,
+                t,
+                &[
+                    ("udp/high-port", false),
+                    ("udp/443", true),
+                    ("udp/443-quic", true),
+                ],
             );
         }
         "aqm-ecn" => {
