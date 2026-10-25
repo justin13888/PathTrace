@@ -123,6 +123,37 @@ fn direction(light: u64, pmtu: u64, user: bool) -> Vec<P> {
     v
 }
 
+/// Policer of the `policed_class` saturation: rate (bit/s) and bucket (bytes).
+const POLICER_BPS: f64 = 10e6;
+const POLICER_BUCKET: f64 = 30_000.0;
+
+/// A 1 s saturation of 1200 B packets at 20 Mbit/s, from 200 ms after T0, through a full
+/// `POLICER_BPS` token bucket of `POLICER_BUCKET`, which queues nothing: what passes arrives
+/// after the base delay, what does not is lost.
+fn policed(flow: u64, lag: u64) -> Vec<P> {
+    let gap = 480_000u64;
+    let mut tokens = POLICER_BUCKET;
+    (0..2_083u64)
+        .map(|k| {
+            if k > 0 {
+                tokens = (tokens + POLICER_BPS * gap as f64 / 8e9).min(POLICER_BUCKET);
+            }
+            let pass = tokens >= 1200.0;
+            if pass {
+                tokens -= 1200.0;
+            }
+            let tx = T0 + 200 * MS + k * gap;
+            P {
+                flow,
+                seq: k,
+                size: 1200,
+                tx,
+                rx: pass.then_some(tx + lag + DELAY),
+            }
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct Fixture {
     /// Rows of `netstack[a].udp_fullsock` (macOS receiver of b → a).
@@ -135,6 +166,8 @@ struct Fixture {
     linux_a: bool,
     /// META without the PTF 1.2 keys (`os_family`, `icmp_errors`).
     pre_1_2: bool,
+    /// A P7 `udp/high-port` saturation (flow 16) through a token-bucket policer.
+    policed_class: bool,
 }
 
 impl Default for Fixture {
@@ -145,6 +178,7 @@ impl Default for Fixture {
             changes_a: Vec::new(),
             linux_a: false,
             pre_1_2: false,
+            policed_class: false,
         }
     }
 }
@@ -209,21 +243,19 @@ fn trace(fx: &Fixture) -> PtfFile {
             ),
     );
     let meta = Section::new(b"META", flags::CRITICAL, meta.head().cloned().unwrap());
-    let flows = section(
-        b"FLOW",
-        Value::map().with(
-            "flows",
-            Value::Array(vec![
-                flow(1, "light"),
-                flow(2, "light"),
-                flow(11, "class"),
-                flow(12, "class"),
-                flow(13, "class"),
-                flow(30, "pmtu"),
-                flow(31, "pmtu"),
-            ]),
-        ),
-    );
+    let mut flow_defs = vec![
+        flow(1, "light"),
+        flow(2, "light"),
+        flow(11, "class"),
+        flow(12, "class"),
+        flow(13, "class"),
+        flow(30, "pmtu"),
+        flow(31, "pmtu"),
+    ];
+    if fx.policed_class {
+        flow_defs.push(flow(16, "class-sat"));
+    }
+    let flows = section(b"FLOW", Value::map().with("flows", Value::Array(flow_defs)));
     // a → b: the macOS sender's user-space times; the class probes 11 and 13 are sent too.
     let mut ab = direction(1, 30, !linux_a);
     for (flow, seq) in [(11u64, 0u64), (13, 0), (13, 1)] {
@@ -235,6 +267,9 @@ fn trace(fx: &Fixture) -> PtfFile {
             tx,
             rx: Some(tx + DELAY),
         });
+    }
+    if fx.policed_class {
+        ab.extend(policed(16, if linux_a { 3_000 } else { USER_LAG as u64 }));
     }
     let ba = direction(2, 31, false);
     // Echoes at a: 13 twice (transmit times known), 12 once without a transmitted row (its
@@ -502,6 +537,45 @@ fn udp_classes_reachable_without_tx_stamps() {
     assert_eq!(q.get("rtt_min_ns"), Some(&Value::Null));
     let none = class("udp/443");
     assert_eq!(none.get("reachable").and_then(Value::as_bool), Some(false));
+}
+
+/// `policer.class-lossy-flat/1`: a policed `udp/high-port` saturation from a macOS initiator
+/// (user-space transmit times) gets its own policer verdict on its PLCY entry; the classes
+/// P7 did not saturate are unknown, not undetected.
+#[test]
+fn policed_class_has_its_own_policer_verdict() {
+    let (path, plcy) = derived(&Fixture {
+        policed_class: true,
+        ..Fixture::default()
+    });
+    let class = |c: &str| {
+        plcy.get("classes")
+            .and_then(|v| v.get(c))
+            .and_then(|v| v.get("policer"))
+            .unwrap()
+    };
+    let hp = class("udp/high-port");
+    assert_eq!(s(hp, "method"), Some("policer.class-lossy-flat/1"));
+    assert_eq!(s(hp, "status"), Some("estimated"));
+    assert_eq!(s(hp, "scope"), Some("class"));
+    assert_eq!(hp.get("detected").and_then(Value::as_bool), Some(true));
+    assert!(num(hp, "depth_time_ns").unwrap() < 2e6);
+    let r = num(hp, "rate_bps").unwrap();
+    assert!((r / POLICER_BPS - 1.0).abs() < 0.01, "{r}");
+    let b = num(hp, "burst_bytes").unwrap();
+    assert!((b - POLICER_BUCKET).abs() <= 1200.0, "{b}");
+    for c in ["udp/443", "udp/443-quic"] {
+        let v = class(c);
+        assert_eq!(s(v, "status"), Some("unknown"), "{c}");
+        assert_eq!(v.get("detected"), Some(&Value::Null), "{c}");
+        assert_eq!(s(v, "reason"), Some("no class saturation"), "{c}");
+    }
+    let methods = path
+        .get("derivation")
+        .and_then(|d| d.get("methods"))
+        .and_then(Value::as_array)
+        .unwrap();
+    assert!(methods.contains(&Value::from("policer.class-lossy-flat/1")));
 }
 
 /// probe.md §9.9: through a tunnel, the five verdict groups are flagged and no others.
