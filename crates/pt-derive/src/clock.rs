@@ -1248,6 +1248,43 @@ mod tests {
     }
 
     #[test]
+    fn a_short_event_of_one_suspend_passes_over_a_matching_next_event() {
+        // Pairs at 1 Hz; a sleeps 60 s between the pairs at 10 s and 11 s, waking at 10.3 s,
+        // then 5 ms between the pairs at 11 s and 12 s, waking at 11.6 s. The first event's
+        // `suspended_ns` is 5 ms below the growth (BOOTTIME slew, within the length tolerance),
+        // which reads as a merged suspend whose last event may follow its later pair
+        // (derivation.md "Suspends", #132): the next interval's first event, whose length
+        // matches that 5 ms remainder, is passed over, and the later pair places the second.
+        let (s1, s2, slew) = (60e9 as i64, 5_000_000, 5_000_000);
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * 1_000_000_000).collect();
+        let gap = |m: &i64| {
+            (if *m > T0 + 10_000_000_000 { s1 } else { 0 })
+                + (if *m > T0 + 11_000_000_000 { s2 } else { 0 })
+        };
+        let real = mono.iter().map(|m| m + 7_000_000_000 + gap(m)).collect();
+        let boot = mono.iter().map(|m| m + 3_000_000_000 + gap(m)).collect();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            rows(&[("real", real), ("mono", mono), ("boot", boot)]),
+        );
+        let (p1, p2) = (T0 + 11_000_000_000, T0 + 12_000_000_000);
+        let first = |raw: &Raw| RealToMono::from_raw(raw, "a").suspends.list;
+        let (woke1, woke2) = (T0 + 10_300_000_000, T0 + 11_600_000_000);
+        raw.events = vec![stall_ns("a", woke1, s1 - slew), stall_ns("a", woke2, s2)];
+        let l = first(&raw);
+        assert_eq!((l[0].at, l[0].pair, l[0].ns), (woke1, p1, s1));
+        assert_eq!((l[1].at, l[1].pair, l[1].ns), (p2, p2, s2));
+        // Within 2 ms of the growth, the first event accounts for it, and the second suspend
+        // is placed at its own event.
+        raw.events = vec![
+            stall_ns("a", woke1, s1 - 1_000_000),
+            stall_ns("a", woke2, s2),
+        ];
+        assert_eq!(first(&raw)[1].at, woke2);
+    }
+
+    #[test]
     fn initiator_suspend_is_a_clock_step_not_a_skew() {
         // 120 s of a.mono with an exchange every 0.1 s, 10 ms each way, b 20 ppm fast; a is
         // suspended for 900 s at a.mono 30.6 s: a.mono stands still, b.mono runs on. The
