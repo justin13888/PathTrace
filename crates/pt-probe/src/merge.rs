@@ -1215,6 +1215,18 @@ pub fn merge_file(
         captured = captured.with("b", b.meta.get("tool").cloned().unwrap_or(Value::Null));
         sessions = sessions.with("b", b.meta.get("session").cloned().unwrap_or(Value::Null));
     }
+    // The trace is as redacted as every log it merges: the logs' common level, else `full`.
+    let level = |l: &Log| {
+        l.meta
+            .get("redaction")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    };
+    let redaction = match (level(&a), b.as_ref().map(level)) {
+        (Some(r), None) => r,
+        (Some(r), Some(s)) if s.as_ref() == Some(&r) => r,
+        _ => "full".to_owned(),
+    };
     let logs: Vec<LogInfo> = std::iter::once(a.info.clone())
         .chain(b.as_ref().map(|b| b.info.clone()))
         .collect();
@@ -1245,7 +1257,7 @@ pub fn merge_file(
             a.meta.get("network").cloned().unwrap_or(Value::Null),
         )
         .with("clocks", Value::Map(clocks))
-        .with("redaction", "full")
+        .with("redaction", redaction)
         .with("extra", extra)
         .with(
             "merged_from",
