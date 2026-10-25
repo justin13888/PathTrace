@@ -176,6 +176,13 @@ pub fn suspend_warnings(f: &pt_format::PtfFile) -> Vec<String> {
         .collect()
 }
 
+/// The `trace check --json` object of a valid file (cli.md): `host_suspend` as `trace info`
+/// shows it.
+fn check_json(f: &pt_format::PtfFile, rep: &pt_format::ReadReport) -> serde_json::Value {
+    let (host_suspend, _) = host_facts(f, &meta_of(f));
+    serde_json::json!({"valid": true, "sections": f.sections.len(), "index_verified": rep.index_verified, "content_digest": rep.content_digest, "unknown_sections": rep.unknown_sections, "host_suspend": host_suspend})
+}
+
 pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
     match cmd {
         TraceCmd::Check { file, json } => {
@@ -188,10 +195,7 @@ pub fn run(cmd: TraceCmd) -> Result<ExitCode, String> {
             }
             if json {
                 let v = match &r {
-                    Ok((f, rep)) => {
-                        let (host_suspend, _) = host_facts(f, &meta_of(f));
-                        serde_json::json!({"valid": true, "sections": f.sections.len(), "index_verified": rep.index_verified, "content_digest": rep.content_digest, "unknown_sections": rep.unknown_sections, "host_suspend": host_suspend})
-                    }
+                    Ok((f, rep)) => check_json(f, rep),
                     Err(e) => serde_json::json!({"valid": false, "error": e}),
                 };
                 println!("{v}");
@@ -378,11 +382,17 @@ mod tests {
     }
 
     /// `trace check` and `probe` warn once per suspended endpoint, and not at all without a
-    /// suspend (cli.md, probe.md §4.3).
+    /// suspend, and `trace check --json` shows `host_suspend` (cli.md, probe.md §4.3).
     #[test]
     fn suspend_warnings_name_each_suspended_endpoint() {
-        let mut f = corpus("v1.3/valid-1-3-additions.ptf");
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../conformance/v1.3/valid-1-3-additions.ptf");
+        let (mut f, rep) = read(&p, false).unwrap();
         assert!(suspend_warnings(&f).is_empty());
+        let j = check_json(&f, &rep);
+        assert_eq!(j["valid"], true);
+        assert_eq!(j["host_suspend"]["a"]["events"], 0);
+        assert_eq!(j["host_suspend"]["b"]["events"], 0);
         let evnt = f
             .sections
             .iter_mut()
@@ -413,9 +423,10 @@ mod tests {
                 "warning: endpoint a was suspended for 1765.4 s (2 suspend events): delays and one-way times across the suspend are unreliable"
             ]
         );
-        let (suspend, _) = host_facts(&f, &meta_of(&f));
-        assert_eq!(suspend["a"]["events"], 2);
-        assert_eq!(suspend["b"]["events"], 0);
+        let j = check_json(&f, &rep);
+        assert_eq!(j["host_suspend"]["a"]["events"], 2);
+        assert_eq!(j["host_suspend"]["a"]["suspended_ns"], 1_765_413_523_959u64);
+        assert_eq!(j["host_suspend"]["b"]["events"], 0);
     }
 
     /// An unknown field shows its status and reason and no counts, never 0; the transmit
