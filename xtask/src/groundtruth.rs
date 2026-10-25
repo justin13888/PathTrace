@@ -868,7 +868,7 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
         "policer-udp443" => {
             // Only UDP port 443 is policed: both classes on it, never the high port. The
             // class saturation backs off below the token rate after its losses, so
-            // `policer.class-lossy-flat/1` reads the rate low here (3.0-3.6 Mbit/s).
+            // `policer.class-lossy-flat/1` reads the rate low here (2.9-3.6 Mbit/s).
             // TODO(#142): gate the rate once the method takes it over the policed stretches.
             class_policer_checks(
                 &mut c,
