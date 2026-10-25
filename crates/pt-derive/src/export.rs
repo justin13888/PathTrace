@@ -44,7 +44,9 @@ pub fn netem_args(f: &PtfFile, dir: &str) -> Option<String> {
         let h = num(ge.get("h")).unwrap_or(1.0);
         let k = num(ge.get("k")).unwrap_or(0.0);
         if p > 0.0 {
-            // netem gemodel p r 1-h 1-k (R-0005); h/k here are loss probabilities in bad/good.
+            // netem gemodel p r 1-h 1-k (R-0005). PATH's h and k are loss probabilities in the
+            // bad and good states (ptf-format.md "Derived fields"); netem's 1-h and 1-k are the
+            // same loss probabilities, so they are written unchanged.
             parts.push(format!(
                 "loss gemodel {:.4}% {:.4}% {:.4}% {:.4}%",
                 p * 100.0,

@@ -9,6 +9,13 @@ use crate::raw::Raw;
 
 pub const SAT_THRESHOLD_NS: i64 = 2_500_000;
 
+/// Capacity: saturated arrivals, with chirp-estimated segments elsewhere (derivation.md).
+pub const CAPACITY_METHOD: &str = "capacity.saturated-arrivals/3";
+/// Bottleneck rate of one chirp's queued tail (derivation.md, `capacity`).
+pub const CHIRP_METHOD: &str = "capacity.chirp-dispersion/1";
+/// Policer rate and token-bucket burst (derivation.md, `policer`).
+pub const POLICER_METHOD: &str = "policer.lossy-flat/3";
+
 /// One transmitted probe packet on the trace time axis.
 #[derive(Debug, Clone)]
 pub struct Pkt {
@@ -26,6 +33,8 @@ pub struct Pkt {
     /// Receiving socket and its cumulative drop count at arrival (PTF 1.1 `rxq_drops`).
     pub rx_sock: Option<i64>,
     pub rxq_drops: Option<i64>,
+    /// Where the receive stamp came from (`pkt.rx_src`: 0 kernel, 1 user; None = not recorded).
+    pub rx_src: Option<i64>,
     /// Lost inside the receiving host, not on the path (`hostdrop.rxq-gap/1`): excluded from
     /// every loss statistic.
     pub host_drop: bool,
@@ -130,6 +139,7 @@ fn packets_marked(
             kind: raw.flow_kind(flow).to_string(),
             rx_sock: t.get("rx_sock", i),
             rxq_drops: t.get("rxq_drops", i),
+            rx_src: t.get("rx_src", i),
             host_drop: false,
         });
     }
@@ -257,7 +267,6 @@ struct Onset {
 /// `aqm_suspected`, and without a lossy heavy flow that is `unknown`.
 fn queue_discipline(saturated: bool, onsets: &[Onset], ce_marks: usize) -> &'static str {
     let low = onsets.iter().filter(|o| o.low_queue).count();
-    let mut heavy: Vec<f64> = onsets.iter().filter(|o| o.heavy).map(|o| o.ratio).collect();
     if !saturated {
         "unknown"
     } else if low > 0 && low * 2 >= onsets.len() {
@@ -265,12 +274,22 @@ fn queue_discipline(saturated: bool, onsets: &[Onset], ce_marks: usize) -> &'sta
     } else if ce_marks > 0 {
         "aqm_suspected"
     } else {
-        match median(&mut heavy) {
+        match onset_ratio(onsets) {
             None => "unknown",
-            Some(r) if r >= 0.8 => "droptail",
+            Some(r) if r >= ONSET_DROPTAIL => "droptail",
             Some(_) => "aqm_suspected",
         }
     }
+}
+
+/// Onset ratio at or above which the lossy heavy flows say tail drop (`queue.loss-onset/3`).
+const ONSET_DROPTAIL: f64 = 0.8;
+
+/// Median onset ratio of the lossy heavy flows, the value `queue_discipline` compares with
+/// [`ONSET_DROPTAIL`]; written to PATH as `queue.onset_ratio`.
+fn onset_ratio(onsets: &[Onset]) -> Option<f64> {
+    let mut heavy: Vec<f64> = onsets.iter().filter(|o| o.heavy).map(|o| o.ratio).collect();
+    median(&mut heavy)
 }
 
 /// Intervals (trace ns) during which any saturating or chirp flow was active, per direction.
@@ -296,6 +315,134 @@ pub fn loaded_intervals(pkts: &[Pkt]) -> Vec<(i64, i64)> {
 
 fn in_any(t: i64, iv: &[(i64, i64)]) -> bool {
     iv.iter().any(|(a, b)| t >= *a && t <= *b)
+}
+
+/// How many of the received packets an estimate used had a kernel, a user-space or no
+/// recorded receive stamp (`pkt.rx_src`): `{kernel, user, unknown}`.
+fn rx_src_counts<'a>(pkts: impl IntoIterator<Item = &'a Pkt>) -> Value {
+    let (mut kernel, mut user, mut unknown) = (0u64, 0u64, 0u64);
+    for p in pkts.into_iter().filter(|p| p.rx.is_some()) {
+        match p.rx_src {
+            Some(0) => kernel += 1,
+            Some(1) => user += 1,
+            _ => unknown += 1,
+        }
+    }
+    Value::map()
+        .with("kernel", kernel)
+        .with("user", user)
+        .with("unknown", unknown)
+}
+
+/// Bottleneck rate (bit/s) revealed by one chirp (`capacity.chirp-dispersion/1`,
+/// derivation.md). `ps` is the chirp in `train_idx` order. Once the chirp's gaps are shorter
+/// than a packet time at the bottleneck, its packets queue and leave the bottleneck one packet
+/// time apart, so each arrival gap exceeds its transmit gap. The rate is the bytes of the
+/// trailing run of such expanded gaps over that run's arrival span. None when a packet is
+/// missing, lost or unstamped, or when the run has fewer than 3 gaps (the chirp never queued,
+/// so the capacity is above its top rate).
+pub fn chirp_rate(ps: &[&Pkt]) -> Option<f64> {
+    let mut tr = Vec::with_capacity(ps.len());
+    for (k, p) in ps.iter().enumerate() {
+        if p.train_idx != k as i64 || p.host_drop {
+            return None;
+        }
+        tr.push((p.tx?, p.rx?, p.size));
+    }
+    let n = tr.len();
+    if n < 4 {
+        return None;
+    }
+    let mut s = n - 1;
+    while s > 0 && tr[s].1 - tr[s - 1].1 > tr[s].0 - tr[s - 1].0 {
+        s -= 1;
+    }
+    let gaps = n - 1 - s;
+    let span = tr[n - 1].1 - tr[s].1;
+    if gaps < 3 || span <= 0 {
+        return None;
+    }
+    let bytes: i64 = tr[s + 1..].iter().map(|x| x.2).sum();
+    Some(bytes as f64 * 8.0 * 1e9 / span as f64)
+}
+
+/// Bytes that arrive in `(last_rx − q, last_rx]`, the drain of a queue of `q` ns that a flow's
+/// last packet (arriving at `last_rx`) found; `rx_all` is (rx, bytes, phase) sorted by rx.
+fn drain_bytes(last_rx: i64, q: i64, rx_all: &[(i64, i64, i64)]) -> i64 {
+    let lo = rx_all.partition_point(|x| x.0 <= last_rx - q);
+    let hi = rx_all.partition_point(|x| x.0 <= last_rx);
+    rx_all[lo..hi].iter().map(|x| x.1).sum()
+}
+
+/// `estimated` capacity segments from chirps outside the saturated windows
+/// (`capacity.chirp-dispersion/1`): chirps whose first transmissions are at most 2 s apart form
+/// one segment from the first one's first transmission to the last one's last arrival, at the
+/// median of their rates. Returns (t0, t1, rate bit/s, chirps).
+pub fn chirp_segments(pkts: &[Pkt], sat: &[(i64, i64)]) -> Vec<(i64, i64, f64, usize)> {
+    let mut by_chirp: BTreeMap<(i64, i64), Vec<&Pkt>> = BTreeMap::new();
+    for p in pkts.iter().filter(|p| p.kind == "chirp") {
+        by_chirp.entry((p.flow, p.train)).or_default().push(p);
+    }
+    let mut est: Vec<(i64, i64, f64)> = Vec::new();
+    for ps in by_chirp.values_mut() {
+        ps.sort_by_key(|p| p.train_idx);
+        let (Some(t0), Some(t1)) = (
+            ps.iter().filter_map(|p| p.tx).min(),
+            ps.iter().filter_map(|p| p.rx).max(),
+        ) else {
+            continue;
+        };
+        if sat.iter().any(|(a, b)| t0 <= *b && t1 >= *a) {
+            continue;
+        }
+        if let Some(r) = chirp_rate(ps) {
+            est.push((t0, t1, r));
+        }
+    }
+    est.sort_by_key(|e| e.0);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < est.len() {
+        let mut j = i + 1;
+        while j < est.len() && est[j].0 - est[j - 1].0 <= 2_000_000_000 {
+            j += 1;
+        }
+        let mut rates: Vec<f64> = est[i..j].iter().map(|e| e.2).collect();
+        let t1 = est[i..j].iter().map(|e| e.1).max().unwrap_or(est[i].1);
+        if let Some(m) = median(&mut rates) {
+            out.push((est[i].0, t1, m, j - i));
+        }
+        i = j;
+    }
+    out
+}
+
+/// Token-bucket burst (bytes) one lossy flow shows before its first loss
+/// (`policer.lossy-flat/3`): the most bytes, over any interval ending at the first loss, that
+/// the flow got delivered above `rate_bps`. `ps` is the flow; host drops are not losses. None
+/// without a loss or with nothing delivered before it.
+pub fn policer_burst(ps: &[&Pkt], rate_bps: f64) -> Option<f64> {
+    let t_loss = ps
+        .iter()
+        .filter(|p| p.rx.is_none() && !p.host_drop)
+        .filter_map(|p| p.tx)
+        .min()?;
+    let mut sent: Vec<(i64, i64)> = ps
+        .iter()
+        .filter(|p| p.rx.is_some())
+        .filter_map(|p| Some((p.tx?, p.size)))
+        .filter(|(t, _)| *t < t_loss)
+        .collect();
+    if sent.is_empty() {
+        return None;
+    }
+    sent.sort_unstable();
+    let (mut bytes, mut best) = (0i64, f64::MIN);
+    for (t, size) in sent.iter().rev() {
+        bytes += size;
+        best = best.max(bytes as f64 - rate_bps * (t_loss - t) as f64 / 8e9);
+    }
+    Some(best.max(0.0))
 }
 
 /// Steps of the unloaded base delay (`pathchange.base-delay-step/1`, derivation.md): `segs` are
@@ -500,15 +647,18 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     // Which transmit timestamp source each packet's send time came from (SND > SCHED > user).
     let mut f = Value::map().with(
         "timestamps",
-        field("known", "timestamps.source-count/1", 1.0).with(
-            "counts",
-            Value::Map(
-                ts_src
-                    .iter()
-                    .map(|(k, v)| (pt_format::Key(k.clone()), Value::from(*v)))
-                    .collect(),
-            ),
-        ),
+        field("known", "timestamps.source-count/1", 1.0)
+            .with(
+                "counts",
+                Value::Map(
+                    ts_src
+                        .iter()
+                        .map(|(k, v)| (pt_format::Key(k.clone()), Value::from(*v)))
+                        .collect(),
+                ),
+            )
+            // Receive stamps by source (kernel, user space, not recorded), every received packet.
+            .with("rx_counts", rx_src_counts(&pkts)),
     );
     // Host drops at the receiver (excluded from every loss statistic) and drops in the
     // sender's own egress qdisc (docs/design/derivation.md, Host drops).
@@ -671,9 +821,15 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     }
 
     // --- jitter (quiet light residuals) ---
-    let resid: Vec<(i64, i64)> = light
+    let jitter_pkts: Vec<&Pkt> = light
         .iter()
-        .filter(|p| p.tx.is_some_and(quiet))
+        .copied()
+        .filter(|p| {
+            p.tx.is_some_and(quiet) && p.owd().is_some() && base_at(p.tx.unwrap_or(0)).is_some()
+        })
+        .collect();
+    let resid: Vec<(i64, i64)> = jitter_pkts
+        .iter()
         .filter_map(|p| Some((p.tx?, p.owd()? - base_at(p.tx?)?)))
         .collect();
     if resid.len() >= 20 {
@@ -718,6 +874,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             .with("stddev_ns", var.sqrt())
             .with("acf", Value::Array(acf))
             .with("samples", resid.len())
+            .with("rx_src", rx_src_counts(jitter_pkts.iter().copied()))
             .with("series", format!("jitter[{dir}]"))
             .with("source", src(&["pkt"])),
         );
@@ -853,30 +1010,58 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     } else {
         f64::NAN
     };
-    let mut segs_v = Vec::new();
+    // Chirps fill other periods with `estimated` segments (REQ-DRV-004).
+    let chirp_segs = chirp_segments(&pkts, &sat);
+    let mut segs_t: Vec<(i64, Value)> = Vec::new();
     for w in &sat {
-        segs_v.push(
+        segs_t.push((
+            w.0,
             Value::map()
                 .with("t0", w.0)
                 .with("t1", w.1)
                 .with("quality", "saturated")
                 .with("workload", "heavy"),
-        );
+        ));
     }
+    for (t0, t1, rate, n) in &chirp_segs {
+        segs_t.push((
+            *t0,
+            Value::map()
+                .with("t0", *t0)
+                .with("t1", *t1)
+                .with("quality", "estimated")
+                .with("workload", "chirp")
+                .with("method", CHIRP_METHOD)
+                .with("rate_bps", *rate)
+                .with("chirps", *n),
+        ));
+    }
+    segs_t.sort_by_key(|s| s.0);
+    let segs_v: Vec<Value> = segs_t.into_iter().map(|s| s.1).collect();
+    let mut chirp_rates: Vec<f64> = chirp_segs.iter().map(|s| s.2).collect();
+    let chirp_med = median(&mut chirp_rates);
     f = f.with(
         "capacity",
-        if opps.is_empty() {
-            field("unknown", "capacity.saturated-arrivals/2", 0.0).with(
+        if opps.is_empty() && chirp_segs.is_empty() {
+            field("unknown", CAPACITY_METHOD, 0.0).with(
                 "reason",
-                "no saturated windows (no saturation phase, or queue never built)",
+                "no saturated windows (no saturation phase, or queue never built) and no chirp estimate",
             )
+        } else if opps.is_empty() {
+            field("estimated", CAPACITY_METHOD, 0.4)
+                .with("representation", "segments")
+                .with("estimated_rate_bps", chirp_med)
+                .with("segments", Value::Array(segs_v))
+                .with("outside_segments", "unknown")
+                .with("source", src(&["pkt"]))
         } else {
-            field("known", "capacity.saturated-arrivals/2", 0.85)
+            field("known", CAPACITY_METHOD, 0.85)
                 .with("representation", "opportunities")
                 .with("quantum_bytes", "per-row")
                 .with("opportunities", format!("capacity_opps[{dir}]"))
                 .with("rate_series", format!("capacity_rate[{dir}]"))
                 .with("median_rate_bps", rate_med.unwrap_or(0.0))
+                .with("estimated_rate_bps", chirp_med)
                 .with("segments", Value::Array(segs_v))
                 .with("outside_segments", "unknown")
                 .with(
@@ -1080,6 +1265,45 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     let discipline = queue_discipline(!sat_flows.is_empty(), &onsets, ce_marks);
     let buffer_bytes = depth_ns.zip(rate_med).map(|(d, r)| d / 1e9 * r / 8.0);
     out.buffer_bytes = buffer_bytes;
+    // Drain cross-check: the queue a heavy flow leaves when its sender stops is what arrives
+    // between the moment its last packet would have arrived over an empty queue and the moment
+    // it did arrive.
+    let (mut drain_t, mut drain_b): (Vec<f64>, Vec<f64>) = (Vec::new(), Vec::new());
+    for ps in sat_flows.values().filter(|ps| ps[0].kind == "heavy") {
+        let Some(last) = ps.iter().filter(|p| p.rx.is_some()).max_by_key(|p| p.tx) else {
+            continue;
+        };
+        let (Some(q), Some(r)) = (q_of(last), last.rx) else {
+            continue;
+        };
+        if q <= SAT_THRESHOLD_NS {
+            continue;
+        }
+        drain_t.push(q as f64);
+        drain_b.push(drain_bytes(r, q, &rx_all) as f64);
+    }
+    let drain_flows = drain_t.len();
+    let drain_time = median(&mut drain_t);
+    let drain_b_med = median(&mut drain_b);
+    let drain = Value::map()
+        .with("flows", drain_flows)
+        .with("time_ns", drain_time)
+        .with("bytes", drain_b_med)
+        .with(
+            "rate_bps",
+            drain_time
+                .zip(drain_b_med)
+                .filter(|(t, _)| *t > 0.0)
+                .map(|(t, b)| b * 8.0 * 1e9 / t),
+        )
+        .with(
+            "bytes_ratio",
+            drain_b_med
+                .zip(buffer_bytes)
+                .filter(|(_, d)| *d > 0.0)
+                .map(|(b, d)| b / d),
+        );
+    let sat_pkts: Vec<&Pkt> = sat_flows.values().flatten().copied().collect();
     f = f.with(
         "queue",
         match depth_ns {
@@ -1095,8 +1319,21 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             .with("depth_time_ns", d)
             .with("depth_bytes", buffer_bytes)
             .with("discipline", discipline)
+            .with("onset_ratio", onset_ratio(&onsets))
+            .with("onset_threshold", ONSET_DROPTAIL)
+            .with("lossy_flows", onsets.len())
+            .with(
+                "lossy_heavy_flows",
+                onsets.iter().filter(|o| o.heavy).count(),
+            )
+            .with(
+                "low_queue_flows",
+                onsets.iter().filter(|o| o.low_queue).count(),
+            )
             .with("losses", losses_total)
             .with("ce_marks", ce_marks)
+            .with("drain", drain)
+            .with("rx_src", rx_src_counts(sat_pkts.iter().copied()))
             .with(
                 "note",
                 if losses_total == 0 {
@@ -1113,11 +1350,22 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
     f = f.with(
         "policer",
         if discipline == "policer" {
-            field("estimated", "policer.lossy-flat/2", 0.6)
+            let mut bursts: Vec<f64> = rate_med
+                .map(|r| {
+                    sat_flows
+                        .values()
+                        .filter_map(|ps| policer_burst(ps, r))
+                        .collect()
+                })
+                .unwrap_or_default();
+            let burst_flows = bursts.len();
+            field("estimated", POLICER_METHOD, 0.6)
                 .with("rate_bps", rate_med)
-                .with("burst_bytes", Value::Null)
+                .with("burst_bytes", median(&mut bursts))
+                .with("burst_flows", burst_flows)
+                .with("scope", "direction")
         } else {
-            field("unknown", "policer.lossy-flat/2", 0.0).with("detected", false)
+            field("unknown", POLICER_METHOD, 0.0).with("detected", false)
         },
     );
 
@@ -1647,6 +1895,99 @@ mod tests {
         assert_eq!(queue_discipline(true, &[], 0), "unknown");
     }
 
+    /// `queue.onset_ratio` is the value the droptail/AQM verdict is read from.
+    #[test]
+    fn onset_ratio_is_the_heavy_median() {
+        let o = onsets(&[(true, 0.7, false), (false, 1.0, false), (true, 0.5, false)]);
+        assert_eq!(onset_ratio(&o), Some(0.7));
+        assert_eq!(onset_ratio(&onsets(&[(false, 1.0, false)])), None);
+    }
+
+    /// One P3 chirp (26 packets of 1500 B, gaps 2 ms × 0.8^k) through a FIFO bottleneck of
+    /// `bps` with a 10 ms base delay.
+    fn chirp(bps: f64) -> Vec<Pkt> {
+        let pt = (1500.0 * 8.0 * 1e9 / bps) as i64;
+        let (mut tx, mut dep) = (0i64, i64::MIN);
+        (0..26)
+            .map(|k| {
+                if k > 0 {
+                    tx += (2_000_000.0 * 0.8f64.powi(k - 1)) as i64;
+                }
+                dep = dep.max(tx) + pt;
+                let mut p = pk(30, k as i64, tx, Some(dep + 10_000_000), None);
+                p.kind = "chirp".into();
+                p.train_idx = k as i64;
+                p
+            })
+            .collect()
+    }
+
+    /// `capacity.chirp-dispersion/1` reads the bottleneck rate from the chirp's queued tail,
+    /// and gives nothing for a chirp that never queued or lost a packet.
+    #[test]
+    fn chirp_rate_recovers_the_bottleneck() {
+        for bps in [20e6, 100e6, 400e6] {
+            let c = chirp(bps);
+            let r = chirp_rate(&c.iter().collect::<Vec<_>>()).unwrap();
+            assert!((r / bps - 1.0).abs() < 0.01, "{bps}: {r}");
+        }
+        // Above the chirp's top rate (1.27 Gbit/s): no packet queues.
+        assert_eq!(chirp_rate(&chirp(2e9).iter().collect::<Vec<_>>()), None);
+        let mut lost = chirp(100e6);
+        lost[20].rx = None;
+        assert_eq!(chirp_rate(&lost.iter().collect::<Vec<_>>()), None);
+        // Chirps 500 ms apart form one estimated segment; one inside a saturated window is
+        // left out.
+        let mut all = Vec::new();
+        for (train, off) in [(0, 0), (1, 500_000_000), (2, 9_000_000_000)] {
+            for mut p in chirp(100e6) {
+                p.train = train;
+                p.tx = p.tx.map(|t| t + off);
+                p.rx = p.rx.map(|t| t + off);
+                all.push(p);
+            }
+        }
+        let segs = chirp_segments(&all, &[(8_900_000_000, 9_100_000_000)]);
+        assert_eq!(segs.len(), 1, "{segs:?}");
+        assert_eq!((segs[0].0, segs[0].3), (0, 2));
+        assert!((segs[0].2 / 100e6 - 1.0).abs() < 0.01);
+    }
+
+    /// `policer.lossy-flat/3`: a 10 Mbit/s token bucket of 30 000 B, full at the start, fed at
+    /// 20 Mbit/s, shows its bucket as the bytes delivered above the rate before the first loss.
+    #[test]
+    fn policer_burst_is_the_bucket() {
+        let (rate, bucket, gap) = (10e6, 30_000.0, 600_000i64);
+        let mut tokens: f64 = bucket;
+        let mut ps = Vec::new();
+        for k in 0..200i64 {
+            let t = k * gap;
+            if k > 0 {
+                tokens = (tokens + rate * gap as f64 / 8e9).min(bucket);
+            }
+            let pass = tokens >= 1500.0;
+            if pass {
+                tokens -= 1500.0;
+            }
+            ps.push(pk(40, k, t, pass.then_some(t + 5_000_000), None));
+        }
+        let b = policer_burst(&ps.iter().collect::<Vec<_>>(), rate).unwrap();
+        assert!((b - bucket).abs() <= 1500.0, "{b}");
+        // No loss: no burst.
+        let ok: Vec<Pkt> = (0..10)
+            .map(|k| pk(40, k, k * gap, Some(k * gap), None))
+            .collect();
+        assert_eq!(policer_burst(&ok.iter().collect::<Vec<_>>(), rate), None);
+    }
+
+    /// The drain cross-check counts what arrives while the last packet's queue empties.
+    #[test]
+    fn drain_counts_bytes_inside_the_last_queue() {
+        let rx_all = [(10, 100, 0), (20, 100, 0), (30, 100, 0), (40, 100, 0)];
+        assert_eq!(drain_bytes(40, 25, &rx_all), 300);
+        assert_eq!(drain_bytes(40, 0, &rx_all), 0);
+    }
+
     #[test]
     fn qdisc_drops_segment_at_iface_change_and_reset() {
         // No rows with a drops value: unknown.
@@ -1690,6 +2031,7 @@ mod tests {
             kind: "heavy".into(),
             rx_sock: rx.map(|_| 0),
             rxq_drops: rx.and(drops),
+            rx_src: rx.map(|_| 0),
             host_drop: false,
         }
     }

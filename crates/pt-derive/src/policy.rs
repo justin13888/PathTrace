@@ -15,6 +15,24 @@ fn q(v: &mut [f64], p: f64) -> Option<f64> {
     Some(v[((v.len() - 1) as f64 * p).round() as usize])
 }
 
+/// Distribution-free 95% interval of the `p` quantile of `v` (`vald.reference/1`): the order
+/// statistics at ranks n·p ∓ 1.96·√(n·p·(1−p)), by the normal approximation to the binomial
+/// count of samples below the quantile. Null when either rank falls outside the sample, i.e.
+/// the sample is too small for a two-sided interval.
+fn q_ci95(v: &mut [f64], p: f64) -> Value {
+    let n = v.len() as f64;
+    let h = 1.96 * (n * p * (1.0 - p)).sqrt();
+    let (lo, hi) = ((n * p - h).floor(), (n * p + h).ceil());
+    if v.is_empty() || lo < 1.0 || hi > n {
+        return Value::Null;
+    }
+    v.sort_by(f64::total_cmp);
+    Value::Array(vec![
+        Value::from(v[lo as usize - 1]),
+        Value::from(v[hi as usize - 1]),
+    ])
+}
+
 /// UDP echoes per flow: how many arrived back at the sender, and their RTTs (trace ns: echo
 /// arrival minus the transmit time, which follows the direction rule SND, else SCHED, else
 /// user; `policy.matrix/2`). An echo whose transmit time is unknown counts as arrived and has
@@ -296,7 +314,10 @@ pub fn vald(raw: &Raw, tb: &TimeBase) -> Value {
                     .with("requests", n)
                     .with("completion_p50_ns", q(&mut lat, 0.5))
                     .with("completion_p95_ns", q(&mut lat, 0.95))
-                    .with("completion_p99_ns", q(&mut lat, 0.99));
+                    .with("completion_p99_ns", q(&mut lat, 0.99))
+                    .with("completion_p50_ci95_ns", q_ci95(&mut lat, 0.5))
+                    .with("completion_p95_ci95_ns", q_ci95(&mut lat, 0.95))
+                    .with("completion_p99_ci95_ns", q_ci95(&mut lat, 0.99));
             } else if let (Some(f0), Some(d)) = (first, done) {
                 // Goodput measured at the receiving endpoint.
                 let secs = (d.0 - f0) as f64 / 1e9;
@@ -327,15 +348,28 @@ pub fn vald(raw: &Raw, tb: &TimeBase) -> Value {
             .map(|o| o as f64)
             .collect();
         let loss = 1.0 - owd.len() as f64 / ps.len() as f64;
+        // `loss` counts every packet without a one-way delay; its interval counts the same.
+        let received = ps.iter().filter(|p| p.rx.is_some()).count();
+        let (llo, lhi) = crate::dir::wilson((ps.len() - owd.len()) as f64, ps.len() as f64);
         refs.push(
             Value::map()
                 .with("name", format!("udp-cbr-{dir}"))
                 .with("flow", flow as u64)
                 .with("rate_bps", 2_000_000u64)
                 .with("loss", loss)
+                .with("sent", ps.len())
+                .with("received", received)
+                .with("owd_samples", owd.len())
+                .with(
+                    "loss_ci95",
+                    Value::Array(vec![Value::from(llo), Value::from(lhi)]),
+                )
                 .with("owd_p50_ns", q(&mut owd, 0.5))
                 .with("owd_p95_ns", q(&mut owd, 0.95))
                 .with("owd_p99_ns", q(&mut owd, 0.99))
+                .with("owd_p50_ci95_ns", q_ci95(&mut owd, 0.5))
+                .with("owd_p95_ci95_ns", q_ci95(&mut owd, 0.95))
+                .with("owd_p99_ci95_ns", q_ci95(&mut owd, 0.99))
                 .with("split_method", "symmetric_assumed"),
         );
     }
@@ -343,4 +377,25 @@ pub fn vald(raw: &Raw, tb: &TimeBase) -> Value {
         .with("method", "vald.reference/1")
         .with("reference", Value::Array(refs))
         .with("fidelity", Value::Null)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::q_ci95;
+    use pt_format::Value;
+
+    /// The interval brackets the quantile by order statistics, and is null when the sample
+    /// is too small for both ranks.
+    #[test]
+    fn quantile_interval_by_order_statistics() {
+        let mut v: Vec<f64> = (1..=100).map(f64::from).collect();
+        // n = 100, p = 0.5: ranks 50 ∓ 9.8, rounded outwards → 40 and 60.
+        assert_eq!(
+            q_ci95(&mut v, 0.5),
+            Value::Array(vec![Value::from(40.0), Value::from(60.0)])
+        );
+        // p = 0.99 needs a rank above 100.
+        assert_eq!(q_ci95(&mut v, 0.99), Value::Null);
+        assert_eq!(q_ci95(&mut [], 0.5), Value::Null);
+    }
 }
