@@ -380,6 +380,15 @@ fn q_age(lag: Option<u64>, q: f64) -> u64 {
     lag.map_or(0, |l| l.saturating_sub(FEEDBACK_INTERVAL_NS / 2) + q as u64)
 }
 
+/// Smallest queue ceiling (docs/design/probe.md §7, item 6).
+pub const QUEUE_CEILING_MIN_NS: u64 = 1_000_000_000;
+
+/// Queueing delay or report age (ns) beyond which a saturation stops for good, for a flow whose
+/// feedback lag is `lag` (docs/design/probe.md §7, item 6): max(1 s, 4 × feedback lag).
+fn queue_ceiling(lag: Option<u64>) -> u64 {
+    QUEUE_CEILING_MIN_NS.max(lag.unwrap_or(0).saturating_mul(4))
+}
+
 /// Bits sent in excess of delivery rate `d` (bit/s) during the window `[now − window, now]`,
 /// from the rate history `sent` (docs/design/probe.md §7). Negative when the sender sent less
 /// than `d`. The latest queue report does not reflect these bits yet: they are in flight or
@@ -487,6 +496,7 @@ impl Controller {
         };
         let qt_base = *self.q_target_ns.lock().expect("lock") as f64;
         let mut flows = self.flows.lock().expect("lock");
+        let mut halted = Vec::new();
         for f in list {
             let id = f.u64_or("flow", 999);
             let Some(st) = u8::try_from(id).ok().and_then(|id| flows.get_mut(&id)) else {
@@ -503,6 +513,25 @@ impl Controller {
             });
             if st.lag.is_none() && d > 0.0 {
                 st.lag = Some(now.saturating_sub(st.start));
+            }
+            // Queue ceiling: a queue this deep, or a report this old, means the controller is
+            // acting on feedback the path buffered for seconds; stop rather than keep feeding it
+            // (issue #108).
+            let ceiling = queue_ceiling(st.lag);
+            let age = q_age(st.lag, q);
+            if q as u64 > ceiling || age > ceiling {
+                let flow = id as u8;
+                halted.push(flow);
+                let _ = self.pacer.send(PacerCmd::Halt(
+                    flow,
+                    Value::map()
+                        .with("flow", flow)
+                        .with("reason", "queue_ceiling")
+                        .with("qdelay_ns", q as u64)
+                        .with("age_ns", age)
+                        .with("ceiling_ns", ceiling),
+                ));
+                continue;
             }
             match st.mode {
                 Mode::SlowStart => {
@@ -554,6 +583,9 @@ impl Controller {
             let keep = st.lag.unwrap_or(0) + RATE_HISTORY_NS;
             push_rate(&mut st.sent, now, keep, st.rate);
             let _ = self.pacer.send(PacerCmd::SetRate(id as u8, st.rate as u64));
+        }
+        for id in halted {
+            flows.remove(&id);
         }
     }
 }
@@ -731,6 +763,59 @@ mod tests {
         // 8 > 2 × 3 after a full step: hold at the delivery rate.
         c.feedback_at(&fb7(0, 3_000_000), t0 + 180 * MS);
         assert_eq!(set_rate(&rx), 3_000_000);
+    }
+
+    #[test]
+    fn queue_ceiling_stops_the_saturation() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        // 360 ms RTT through a buffering relay: lag 360 ms, ceiling max(1 s, 1.44 s) = 1.44 s.
+        c.feedback_at(&fb7(0, 2_000_000), t0 + 360 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        // Deep but under the ceiling (report age 350 ms + 1 s): the controller still acts.
+        c.feedback_at(&fb7(1000 * MS, 2_000_000), t0 + 2000 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        // Report age 350 ms + 1.1 s passes the ceiling before q does: stop, with the trigger.
+        c.feedback_at(&fb7(1100 * MS, 2_000_000), t0 + 2100 * MS);
+        let PacerCmd::Halt(7, d) = rx.recv().unwrap() else {
+            panic!()
+        };
+        assert_eq!(d.get("flow").and_then(Value::as_u64), Some(7));
+        assert_eq!(
+            d.get("reason").and_then(Value::as_str),
+            Some("queue_ceiling")
+        );
+        assert_eq!(d.get("qdelay_ns").and_then(Value::as_u64), Some(1100 * MS));
+        assert_eq!(d.get("age_ns").and_then(Value::as_u64), Some(1450 * MS));
+        assert_eq!(d.get("ceiling_ns").and_then(Value::as_u64), Some(1440 * MS));
+        // The flow is no longer controlled: later feedback sets no rate and halts nothing again.
+        c.feedback_at(&fb7(30_000 * MS, 2_000_000), t0 + 2200 * MS);
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[test]
+    fn queue_ceiling_scales_with_the_feedback_lag() {
+        assert_eq!(queue_ceiling(None), QUEUE_CEILING_MIN_NS);
+        assert_eq!(queue_ceiling(Some(20 * MS)), QUEUE_CEILING_MIN_NS);
+        assert_eq!(queue_ceiling(Some(250 * MS)), QUEUE_CEILING_MIN_NS);
+        assert_eq!(queue_ceiling(Some(600 * MS)), 2400 * MS);
+        // Before the lag is measured only q counts, against the 1 s floor.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let c = Controller::new(Role::A, tx, 500_000_000, Arc::default());
+        let t0 = mono_raw();
+        c.add(7, t0, 0, 0);
+        c.feedback_at(&fb7(900 * MS, 0), t0 + 20 * MS);
+        assert!(matches!(rx.recv().unwrap(), PacerCmd::SetRate(7, _)));
+        c.feedback_at(&fb7(1001 * MS, 0), t0 + 40 * MS);
+        assert!(matches!(rx.recv().unwrap(), PacerCmd::Halt(7, _)));
+        // A short path's overdrive queue (0.75 s) never reaches the 1 s floor.
+        c.add(7, t0, 0, 0);
+        c.feedback_at(&fb7(0, 20_000_000), t0 + 20 * MS);
+        assert_eq!(set_rate(&rx), 2_000_000);
+        c.feedback_at(&fb7(760 * MS, 20_000_000), t0 + 100 * MS);
+        assert!(matches!(rx.recv().unwrap(), PacerCmd::SetRate(7, _)));
     }
 
     #[test]
