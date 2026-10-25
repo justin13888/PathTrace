@@ -147,36 +147,6 @@ pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> MahimahiExport {
         Some(_) if segs.is_empty() => Some("no saturated segments in PATH capacity"),
         Some(_) => None,
     };
-    // Synthetic opportunities in each gap between consecutive saturated segments, inside the
-    // exported timeline (first to last measured opportunity), both gap ends excluded.
-    let mut fill: Vec<i64> = Vec::new();
-    let mut filled = Vec::new();
-    if let (Some(r), None) = (rate, reason) {
-        let period = MAHIMAHI_QUANTUM as f64 * 8.0 * 1e9 / r;
-        for w in segs.windows(2) {
-            let (g0, g1) = (w[0].1.max(t0), w[1].0.min(t_end));
-            if g1 <= g0 {
-                continue;
-            }
-            let n0 = fill.len();
-            let mut k = 1u64;
-            loop {
-                let t = g0 + (k as f64 * period) as i64;
-                if t >= g1 {
-                    break;
-                }
-                fill.push(t);
-                k += 1;
-            }
-            if fill.len() > n0 {
-                filled.push(
-                    Value::map()
-                        .with("start_ms", to_ms(g0))
-                        .with("end_ms", to_ms(g1)),
-                );
-            }
-        }
-    }
     let mut lines = Vec::new();
     let mut carry: u64 = 0;
     for (t, b) in &opps {
@@ -186,8 +156,39 @@ pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> MahimahiExport {
             carry -= MAHIMAHI_QUANTUM;
         }
     }
+    drop(opps);
     let measured = lines.len();
-    lines.extend(fill.iter().map(|t| to_ms(*t)));
+    // Synthetic opportunities in each gap between consecutive saturated segments, inside the
+    // exported timeline (first to last measured opportunity), both gap ends excluded. They go
+    // straight into `lines` (no second per-opportunity buffer), which is then sorted in place.
+    let mut filled = Vec::new();
+    if let (Some(r), None) = (rate, reason) {
+        let period = MAHIMAHI_QUANTUM as f64 * 8.0 * 1e9 / r;
+        for w in segs.windows(2) {
+            let (g0, g1) = (w[0].1.max(t0), w[1].0.min(t_end));
+            if g1 <= g0 {
+                continue;
+            }
+            let n0 = lines.len();
+            let mut k = 1u64;
+            loop {
+                let t = g0 + (k as f64 * period) as i64;
+                if t >= g1 {
+                    break;
+                }
+                lines.push(to_ms(t));
+                k += 1;
+            }
+            if lines.len() > n0 {
+                filled.push(
+                    Value::map()
+                        .with("start_ms", to_ms(g0))
+                        .with("end_ms", to_ms(g1)),
+                );
+            }
+        }
+    }
+    let filled_lines = lines.len() - measured;
     lines.sort_unstable();
     let mut sidecar = Value::map()
         .with("method", MAHIMAHI_EXPORT_METHOD)
@@ -196,7 +197,7 @@ pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> MahimahiExport {
         .with("t0_ns", t0)
         .with("lines", lines.len())
         .with("measured_lines", measured)
-        .with("filled_lines", fill.len())
+        .with("filled_lines", filled_lines)
         .with(
             "fill_rate_bps",
             match (rate, reason) {
@@ -212,7 +213,7 @@ pub fn mahimahi_lines(f: &PtfFile, dir: &str) -> MahimahiExport {
         None => format!(
             "{dir}: {} opportunities: {measured} measured in saturated windows, {} filled at the median saturated rate ({:.1} Mbit/s) in {} gaps where capacity is unknown, not measured",
             lines.len(),
-            fill.len(),
+            filled_lines,
             rate.unwrap_or(0.0) / 1e6,
             filled.len()
         ),

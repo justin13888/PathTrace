@@ -387,8 +387,15 @@ fn run(cli: Cli) -> Result<ExitCode, String> {
                         continue;
                     };
                     let p = out.with_extension(ext);
-                    let text: String = e.lines.iter().map(|l| format!("{l}\n")).collect();
-                    std::fs::write(&p, text).map_err(|e| e.to_string())?;
+                    // Stream the lines: a deep trace at 1 Gbit/s has ~10^8 of them.
+                    use std::io::Write as _;
+                    let mut w = std::io::BufWriter::new(
+                        std::fs::File::create(&p).map_err(|e| e.to_string())?,
+                    );
+                    for l in &e.lines {
+                        writeln!(w, "{l}").map_err(|e| e.to_string())?;
+                    }
+                    w.flush().map_err(|e| e.to_string())?;
                     println!("{}", p.display());
                     let sp = out.with_extension(format!("{ext}.json"));
                     let json =
