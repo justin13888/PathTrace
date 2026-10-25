@@ -40,9 +40,23 @@ pub struct Pkt {
     /// Lost inside the receiving host, not on the path (`hostdrop.rxq-gap/1`): excluded from
     /// every loss statistic.
     pub host_drop: bool,
+    /// Received (a `pkt.rx` stamp recorded) with an unknown receive time, `rx` None: never a
+    /// loss (derivation.md "Late receive stamps at a clock step").
+    pub rx_untimed: bool,
 }
 
 impl Pkt {
+    /// Not received: no receive stamp recorded. A host drop is still `lost`; loss statistics
+    /// leave it out separately.
+    pub fn lost(&self) -> bool {
+        self.rx.is_none() && !self.rx_untimed
+    }
+
+    /// Received, with or without a known receive time.
+    pub fn received(&self) -> bool {
+        !self.lost()
+    }
+
     pub fn owd(&self) -> Option<i64> {
         Some(self.rx? - self.tx?)
     }
@@ -107,6 +121,8 @@ fn packets_marked(
     let Some(t) = raw.table(&format!("pkt[{dir}]")) else {
         return (out, ts_src, HostDropMarks::default());
     };
+    // The trace time each receive stamp is not expected to precede: its packet's transmit time.
+    let mut hints: Vec<Option<i64>> = Vec::with_capacity(t.n);
     for i in 0..t.n {
         let flow = t.get("flow", i).unwrap_or(-1);
         let sched = t.get("tx_sched", i);
@@ -130,7 +146,11 @@ fn packets_marked(
                 user
             }
         };
-        let rx = t.get("rx", i).and_then(|r| tb.real(rcv, r, tx.or(user)));
+        // First the receive times that do not depend on how far the path's delay reaches.
+        hints.push(tx.or(user));
+        let rx = t
+            .get("rx", i)
+            .and_then(|r| tb.real_within(rcv, r, tx.or(user), Some(i64::MAX)));
         out.push(Pkt {
             flow,
             seq: t.get("seq", i).unwrap_or(0),
@@ -147,7 +167,24 @@ fn packets_marked(
             rxq_drops: t.get("rxq_drops", i),
             rx_src: t.get("rx_src", i),
             host_drop: false,
+            rx_untimed: false,
         });
+    }
+    // Then the stamps a step leaves on either side, against the largest one-way delay of those
+    // (derivation.md "Late receive stamps at a clock step"). Rows map to `out` one to one.
+    let reach = out
+        .iter()
+        .zip(&hints)
+        .filter_map(|(p, h)| Some(p.rx? - (*h)?))
+        .max();
+    for (i, p) in out.iter_mut().enumerate() {
+        let Some(r) = t.get("rx", i) else {
+            continue;
+        };
+        if p.rx.is_none() {
+            p.rx = reach.and_then(|d| tb.real_within(rcv, r, hints[i], Some(d)));
+        }
+        p.rx_untimed = p.rx.is_none();
     }
     let marks = mark_host_drops(&mut out);
     (out, ts_src, marks)
@@ -226,7 +263,7 @@ fn mark_host_drops(pkts: &mut [Pkt]) -> HostDropMarks {
     let mut lost: Vec<(i64, i64, usize)> = pkts
         .iter()
         .enumerate()
-        .filter(|(_, p)| p.rx.is_none())
+        .filter(|(_, p)| p.lost())
         .filter_map(|(i, p)| Some((p.tx?, flow_sock.get(&p.flow).map_or(0, |x| x.0), i)))
         .collect();
     lost.sort_unstable();
@@ -327,7 +364,7 @@ fn in_any(t: i64, iv: &[(i64, i64)]) -> bool {
 /// recorded receive stamp (`pkt.rx_src`): `{kernel, user, unknown}`.
 fn rx_src_counts<'a>(pkts: impl IntoIterator<Item = &'a Pkt>) -> Value {
     let (mut kernel, mut user, mut unknown) = (0u64, 0u64, 0u64);
-    for p in pkts.into_iter().filter(|p| p.rx.is_some()) {
+    for p in pkts.into_iter().filter(|p| p.received()) {
         match p.rx_src {
             Some(0) => kernel += 1,
             Some(1) => user += 1,
@@ -430,12 +467,12 @@ pub fn chirp_segments(pkts: &[Pkt], sat: &[(i64, i64)]) -> Vec<(i64, i64, f64, u
 pub fn policer_burst(ps: &[&Pkt], rate_bps: f64) -> Option<f64> {
     let t_loss = ps
         .iter()
-        .filter(|p| p.rx.is_none() && !p.host_drop)
+        .filter(|p| p.lost() && !p.host_drop)
         .filter_map(|p| p.tx)
         .min()?;
     let mut sent: Vec<(i64, i64)> = ps
         .iter()
-        .filter(|p| p.rx.is_some())
+        .filter(|p| p.received())
         .filter_map(|p| Some((p.tx?, p.size)))
         .filter(|(t, _)| *t < t_loss)
         .collect();
@@ -460,7 +497,7 @@ const POLICER_QUEUE_NS: f64 = 2_000_000.0;
 pub fn class_policer(ps: &[&Pkt], depth: Option<f64>) -> Value {
     let lost: Vec<i64> = ps
         .iter()
-        .filter(|p| p.rx.is_none() && !p.host_drop)
+        .filter(|p| p.lost() && !p.host_drop)
         .filter_map(|p| p.tx)
         .collect();
     let verdict = |status: &str, confidence: f64| {
@@ -728,7 +765,12 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 ),
             )
             // Receive stamps by source (kernel, user space, not recorded), every received packet.
-            .with("rx_counts", rx_src_counts(&pkts)),
+            .with("rx_counts", rx_src_counts(&pkts))
+            // Received packets whose receive time is unknown (a clock step's stamp).
+            .with(
+                "rx_time_unknown",
+                pkts.iter().filter(|p| p.rx_untimed).count(),
+            ),
     );
     // Host drops at the receiver (excluded from every loss statistic) and drops in the
     // sender's own egress qdisc (docs/design/derivation.md, Host drops).
@@ -1016,9 +1058,9 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             ps.sort_by_key(|p| p.seq);
             let mut pending = false;
             for p in ps.iter().filter(|p| !p.host_drop) {
-                if p.rx.is_none() {
+                if p.lost() {
                     pending = true;
-                } else if pending {
+                } else if pending && p.rx.is_some() {
                     lost_anchor.insert((p.flow, p.seq));
                     pending = false;
                 }
@@ -1205,7 +1247,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
         tt.push(t);
         tid.push(*id as u64);
         tsent.push(ps.len() as u64);
-        trecv.push(recv.len() as u64);
+        trecv.push(ps.iter().filter(|p| p.received()).count() as u64);
         tdisp.push(d);
         tctx.push(ctx);
         for p in ps {
@@ -1286,7 +1328,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
             .count();
         let lost: Vec<i64> = ps
             .iter()
-            .filter(|p| p.rx.is_none() && !p.host_drop)
+            .filter(|p| p.lost() && !p.host_drop)
             .filter_map(|p| p.tx)
             .collect();
         losses_total += lost.len();
@@ -1455,7 +1497,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 && p.tx.is_some_and(quiet)
                 && !p.host_drop
         })
-        .map(|p| (p, p.rx.is_some()))
+        .map(|p| (p, p.received()))
         .collect();
     seqd.sort_by_key(|x| x.0.tx);
     let (mut ng, mut nb, mut gb, mut bg) = (0f64, 0f64, 0f64, 0f64);
@@ -1629,7 +1671,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
         for p in &pm {
             let e = sizes.entry(p.size).or_default();
             e.0 += 1;
-            if p.rx.is_some() {
+            if p.received() {
                 e.1 += 1;
             }
         }
@@ -1850,7 +1892,7 @@ pub fn derive_dir(raw: &Raw, tb: &TimeBase, dir: &str, others_loaded: &[(i64, i6
                 .count();
             let recv = light
                 .iter()
-                .filter(|p| p.tx.is_some_and(|t| t >= k && t < k + s) && p.rx.is_some())
+                .filter(|p| p.tx.is_some_and(|t| t >= k && t < k + s) && p.received())
                 .count();
             if sent >= 20 && recv == 0 {
                 cur.get_or_insert(k);
@@ -2157,7 +2199,166 @@ mod tests {
             rxq_drops: rx.and(drops),
             rx_src: rx.map(|_| 0),
             host_drop: false,
+            rx_untimed: false,
         }
+    }
+
+    fn rows(cols: &[(&str, Vec<i64>)]) -> crate::raw::Rows {
+        crate::raw::Rows {
+            n: cols[0].1.len(),
+            cols: cols
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.iter().copied().map(Some).collect()))
+                .collect(),
+        }
+    }
+
+    /// b → a packets every 100 ms over 30 s with a one-way delay of `owd` ns, received by an
+    /// endpoint `a` whose REALTIME steps back 150 ms at mono 10.5 s (between its clock pairs at
+    /// 10 s and 11 s). Returns the packets and each one's true arrival (trace ns).
+    fn stepped_receiver(owd: i64) -> (Vec<Pkt>, Vec<i64>) {
+        const T0: i64 = 1_000_000_000_000;
+        const S: i64 = 1_000_000_000;
+        let step_at = T0 + 10 * S + S / 2;
+        let real_a = |m: i64| m + 7 * S - if m >= step_at { 150_000_000 } else { 0 };
+        let mono: Vec<i64> = (0..=30).map(|s| T0 + s * S).collect();
+        let mut raw = Raw::default();
+        raw.tables.insert(
+            "pairs[a]".into(),
+            rows(&[
+                ("real", mono.iter().map(|&m| real_a(m)).collect()),
+                ("mono", mono.clone()),
+            ]),
+        );
+        raw.tables.insert(
+            "pairs[b]".into(),
+            rows(&[
+                ("real", mono.iter().map(|m| m + 7 * S).collect()),
+                ("mono", mono),
+            ]),
+        );
+        let tx: Vec<i64> = (0..290)
+            .map(|k| T0 + 50_000_000 + k * 100_000_000)
+            .collect();
+        let arrival: Vec<i64> = tx.iter().map(|t| t + owd).collect();
+        raw.tables.insert(
+            "pkt[b_to_a]".into(),
+            rows(&[
+                ("flow", vec![1; tx.len()]),
+                ("seq", (0..tx.len() as i64).collect()),
+                ("tx_intended", tx),
+                ("rx", arrival.iter().map(|&m| real_a(m)).collect()),
+            ]),
+        );
+        let tb = TimeBase {
+            a: crate::clock::RealToMono::from_raw(&raw, "a"),
+            b: crate::clock::RealToMono::from_raw(&raw, "b"),
+            off: Some(crate::clock::Offset::default()),
+            t0: T0,
+        };
+        let (pkts, _) = packets(&raw, &tb, "b_to_a");
+        (pkts, arrival.iter().map(|m| m - T0).collect())
+    }
+
+    #[test]
+    fn a_receive_stamp_the_paths_delay_puts_on_either_side_of_a_step_is_received_untimed() {
+        // Over 200 ms, a packet arriving in (10.5 s, 11.15 s) has a receive stamp that is also
+        // 150 ms earlier before the step, and still after its transmit time: /4 mapped it there.
+        let (pkts, arrival) = stepped_receiver(200_000_000);
+        let ambiguous = |a: i64| a > 10_500_000_000 && a < 11_150_000_000;
+        let mut untimed = 0;
+        for (p, &a) in pkts.iter().zip(&arrival) {
+            assert!(p.received() && !p.lost(), "arrival {a}");
+            if ambiguous(a) {
+                assert_eq!(p.rx, None, "arrival {a}");
+                assert!(p.rx_untimed);
+                untimed += 1;
+            } else {
+                // Including those before the step whose later candidate 200 ms cannot reach.
+                assert_eq!(p.rx, Some(a), "arrival {a}");
+                assert!(!p.rx_untimed);
+            }
+        }
+        assert_eq!(untimed, 6);
+        // Over 20 ms no candidate but the true one is within reach: every stamp maps.
+        let (pkts, arrival) = stepped_receiver(20_000_000);
+        for (p, &a) in pkts.iter().zip(&arrival) {
+            assert_eq!(p.rx, Some(a), "arrival {a}");
+            assert!(!p.rx_untimed);
+        }
+    }
+
+    #[test]
+    fn a_receive_stamp_no_clock_maps_is_received_untimed_not_lost() {
+        // A receive stamp /4 also left unmapped (b without an offset, or a receiver without
+        // clock pairs) is received with an unknown time; a packet without one stays lost.
+        const T0: i64 = 1_000_000_000_000;
+        const S: i64 = 1_000_000_000;
+        let pairs = || {
+            let mono: Vec<i64> = (0..=10).map(|s| T0 + s * S).collect();
+            rows(&[
+                ("real", mono.iter().map(|m| m + 7 * S).collect()),
+                ("mono", mono),
+            ])
+        };
+        let pkt = || {
+            let tx: Vec<i64> = (0..10).map(|k| T0 + S + k * 100_000_000).collect();
+            let rx = tx
+                .iter()
+                .enumerate()
+                .map(|(k, t)| (k % 5 != 4).then_some(t + 20_000_000 + 7 * S))
+                .collect();
+            let mut r = rows(&[
+                ("flow", vec![1; tx.len()]),
+                ("seq", (0..tx.len() as i64).collect()),
+                ("tx_intended", tx),
+            ]);
+            r.cols.insert("rx".into(), rx);
+            r
+        };
+        let check = |raw: &Raw, tb: &TimeBase, dir: &str| {
+            let (pkts, _) = packets(raw, tb, dir);
+            assert_eq!(pkts.len(), 10);
+            for (k, p) in pkts.iter().enumerate() {
+                assert_eq!(p.rx, None, "{dir} packet {k}");
+                if k % 5 == 4 {
+                    assert!(p.lost() && !p.rx_untimed, "{dir} packet {k}");
+                } else {
+                    assert!(p.received() && p.rx_untimed, "{dir} packet {k}");
+                }
+            }
+            let out = derive_dir(raw, tb, dir, &[]);
+            assert_eq!(
+                out.fields
+                    .pointer("/timestamps/rx_time_unknown")
+                    .and_then(Value::as_u64),
+                Some(8),
+                "{dir}"
+            );
+        };
+        // b without an offset: no receive stamp at b maps.
+        let mut raw = Raw::default();
+        raw.tables.insert("pairs[a]".into(), pairs());
+        raw.tables.insert("pairs[b]".into(), pairs());
+        raw.tables.insert("pkt[a_to_b]".into(), pkt());
+        let tb = TimeBase {
+            a: crate::clock::RealToMono::from_raw(&raw, "a"),
+            b: crate::clock::RealToMono::from_raw(&raw, "b"),
+            off: None,
+            t0: T0,
+        };
+        check(&raw, &tb, "a_to_b");
+        // A receiver without clock pairs: no receive stamp at a maps.
+        let mut raw = Raw::default();
+        raw.tables.insert("pairs[b]".into(), pairs());
+        raw.tables.insert("pkt[b_to_a]".into(), pkt());
+        let tb = TimeBase {
+            a: crate::clock::RealToMono::from_raw(&raw, "a"),
+            b: crate::clock::RealToMono::from_raw(&raw, "b"),
+            off: Some(crate::clock::Offset::default()),
+            t0: T0,
+        };
+        check(&raw, &tb, "b_to_a");
     }
 
     #[test]

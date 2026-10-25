@@ -47,18 +47,31 @@ fn echo_rtts(raw: &Raw, tb: &TimeBase) -> BTreeMap<i64, (usize, Vec<f64>)> {
         .iter()
         .filter_map(|p| Some(((p.flow, p.seq), p.tx?)))
         .collect();
+    // (flow, transmit time, echo stamp, RTT where it does not depend on the reach).
+    let mut rows: Vec<(i64, Option<i64>, i64, Option<i64>)> = Vec::new();
     for i in 0..echo.n {
         let (Some(f), Some(s), Some(r)) =
             (echo.get("flow", i), echo.get("seq", i), echo.get("rx", i))
         else {
             continue;
         };
+        let t = tx.get(&(f, s)).copied();
+        let rtt = t.and_then(|t| Some(tb.real_within("a", r, Some(t), Some(i64::MAX))? - t));
+        rows.push((f, t, r, rtt));
+    }
+    // An echo stamp lags its hint by the RTT: one a clock step leaves on either side is mapped
+    // against the largest RTT of the others (derivation.md "Late receive stamps at a clock
+    // step").
+    let reach = rows.iter().filter_map(|x| x.3).max();
+    for (f, t, r, rtt) in rows {
         let e = out.entry(f).or_default();
         e.0 += 1;
-        if let Some(t) = tx.get(&(f, s))
-            && let Some(r) = tb.real("a", r, Some(*t))
-        {
-            e.1.push((r - t) as f64);
+        let rtt = rtt.or_else(|| {
+            let t = t?;
+            Some(tb.real_within("a", r, Some(t), Some(reach?))? - t)
+        });
+        if let Some(d) = rtt {
+            e.1.push(d as f64);
         }
     }
     out
@@ -359,7 +372,7 @@ pub fn vald(raw: &Raw, tb: &TimeBase) -> Value {
             .collect();
         let loss = 1.0 - owd.len() as f64 / ps.len() as f64;
         // `loss` counts every packet without a one-way delay; its interval counts the same.
-        let received = ps.iter().filter(|p| p.rx.is_some()).count();
+        let received = ps.iter().filter(|p| p.received()).count();
         let (llo, lhi) = crate::dir::wilson((ps.len() - owd.len()) as f64, ps.len() as f64);
         refs.push(
             Value::map()

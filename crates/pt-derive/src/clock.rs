@@ -5,7 +5,7 @@ use pt_format::Value;
 use crate::raw::Raw;
 
 /// Method name of the REALTIME → MONO_RAW map.
-pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/4";
+pub const PAIRS_METHOD: &str = "clock.pairs-piecewise/5";
 
 /// Growth of boot − mono between consecutive clock pairs above which the endpoint was
 /// suspended (the prober's `STALL_NS`, probe.md §4.3).
@@ -259,15 +259,24 @@ impl RealToMono {
         (a.1 + ((real - a.0) as f64 * slope).round() as i64).clamp(a.1, b.1)
     }
 
+    /// [`RealToMono::map_within`] without a reach: for a stamp that lags its hint by less than
+    /// a step (a transmit stamp).
+    pub fn map(&self, real: i64, hint: Option<i64>) -> Option<i64> {
+        self.map_within(real, hint, None)
+    }
+
     /// Map a REALTIME value to MONO_RAW (derivation.md "Clock steps"). Each step-free segment
     /// whose mapping of `real` lies on its own side of the cuts beside it gives a candidate.
     /// Where several do, `hint` (a mono the stamp is not expected to precede) picks the
     /// earliest at or after `hint − HINT_SLACK_NS`, else the latest; without a hint the mono
-    /// is unknown. The hint is only a lower bound: a stamp that lags it by |J| − 1 ms or more
-    /// (a receive stamp over a one-way delay that large) maps |J| early when the wrong
-    /// candidate is the earlier one, and not to unknown. Across a suspend the map is a step: the earlier segment below the
+    /// is unknown. The hint is only a lower bound, so `reach`, where given, bounds how far the
+    /// stamp may lag it (a receive stamp's largest one-way delay): where a candidate after the
+    /// one picked lies at most `reach + HINT_SLACK_NS` after the hint, the stamp could be at
+    /// either and its mono is unknown (derivation.md "Late receive stamps at a clock step").
+    /// Without `reach` the earliest is taken, which is right for a stamp that lags its hint by
+    /// less than the step. Across a suspend the map is a step: the earlier segment below the
     /// placement, then the later one, never below the placement.
-    pub fn map(&self, real: i64, hint: Option<i64>) -> Option<i64> {
+    pub fn map_within(&self, real: i64, hint: Option<i64>, reach: Option<i64>) -> Option<i64> {
         if self.pts.is_empty() {
             return None;
         }
@@ -296,11 +305,13 @@ impl RealToMono {
             ([], _) => None,
             ([m], _) => Some(*m),
             (_, None) => None,
-            (c, Some(h)) => c
-                .iter()
-                .find(|&&m| m >= h - HINT_SLACK_NS)
-                .or(c.last())
-                .copied(),
+            (c, Some(h)) => match c.iter().position(|&m| m >= h - HINT_SLACK_NS) {
+                None => c.last().copied(),
+                Some(i) => match (c.get(i + 1), reach) {
+                    (Some(&later), Some(r)) if later - h <= r.saturating_add(HINT_SLACK_NS) => None,
+                    _ => Some(c[i]),
+                },
+            },
         }
     }
 
@@ -661,14 +672,29 @@ impl TimeBase {
     /// which picks the side of a clock step a stamp in its overlap lies on (derivation.md
     /// "Clock steps").
     pub fn real(&self, ep: &str, real: i64, hint: Option<i64>) -> Option<i64> {
+        self.real_within(ep, real, hint, None)
+    }
+
+    /// [`TimeBase::real`] for a stamp that may lag its hint by up to `reach` ns, a receive
+    /// stamp (derivation.md "Late receive stamps at a clock step"). `Some(i64::MAX)` maps only
+    /// the stamps whose mono does not depend on the reach.
+    pub fn real_within(
+        &self,
+        ep: &str,
+        real: i64,
+        hint: Option<i64>,
+        reach: Option<i64>,
+    ) -> Option<i64> {
         match ep {
             "a" => self
                 .a
-                .map(real, hint.map(|h| h + self.t0))
+                .map_within(real, hint.map(|h| h + self.t0), reach)
                 .map(|m| m - self.t0),
             _ => {
                 let off = self.off.as_ref()?;
-                let m = self.b.map(real, hint.map(|h| off.a_to_b(h + self.t0)))?;
+                let m = self
+                    .b
+                    .map_within(real, hint.map(|h| off.a_to_b(h + self.t0)), reach)?;
                 Some(off.b_to_a(m) - self.t0)
             }
         }
@@ -775,6 +801,40 @@ mod tests {
         // Away from the step, each side's own offset.
         assert_eq!(m.map(s(9.5) + 7_000_000_000, None), Some(s(9.5)));
         assert_eq!(m.map(s(11.5) + 7_300_000_000, None), Some(s(11.5)));
+    }
+
+    #[test]
+    fn a_later_candidate_within_the_reach_leaves_a_receive_stamp_unknown() {
+        // REALTIME steps back 150 ms (ntpd's step threshold) between the pairs at mono 10 s and
+        // 11 s (real = mono + 7 s before it, + 6.85 s after). One real stamp is at mono 10.45 s
+        // before the step or at 10.6 s after it.
+        let mut raw = Raw::default();
+        raw.tables
+            .insert("pairs[a]".into(), stepped_pairs(-150_000_000));
+        let m = RealToMono::from_raw(&raw, "a");
+        let s = |x: f64| T0 + (x * 1e9) as i64;
+        let r = s(10.6) + 6_850_000_000;
+        // Sent at 10.4 s: /4 took the earlier candidate, 150 ms early if it arrived after
+        // 200 ms. A path that reaches 200 ms could deliver it at either.
+        let h = Some(s(10.4));
+        assert_eq!(m.map(r, h), Some(s(10.45)));
+        assert_eq!(m.map_within(r, h, Some(200_000_000)), None);
+        assert_eq!(m.map_within(r, h, Some(199_500_000)), None);
+        assert_eq!(m.map_within(r, h, Some(i64::MAX)), None);
+        // A path whose delay stays below 200 ms − 1 ms cannot have delivered it at 10.6 s.
+        assert_eq!(m.map_within(r, h, Some(198_000_000)), Some(s(10.45)));
+        // Sent after the earlier candidate: only the later is at or after the hint.
+        assert_eq!(m.map_within(r, Some(s(10.58)), Some(0)), Some(s(10.6)));
+        assert_eq!(
+            m.map_within(r, Some(s(10.58)), Some(i64::MAX)),
+            Some(s(10.6))
+        );
+        // One candidate: the reach does not matter.
+        let one = s(5.0) + 7_000_000_000;
+        assert_eq!(
+            m.map_within(one, Some(s(4.0)), Some(i64::MAX)),
+            Some(s(5.0))
+        );
     }
 
     /// Deterministic uniform [0, 1).
