@@ -16,7 +16,7 @@ pub const CHIRP_METHOD: &str = "capacity.chirp-dispersion/1";
 /// Policer rate and token-bucket burst (derivation.md, `policer`).
 pub const POLICER_METHOD: &str = "policer.lossy-flat/3";
 /// The policer rule applied to one P7 class saturation (derivation.md, PLCY `policer`).
-pub const CLASS_POLICER_METHOD: &str = "policer.class-lossy-flat/1";
+pub const CLASS_POLICER_METHOD: &str = "policer.class-lossy-flat/2";
 
 /// One transmitted probe packet on the trace time axis.
 #[derive(Debug, Clone)]
@@ -491,7 +491,7 @@ pub fn policer_burst(ps: &[&Pkt], rate_bps: f64) -> Option<f64> {
 /// Queueing delay below which losses show a policer, which queues nothing (`queue.loss-onset/3`).
 const POLICER_QUEUE_NS: f64 = 2_000_000.0;
 
-/// Policer verdict of one P7 class saturation (`policer.class-lossy-flat/1`, derivation.md).
+/// Policer verdict of one P7 class saturation (`policer.class-lossy-flat/2`, derivation.md).
 /// `ps` is the flow; `depth` is the median, over its losses, of the maximum queueing delay in
 /// the 500 ms before each (None when no loss had one). Host drops are not losses.
 pub fn class_policer(ps: &[&Pkt], depth: Option<f64>) -> Value {
@@ -521,20 +521,7 @@ pub fn class_policer(ps: &[&Pkt], depth: Option<f64>) -> Value {
             .with("detected", false)
             .with("depth_time_ns", d);
     }
-    // After the first loss the bucket is empty: what arrives comes at the token rate.
-    let mut after: Vec<(i64, i64)> = ps
-        .iter()
-        .filter(|p| p.tx.is_some_and(|t| t >= t_loss) && !p.host_drop)
-        .filter_map(|p| Some((p.rx?, p.size)))
-        .collect();
-    after.sort_unstable();
-    let rate = match (after.first(), after.last()) {
-        (Some(a), Some(b)) if after.len() >= 2 && b.0 > a.0 => {
-            let bytes: i64 = after[1..].iter().map(|x| x.1).sum();
-            Some(bytes as f64 * 8.0 * 1e9 / (b.0 - a.0) as f64)
-        }
-        _ => None,
-    };
+    let rate = class_policer_rate(ps, t_loss);
     verdict("estimated", 0.6)
         .with("detected", true)
         .with("depth_time_ns", d)
@@ -542,7 +529,39 @@ pub fn class_policer(ps: &[&Pkt], depth: Option<f64>) -> Value {
         .with("burst_bytes", rate.and_then(|r| policer_burst(ps, r)))
 }
 
-/// `policer.class-lossy-flat/1` for a UDP class that had no P7 saturation.
+/// Token rate (bit/s) of one class saturation's policer (`policer.class-lossy-flat/2`): the
+/// median delivery rate of the 100 ms transmit-time bins, from the first loss (`t_loss`) to the
+/// flow's last transmission, that hold a loss. A policer queues nothing, so the bytes a bin
+/// sent and got delivered arrive at the rate they passed the policer. A bin with a loss was
+/// sent above the token rate, so it shows that rate, where a bin without one may be limited by
+/// the sender backing off. Host drops are neither delivered nor lost. None when no full bin
+/// holds a loss.
+fn class_policer_rate(ps: &[&Pkt], t_loss: i64) -> Option<f64> {
+    const BIN_NS: i64 = 100_000_000;
+    let last = ps.iter().filter_map(|p| p.tx).max()?;
+    let n = usize::try_from((last - t_loss) / BIN_NS).ok()?;
+    let (mut bytes, mut lossy) = (vec![0i64; n], vec![false; n]);
+    for p in ps.iter().filter(|p| !p.host_drop) {
+        let Some(k) =
+            p.tx.and_then(|t| usize::try_from((t - t_loss).div_euclid(BIN_NS)).ok())
+                .filter(|k| *k < n)
+        else {
+            continue;
+        };
+        if p.lost() {
+            lossy[k] = true;
+        } else {
+            bytes[k] += p.size;
+        }
+    }
+    let mut rates: Vec<f64> = (0..n)
+        .filter(|k| lossy[*k])
+        .map(|k| bytes[k] as f64 * 8.0 * 1e9 / BIN_NS as f64)
+        .collect();
+    median(&mut rates)
+}
+
+/// `policer.class-lossy-flat/2` for a UDP class that had no P7 saturation.
 pub fn class_policer_absent() -> Value {
     field("unknown", CLASS_POLICER_METHOD, 0.0)
         .with("scope", "class")
@@ -609,7 +628,7 @@ pub struct DirOut {
     /// Saturated rate per phase (for coupling).
     pub phase_rate: BTreeMap<i64, f64>,
     pub opps: Vec<(i64, i64)>,
-    /// Policer verdict of each P7 class saturation, by flow (`policer.class-lossy-flat/1`).
+    /// Policer verdict of each P7 class saturation, by flow (`policer.class-lossy-flat/2`).
     pub class_policers: BTreeMap<i64, Value>,
 }
 
@@ -2098,7 +2117,7 @@ mod tests {
         assert_eq!(policer_burst(&ok.iter().collect::<Vec<_>>(), rate), None);
     }
 
-    /// `policer.class-lossy-flat/1`: a class saturation through a 10 Mbit/s token bucket of
+    /// `policer.class-lossy-flat/2`: a class saturation through a 10 Mbit/s token bucket of
     /// 30 000 B, fed at 20 Mbit/s, gives the bucket's rate and burst; tail drop at a full queue,
     /// a lossless saturation and a loss without a queueing delay give no policer.
     #[test]
@@ -2144,6 +2163,54 @@ mod tests {
         assert_eq!(v.get("detected").and_then(Value::as_bool), Some(false));
         assert_eq!(v.get("losses").and_then(Value::as_u64), Some(0));
         assert_eq!(class_policer_absent().get("detected"), Some(&Value::Null));
+    }
+
+    /// `policer.class-lossy-flat/2`: a class saturation that overdrives a 10 Mbit/s bucket for
+    /// 0.6 s and then backs off to 1.5 Mbit/s for 2.4 s still gives the token rate, from its
+    /// lossy bins only. `/1` averaged the whole lossy period and read about 3.1 Mbit/s here.
+    #[test]
+    fn class_policer_rate_ignores_the_sender_limited_backoff() {
+        let (rate, bucket) = (10e6, 30_000.0);
+        let mut tx: Vec<i64> = (0..1_000i64).map(|k| k * 600_000).collect();
+        tx.extend((1..=300i64).map(|k| 600_000_000 + k * 8_000_000));
+        let (mut tokens, mut prev) = (bucket, 0i64);
+        let mut ps = Vec::new();
+        for (k, t) in tx.into_iter().enumerate() {
+            tokens = (tokens + rate * (t - prev) as f64 / 8e9).min(bucket);
+            prev = t;
+            let pass = tokens >= 1500.0;
+            if pass {
+                tokens -= 1500.0;
+            }
+            let mut p = pk(16, k as i64, t, pass.then_some(t + 5_000_000), None);
+            p.kind = "class-sat".into();
+            ps.push(p);
+        }
+        // The back-off loses nothing: every loss is in the overdriven 0.6 s.
+        assert!(
+            ps.iter()
+                .filter(|p| p.lost())
+                .all(|p| p.tx.unwrap() < 600_000_000)
+        );
+        let v = class_policer(&ps.iter().collect::<Vec<_>>(), Some(100_000.0));
+        let r = v.get("rate_bps").and_then(Value::as_f64).unwrap();
+        assert!((r / rate - 1.0).abs() < 0.02, "{r}");
+        // A lossy period shorter than one bin gives no rate.
+        let short: Vec<Pkt> = (0..100i64)
+            .map(|k| {
+                pk(
+                    16,
+                    k,
+                    k * 600_000,
+                    (k % 2 == 0).then_some(k * 600_000),
+                    None,
+                )
+            })
+            .collect();
+        let v = class_policer(&short.iter().collect::<Vec<_>>(), Some(100_000.0));
+        assert_eq!(v.get("detected").and_then(Value::as_bool), Some(true));
+        assert_eq!(v.get("rate_bps"), Some(&Value::Null));
+        assert_eq!(v.get("burst_bytes"), Some(&Value::Null));
     }
 
     /// The drain cross-check counts what arrives while the last packet's queue empties.

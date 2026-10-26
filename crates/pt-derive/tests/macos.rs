@@ -539,7 +539,7 @@ fn udp_classes_reachable_without_tx_stamps() {
     assert_eq!(none.get("reachable").and_then(Value::as_bool), Some(false));
 }
 
-/// `policer.class-lossy-flat/1`: a policed `udp/high-port` saturation from a macOS initiator
+/// `policer.class-lossy-flat/2`: a policed `udp/high-port` saturation from a macOS initiator
 /// (user-space transmit times) gets its own policer verdict on its PLCY entry; the classes
 /// P7 did not saturate are unknown, not undetected.
 #[test]
@@ -555,7 +555,7 @@ fn policed_class_has_its_own_policer_verdict() {
             .unwrap()
     };
     let hp = class("udp/high-port");
-    assert_eq!(s(hp, "method"), Some("policer.class-lossy-flat/1"));
+    assert_eq!(s(hp, "method"), Some("policer.class-lossy-flat/2"));
     assert_eq!(s(hp, "status"), Some("estimated"));
     assert_eq!(s(hp, "scope"), Some("class"));
     assert_eq!(hp.get("detected").and_then(Value::as_bool), Some(true));
@@ -575,7 +575,7 @@ fn policed_class_has_its_own_policer_verdict() {
         .and_then(|d| d.get("methods"))
         .and_then(Value::as_array)
         .unwrap();
-    assert!(methods.contains(&Value::from("policer.class-lossy-flat/1")));
+    assert!(methods.contains(&Value::from("policer.class-lossy-flat/2")));
 }
 
 /// probe.md §9.9: through a tunnel, the five verdict groups are flagged and no others.
