@@ -547,18 +547,12 @@ fn fmt(v: Option<f64>) -> String {
 /// The UDP classes P7 saturates (probe.md §7), each with a PLCY policer verdict.
 const UDP_CLASSES: [&str; 3] = ["udp/high-port", "udp/443", "udp/443-quic"];
 
-/// `policer.class-lossy-flat/1` against the truth: per `(class, policed)`, a reachable class
+/// `policer.class-lossy-flat/2` against the truth: per `(class, policed)`, a reachable class
 /// is `detected` exactly when policed, and a policed one is delivered at the 5 Mbit/s token
-/// rate. An unreachable policed class has no saturation to judge and is skipped, but at least
-/// one policed class must be judged. An unpoliced class is the control that a verdict is not
-/// credited to every class, so it fails when it is not reachable. With `rate_gated` false the
-/// rate is recorded but does not decide the check.
-fn class_policer_checks(
-    c: &mut Vec<Check>,
-    plcy: &Value,
-    classes: &[(&str, bool)],
-    rate_gated: bool,
-) {
+/// rate (±15%). An unreachable policed class has no saturation to judge and is skipped, but at
+/// least one policed class must be judged. An unpoliced class is the control that a verdict is
+/// not credited to every class, so it fails when it is not reachable.
+fn class_policer_checks(c: &mut Vec<Check>, plcy: &Value, classes: &[(&str, bool)]) {
     let mut judged = 0;
     for &(class, policed) in classes {
         let entry = format!("/classes/{}", class.replace('/', "~1"));
@@ -592,17 +586,12 @@ fn class_policer_checks(
             let r = plcy
                 .pointer(&format!("{entry}/policer/rate_bps"))
                 .and_then(num);
-            let name = if rate_gated {
-                format!("{class} policer rate (±15%)")
-            } else {
-                format!("{class} policer rate (±15%, recorded only: #142)")
-            };
             chk(
                 c,
-                &name,
+                &format!("{class} policer rate (±15%)"),
                 format!("{:.0}", ip_rate(5e6)),
                 fmt(r),
-                !rate_gated || rel_ok(r, ip_rate(5e6), 0.15),
+                rel_ok(r, ip_rate(5e6), 0.15),
             );
         }
     }
@@ -877,13 +866,12 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                 rel_ok(r, ip_rate(5e6), 0.15),
             );
             // Every packet is policed, so every reachable UDP class is.
-            class_policer_checks(&mut c, &t.plcy, &UDP_CLASSES.map(|k| (k, true)), true);
+            class_policer_checks(&mut c, &t.plcy, &UDP_CLASSES.map(|k| (k, true)));
         }
         "policer-udp443" => {
             // Only UDP port 443 is policed: both classes on it, never the high port. The
-            // class saturation backs off below the token rate after its losses, so
-            // `policer.class-lossy-flat/1` reads the rate low here (2.9-3.6 Mbit/s).
-            // TODO(#142): gate the rate once the method takes it over the policed stretches.
+            // class saturation backs off below the token rate after its losses, so the rate
+            // comes from its lossy bins only (`policer.class-lossy-flat/2`).
             class_policer_checks(
                 &mut c,
                 &t.plcy,
@@ -892,7 +880,6 @@ pub fn checks(sc: &Scenario, t: &Trace, dir: &Path) -> Vec<Check> {
                     ("udp/443", true),
                     ("udp/443-quic", true),
                 ],
-                false,
             );
         }
         "aqm-ecn" => {
@@ -2081,9 +2068,9 @@ mod tests {
         ("udp/443-quic", true),
     ];
 
-    fn passes(p: &Value, classes: &[(&str, bool)], rate_gated: bool) -> (bool, Vec<Check>) {
+    fn passes(p: &Value, classes: &[(&str, bool)]) -> (bool, Vec<Check>) {
         let mut c = Vec::new();
-        class_policer_checks(&mut c, p, classes, rate_gated);
+        class_policer_checks(&mut c, p, classes);
         (c.iter().all(|k| k.pass), c)
     }
 
@@ -2091,13 +2078,27 @@ mod tests {
     fn one_port_policer_passes_on_the_truth() {
         let p = plcy(&[
             ("udp/high-port", true, false, 0.0),
-            ("udp/443", true, true, 3.2e6),
-            ("udp/443-quic", true, true, 3.5e6),
+            ("udp/443", true, true, 4.8e6),
+            ("udp/443-quic", true, true, 5.1e6),
         ]);
-        let (ok, c) = passes(&p, &ONE_PORT, false);
+        let (ok, c) = passes(&p, &ONE_PORT);
         assert!(ok, "{c:?}");
-        // Recorded-only: the low rate is reported, but a gated check fails it.
-        assert!(!passes(&p, &ONE_PORT, true).0);
+    }
+
+    /// The rate is gated: the 3.0-3.6 Mbit/s `/1` read on a backed-off class saturation fails.
+    #[test]
+    fn one_port_policer_rate_off_by_more_than_15_percent_fails() {
+        let p = plcy(&[
+            ("udp/high-port", true, false, 0.0),
+            ("udp/443", true, true, 3.04e6),
+            ("udp/443-quic", true, true, 4.9e6),
+        ]);
+        let (ok, c) = passes(&p, &ONE_PORT);
+        assert!(!ok);
+        assert!(
+            c.iter()
+                .any(|k| !k.pass && k.name == "udp/443 policer rate (±15%)")
+        );
     }
 
     #[test]
@@ -2107,7 +2108,7 @@ mod tests {
             ("udp/443", true, true, 4.9e6),
             ("udp/443-quic", true, true, 4.9e6),
         ]);
-        let (ok, c) = passes(&p, &ONE_PORT, true);
+        let (ok, c) = passes(&p, &ONE_PORT);
         assert!(!ok);
         assert!(
             c.iter()
@@ -2122,7 +2123,7 @@ mod tests {
             ("udp/443", true, true, 4.9e6),
             ("udp/443-quic", true, true, 4.9e6),
         ]);
-        assert!(!passes(&p, &ONE_PORT, true).0);
+        assert!(!passes(&p, &ONE_PORT).0);
     }
 
     #[test]
@@ -2133,13 +2134,13 @@ mod tests {
             ("udp/443", false, false, 0.0),
             ("udp/443-quic", true, true, 4.8e6),
         ]);
-        let (ok, c) = passes(&some, &all, true);
+        let (ok, c) = passes(&some, &all);
         assert!(ok, "{c:?}");
         let none = plcy(&[
             ("udp/high-port", false, false, 0.0),
             ("udp/443", false, false, 0.0),
             ("udp/443-quic", false, false, 0.0),
         ]);
-        assert!(!passes(&none, &all, true).0);
+        assert!(!passes(&none, &all).0);
     }
 }
