@@ -18,7 +18,7 @@ Which release to use: for every field session, both machines run v1.1.0 (or a la
 1. Connect to the network and note what it is (class, venue).
 2. Close large downloads, sync clients and video calls on the laptop. Local traffic competes with the probe (interface counters are recorded, so it is visible, but it biases capacity).
 3. Plug in the laptop: power saving adds timing noise. On a Mac, the probe holds an idle-sleep assertion for the whole session, so `caffeinate` is not needed while `doctor` reports `sleep assertion` ok; if it warns, start the probe as `caffeinate -i pathtrace probe …` and keep the lid open.
-4. If the responder is reachable only over Tailscale, check that the tailnet has a direct path to it and save the output next to the trace: `tailscale ping <host> | tee "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-ping.txt"` from `~/traces`. It must end with `via <ip>:<port>`, not `via DERP(<region>)`; on DERP, do not record ([responder-deploy.md](responder-deploy.md#overlay-responder-tailscale)). Repeat it right after the session. On a Mac without the Tailscale app's CLI integration turned on, there is no `tailscale` on `PATH`: run `/Applications/Tailscale.app/Contents/MacOS/Tailscale ping <host>` instead ([responder-deploy.md](responder-deploy.md#overlay-responder-tailscale)).
+4. If the responder is reachable only over Tailscale, check that the tailnet has a direct path to it and save the output next to the trace: `tailscale ping <host> | tee "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-ping.txt"` from `~/traces`. It should end with `via <ip>:<port>`. On `via DERP(<region>)` the session still runs but records the relay: tag it `--tag derp` ([trust checklist](#macos-initiator-over-tailscale-trust-checklist) step 1.2, [responder-deploy.md](responder-deploy.md#overlay-responder-tailscale)). Repeat it right after the session. On a Mac without the Tailscale app's CLI integration turned on, there is no `tailscale` on `PATH`: run `/Applications/Tailscale.app/Contents/MacOS/Tailscale ping <host>` instead ([responder-deploy.md](responder-deploy.md#overlay-responder-tailscale)).
 5. Run `pathtrace doctor vm`. It exits 1 only when a session cannot work (kernel older than 6.1 or macOS older than 15, no key, the responder's port unreachable, intercepted or not tested for interception on every address family). Read the warnings too:
    - `tcp/<port> not intercepted` warns with an answer, or `tcp/<port> reachable` failed on every port: a captive portal. Log in through a browser, then run `doctor` again. If it warns `not tested`, the connection failed the second time; run `doctor` again. A trace taken behind an unopened portal records the portal, not the path.
    - `udp/<port> not refused` warns `refused`: this network (or the responder) rejects that UDP port. The session still runs and records the UDP classes on that port as blocked (all of them, over a TCP-only session, when the responder port itself is refused). `not refused` does not prove that UDP arrives: only a session can, so the probe's own result is the final word.
@@ -83,14 +83,14 @@ For a MacBook capturing to a Linux responder that is reachable only over Tailsca
    mkdir -p "$D" && cd "$D"
    ```
 
-2. Direct path, not DERP:
+2. Direct path or DERP relay (direct preferred):
 
    ```sh
    tailscale netcheck > "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-netcheck.txt"
    tailscale ping <host> | tee "$(date -u +%Y%m%dT%H%M%SZ)-tailscale-ping.txt"
    ```
 
-   The last line must read `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`. On `via DERP(<region>)` the traffic is relayed over TCP and a trace would record the relay: do not record. Run `tailscale ping` again (a direct path often comes up after a few pings); if it stays on DERP and the `*-tailscale-netcheck.txt` file just written shows `UDP: false`, this network blocks Tailscale's direct UDP, so record it without the overlay (a public responder) or not at all.
+   A direct path ends with `pong from <host> (100.x.y.z) via <public-ip>:<port> in N ms`. `via DERP(<region>)` (or `direct connection not established`) is a warning, not a stop: the traffic is relayed through a DERP server over TCP, so the trace records the relayed path. Run `tailscale ping` again first (a direct path often comes up after a few pings). If it stays on DERP (CGNAT on mobile networks, `MappingVariesByDestIP: true` or `UDP: false` in the netcheck file just written), record anyway and mark it: pass `--tag derp` to the probe (`--tag direct` on a direct path), as the path the ping showed right before the session. The trace itself never says whether the overlay was relayed (ADR 0015), so the tag and the ping files are the only record. Read a DERP trace as a measurement of the relay: delay, jitter and loss include the relay hop and its TCP retransmissions, capacity is the relay's, and it compares only with other DERP traces, not with direct ones. To record the network itself, use a public responder without the overlay.
 3. Power: plug in, and turn off Low Power Mode (System Settings > Battery).
 4. Run everything from a Terminal window in the foreground, with other work closed: not from a launchd job, a CI runner, `taskpolicy` or a script started in the background. A process started that way runs under a QoS clamp or the background policy and caps the pacer.
 5. On the Mac, `pathtrace doctor vm-ts`. Every line must read `ok`, except these warnings:
@@ -125,7 +125,7 @@ pathtrace probe vm-ts --class <class> --label "<venue / notes>" [--mobility …]
 | `train` | `--mobility train --profile deep` (`--track-secs`, default 600) |
 | `in-flight` | `--mobility flight --profile deep` |
 
-The probe prints `session: <session> (trace <id>; session file …)` before measuring: note `<session>` (8 hex digits) with the venue. On a Mac it may print `warning: pacer wakes …` next; that is the `doctor` pacing warning from step 1.5, and the session continues. Right after the session, run the `tailscale ping` of step 1.2 again: a path that switched to DERP during the session changes what the trace describes.
+The probe prints `session: <session> (trace <id>; session file …)` before measuring: note `<session>` (8 hex digits) with the venue. On a Mac it may print `warning: pacer wakes …` next; that is the `doctor` pacing warning from step 1.5, and the session continues. Right after the session, run the `tailscale ping` of step 1.2 again: a path that switched between direct and DERP during the session changes what the trace describes, and the session's tag (step 1.2) names only the path it started on. Note the switch in `notes.txt`; in the trace it may show as a `path_change` in base delay.
 
 ### 3. After the session: what `trace info` must show
 
